@@ -1,0 +1,51 @@
+# Binarios compilados
+chronos_program
+*.o
+*.asm
+output.asm
+output.o
+api_server
+api_monitor
+api_client
+http_*
+tcp_*
+json_test*
+test_json_*
+test_write_*
+test_suite
+post_client
+
+# Binarios del compilador
+compiler/bootstrap-c/chronos_program
+compiler/bootstrap-c/*_backup*
+compiler/bootstrap-c/*_old*
+compiler/bootstrap-c/output.*
+compiler/bootstrap-c/test_*
+compiler/bootstrap-c/api_*
+compiler/bootstrap-c/http_*
+compiler/bootstrap-c/tcp_*
+compiler/bootstrap-c/json_*
+compiler/bootstrap-c/post_*
+
+# Archivos temporales
+*.tmp
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Output de benchmarks
+benchmark_*.txt
+salida_*.txt
+*_output.txt
+
+# Archivos de test temporales
+test_input.ch
+test_output.txt
+
+# Self-hosting temporales
+chronos_self/
+
+# Directorios de build
+build/
+dist/

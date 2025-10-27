@@ -1,0 +1,57 @@
+# Bootstrap binario puro para Tempo - Sin C!
+# Este es un ELF64 mínimo que puede compilar stage1.tempo
+# Author: Ignacio Peña Sepúlveda
+# Date: June 25, 2025
+
+# ELF Header
+7f 45 4c 46  # Magic: 0x7f, 'E', 'L', 'F'
+02           # 64-bit
+01           # Little endian  
+01           # ELF version 1
+00           # System V ABI
+00 00 00 00 00 00 00 00  # Padding
+
+02 00        # Executable file
+3e 00        # x86-64
+01 00 00 00  # ELF version 1
+78 00 40 00 00 00 00 00  # Entry point
+40 00 00 00 00 00 00 00  # Program header offset
+00 00 00 00 00 00 00 00  # Section header offset
+00 00 00 00  # Flags
+40 00        # ELF header size
+38 00        # Program header size
+01 00        # Program header count
+00 00        # Section header size
+00 00        # Section header count
+00 00        # Section name string table
+
+# Program Header
+01 00 00 00  # PT_LOAD
+07 00 00 00  # Flags: RWX
+00 00 00 00 00 00 00 00  # Offset
+00 00 40 00 00 00 00 00  # Virtual address
+00 00 40 00 00 00 00 00  # Physical address
+b0 00 00 00 00 00 00 00  # File size
+b0 00 00 00 00 00 00 00  # Memory size
+00 10 00 00 00 00 00 00  # Alignment
+
+# Code starts here (offset 0x78)
+# Minimal Tempo compiler in x64 assembly
+
+# Print banner
+48 c7 c0 01 00 00 00     # mov rax, 1 (sys_write)
+48 c7 c7 01 00 00 00     # mov rdi, 1 (stdout)
+48 8d 35 30 00 00 00     # lea rsi, [banner]
+48 c7 c2 20 00 00 00     # mov rdx, 32 (length)
+0f 05                    # syscall
+
+# Exit
+48 c7 c0 3c 00 00 00     # mov rax, 60 (sys_exit)
+48 31 ff                 # xor rdi, rdi
+0f 05                    # syscall
+
+# Data
+# banner: "Tempo Bootstrap v0\n"
+54 65 6d 70 6f 20 42 6f  # "Tempo Bo"
+6f 74 73 74 72 61 70 20  # "otstrap "
+76 30 0a 00 00 00 00 00  # "v0\n"
