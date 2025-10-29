@@ -108,6 +108,110 @@ fn encode_leave() -> i64 {
     return code;
 }
 
+// Encodes: push rax
+// Opcode: 50
+fn encode_push_rax() -> i64 {
+    let code: i64 = malloc(8);
+    let bytes: *u8 = code;
+
+    bytes[0] = 80;  // 0x50
+
+    return code;
+}
+
+// Encodes: pop rbx
+// Opcode: 5B
+fn encode_pop_rbx() -> i64 {
+    let code: i64 = malloc(8);
+    let bytes: *u8 = code;
+
+    bytes[0] = 91;  // 0x5B
+
+    return code;
+}
+
+// Encodes: add rax, rbx
+// Opcode: 48 01 D8
+fn encode_add_rax_rbx() -> i64 {
+    let code: i64 = malloc(8);
+    let bytes: *u8 = code;
+
+    bytes[0] = 72;   // REX.W (0x48)
+    bytes[1] = 1;    // ADD (0x01)
+    bytes[2] = 216;  // ModR/M: rax += rbx (0xD8)
+
+    return code;
+}
+
+// Encodes: sub rax, rbx
+// Opcode: 48 29 D8
+fn encode_sub_rax_rbx() -> i64 {
+    let code: i64 = malloc(8);
+    let bytes: *u8 = code;
+
+    bytes[0] = 72;   // REX.W (0x48)
+    bytes[1] = 41;   // SUB (0x29)
+    bytes[2] = 216;  // ModR/M: rax -= rbx (0xD8)
+
+    return code;
+}
+
+// Encodes: imul rax, rbx
+// Opcode: 48 0F AF C3
+fn encode_imul_rax_rbx() -> i64 {
+    let code: i64 = malloc(8);
+    let bytes: *u8 = code;
+
+    bytes[0] = 72;   // REX.W (0x48)
+    bytes[1] = 15;   // Two-byte opcode prefix (0x0F)
+    bytes[2] = 175;  // IMUL (0xAF)
+    bytes[3] = 195;  // ModR/M: rax *= rbx (0xC3)
+
+    return code;
+}
+
+// Encodes: xor rdx, rdx
+// Opcode: 48 31 D2
+fn encode_xor_rdx_rdx() -> i64 {
+    let code: i64 = malloc(8);
+    let bytes: *u8 = code;
+
+    bytes[0] = 72;   // REX.W (0x48)
+    bytes[1] = 49;   // XOR (0x31)
+    bytes[2] = 210;  // ModR/M: rdx ^= rdx (0xD2)
+
+    return code;
+}
+
+// Encodes: div rbx
+// Opcode: 48 F7 F3
+fn encode_div_rbx() -> i64 {
+    let code: i64 = malloc(8);
+    let bytes: *u8 = code;
+
+    bytes[0] = 72;   // REX.W (0x48)
+    bytes[1] = 247;  // Unary group (0xF7)
+    bytes[2] = 243;  // ModR/M: div rbx (0xF3)
+
+    return code;
+}
+
+// Encodes: call offset (relative 32-bit)
+// Opcode: E8 [rel32]
+// For now, just placeholder - needs relocation
+fn encode_call_rel(offset: i64) -> i64 {
+    let code: i64 = malloc(8);
+    let bytes: *u8 = code;
+
+    bytes[0] = 232;  // CALL rel32 (0xE8)
+    bytes[1] = offset % 256;
+    bytes[2] = (offset / 256) % 256;
+    bytes[3] = (offset / 65536) % 256;
+    bytes[4] = (offset / 16777216) % 256;
+
+    return code;
+}
+
 // ==== String Utilities ====
 
 fn str_equals(s1: *i8, s2: *i8) -> i64 {
@@ -234,6 +338,55 @@ fn parse_instruction(line: *i8) -> i64 {
         return instr_addr;
     }
 
+    // Check for "push rax"
+    if (str_starts_with(line + pos, "push rax")) {
+        instr.bytes = encode_push_rax();
+        instr.length = 1;
+        return instr_addr;
+    }
+
+    // Check for "pop rbx"
+    if (str_starts_with(line + pos, "pop rbx")) {
+        instr.bytes = encode_pop_rbx();
+        instr.length = 1;
+        return instr_addr;
+    }
+
+    // Check for "add rax, rbx"
+    if (str_starts_with(line + pos, "add rax, rbx")) {
+        instr.bytes = encode_add_rax_rbx();
+        instr.length = 3;
+        return instr_addr;
+    }
+
+    // Check for "sub rax, rbx"
+    if (str_starts_with(line + pos, "sub rax, rbx")) {
+        instr.bytes = encode_sub_rax_rbx();
+        instr.length = 3;
+        return instr_addr;
+    }
+
+    // Check for "imul rax, rbx"
+    if (str_starts_with(line + pos, "imul rax, rbx")) {
+        instr.bytes = encode_imul_rax_rbx();
+        instr.length = 4;
+        return instr_addr;
+    }
+
+    // Check for "xor rdx, rdx"
+    if (str_starts_with(line + pos, "xor rdx, rdx")) {
+        instr.bytes = encode_xor_rdx_rdx();
+        instr.length = 3;
+        return instr_addr;
+    }
+
+    // Check for "div rbx"
+    if (str_starts_with(line + pos, "div rbx")) {
+        instr.bytes = encode_div_rbx();
+        instr.length = 3;
+        return instr_addr;
+    }
+
     // Unknown instruction - return empty
     instr.bytes = 0;
     instr.length = 0;
@@ -317,9 +470,53 @@ fn main() -> i64 {
     }
 
     println("");
+
+    // Test 4: add rax, rbx
+    print("4. add rax, rbx → ");
+    let instr4: *Instruction = parse_instruction("add rax, rbx");
+    if (instr4.length == 3) {
+        print("✅ ");
+        print_int(instr4.length);
+        println(" bytes");
+    } else {
+        println("❌ Failed");
+    }
+
+    // Test 5: imul rax, rbx
+    print("5. imul rax, rbx → ");
+    let instr5: *Instruction = parse_instruction("imul rax, rbx");
+    if (instr5.length == 4) {
+        print("✅ ");
+        print_int(instr5.length);
+        println(" bytes");
+    } else {
+        println("❌ Failed");
+    }
+
+    // Test 6: div rbx
+    print("6. div rbx → ");
+    let instr6: *Instruction = parse_instruction("div rbx");
+    if (instr6.length == 3) {
+        print("✅ ");
+        print_int(instr6.length);
+        println(" bytes");
+    } else {
+        println("❌ Failed");
+    }
+
+    println("");
     println("========================================");
-    println("  Assembler ready for expansion!");
+    println("  TOTAL: 15+ instructions supported!");
     println("========================================");
+    println("");
+    println("Supported instructions:");
+    println("  - mov rax, N");
+    println("  - mov rdi, rax / mov rbp, rsp");
+    println("  - push rbp/rax, pop rbp/rbx");
+    println("  - add/sub/imul rax, rbx");
+    println("  - xor rdx, rdx");
+    println("  - div rbx");
+    println("  - syscall, ret, leave");
 
     return 0;
 }
