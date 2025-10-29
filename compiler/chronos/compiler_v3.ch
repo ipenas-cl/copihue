@@ -1,6 +1,6 @@
 // Chronos Self-Hosted Compiler v0.17
 // With Arithmetic Expression Support
-// Supports: return N, return A + B, return A * B, return A - B
+// Supports: return N, return A + B, return A - B, return A * B, return A / B
 
 // ==== Data Structures ====
 
@@ -462,6 +462,33 @@ fn parse_expression(s: *i8, start: i64) -> i64 {
         return expr_addr;
     }
 
+    if (op == 47) {  // '/'
+        pos = pos + 1;
+        pos = skip_whitespace(s, pos);
+
+        let num2: i64 = 0;
+        let ch2: i64 = 0;
+        parsing = 1;
+        while (parsing == 1) {
+            ch2 = s[pos];
+            if (ch2 >= 48) {
+                if (ch2 <= 57) {
+                    num2 = num2 * 10 + (ch2 - 48);
+                    pos = pos + 1;
+                } else {
+                    parsing = 0;
+                }
+            } else {
+                parsing = 0;
+            }
+        }
+
+        expr.op = 47;
+        expr.left = num1;
+        expr.right = num2;
+        return expr_addr;
+    }
+
     // Just a number
     expr.op = 0;
     expr.left = num1;
@@ -519,6 +546,10 @@ fn main() -> i64 {
         print(" - ");
         print_int(expr.right);
     }
+    if (expr.op == 47) {
+        print(" / ");
+        print_int(expr.right);
+    }
     println("");
 
     // Calculate expected result
@@ -534,6 +565,9 @@ fn main() -> i64 {
     }
     if (expr.op == 45) {
         expected = expr.left - expr.right;
+    }
+    if (expr.op == 47) {
+        expected = expr.left / expr.right;
     }
 
     print("  Expected result: ");
