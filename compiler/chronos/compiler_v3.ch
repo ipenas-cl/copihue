@@ -11,9 +11,11 @@ struct Codegen {
 }
 
 struct Expr {
-    op: i64,        // 0=number, '+', '-', '*', '/'
-    left: i64,      // Left operand (number)
-    right: i64      // Right operand (number)
+    op: i64,        // 0=number, '+', '-', '*', '/', 'v'=variable
+    left: i64,      // Left operand (number or variable value)
+    right: i64,     // Right operand (number or variable value)
+    left_is_var: i64,   // 1 if left is variable 'x'
+    right_is_var: i64   // 1 if right is variable 'x'
 }
 
 // ==== File I/O ====
@@ -317,6 +319,49 @@ fn parse_number(s: *i8, pos: i64) -> i64 {
     ns[len] = 0;
 
     return num_str;
+}
+
+fn find_let_x(s: *i8) -> i64 {
+    let i: i64 = 0;
+
+    while (s[i] != 0) {
+        if (s[i] == 108) {  // 'l'
+            if (s[i+1] == 101) {  // 'e'
+                if (s[i+2] == 116) {  // 't'
+                    if (s[i+3] == 32) {  // space
+                        if (s[i+4] == 120) {  // 'x'
+                            // Found "let x", now skip to '='
+                            let pos: i64 = i + 5;
+                            while (s[pos] != 0) {
+                                if (s[pos] == 61) {  // '='
+                                    // Skip whitespace after '='
+                                    pos = pos + 1;
+                                    while (s[pos] == 32) {
+                                        pos = pos + 1;
+                                    }
+                                    // Parse number
+                                    let value: i64 = 0;
+                                    while (s[pos] >= 48) {
+                                        if (s[pos] <= 57) {
+                                            value = value * 10 + (s[pos] - 48);
+                                            pos = pos + 1;
+                                        } else {
+                                            return value;
+                                        }
+                                    }
+                                    return value;
+                                }
+                                pos = pos + 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        i = i + 1;
+    }
+
+    return 0;  // No variable found
 }
 
 fn find_return(s: *i8) -> i64 {
