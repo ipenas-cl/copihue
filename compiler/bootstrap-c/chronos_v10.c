@@ -59,6 +59,8 @@ typedef struct TypeInfo {
 typedef struct StructField {
     char* name;
     int offset;
+    char* type_name;      // Type of the field (e.g., "i64", "*Token")
+    int is_pointer;       // 1 if pointer type, 0 otherwise
 } StructField;
 
 typedef struct StructType {
@@ -79,7 +81,7 @@ typedef enum {
     AST_IF, AST_WHILE, AST_CALL, AST_IDENT, AST_NUMBER,
     AST_BINOP, AST_COMPARE, AST_STRING, AST_ASSIGN,
     AST_ARRAY_LITERAL, AST_INDEX, AST_STRUCT_DEF, AST_STRUCT_LITERAL, AST_FIELD_ACCESS,
-    AST_UNARY, AST_DEREF, AST_ADDR_OF, AST_GLOBAL_VAR, AST_ARRAY_ASSIGN,
+    AST_UNARY, AST_DEREF, AST_ADDR_OF, AST_GLOBAL_VAR, AST_ARRAY_ASSIGN, AST_FIELD_ASSIGN,
     AST_LOGICAL  // && and || operators with short-circuit evaluation
 } AstType;
 
@@ -94,6 +96,7 @@ typedef struct AstNode {
     int array_size;
     char* struct_type;
     int is_pointer;  // For type tracking
+    int is_forward_decl;  // For function forward declarations
 } AstNode;
 
 // Symbol table
@@ -206,7 +209,7 @@ void typetab_add(TypeTable* tt, char* name) {
     tt->types[tt->count - 1].size = 0;
 }
 
-void typetab_add_field(TypeTable* tt, char* struct_name, char* field_name) {
+void typetab_add_field(TypeTable* tt, char* struct_name, char* field_name, char* field_type, int is_pointer) {
     StructType* st = typetab_lookup(tt, struct_name);
     if (!st) return;
 
@@ -214,6 +217,8 @@ void typetab_add_field(TypeTable* tt, char* struct_name, char* field_name) {
     st->fields = safe_realloc(st->fields, sizeof(StructField) * st->field_count);
     st->fields[st->field_count - 1].name = strdup(field_name);
     st->fields[st->field_count - 1].offset = st->size;
+    st->fields[st->field_count - 1].type_name = field_type ? strdup(field_type) : NULL;
+    st->fields[st->field_count - 1].is_pointer = is_pointer;
     st->size += 8;
 }
 
@@ -227,6 +232,19 @@ int typetab_field_offset(TypeTable* tt, char* struct_name, char* field_name) {
         }
     }
     return -1;
+}
+
+// Get the type of a field in a struct
+char* typetab_field_type(TypeTable* tt, char* struct_name, char* field_name) {
+    StructType* st = typetab_lookup(tt, struct_name);
+    if (!st) return NULL;
+
+    for (int i = 0; i < st->field_count; i++) {
+        if (!strcmp(st->fields[i].name, field_name)) {
+            return st->fields[i].type_name;
+        }
+    }
+    return NULL;
 }
 
 // ==== STRING TABLE ====
@@ -938,7 +956,7 @@ AstNode* parse_stmt(Parser* p) {
         AstNode* let = ast_new(AST_LET);
         let->name = strndup(name.s, name.len);
 
-        // Optional type annotation: let x: i32 or let arr: [i32; 10] or let ptr: *i32
+        // Optional type annotation: let x: i32 or let arr: [i32; 10] or let ptr: *i32 or let p: Point
         if (match_tok(p, T_COLON)) {
             TypeSpec spec = parse_type(p);
 
@@ -950,6 +968,10 @@ AstNode* parse_stmt(Parser* p) {
             // For arrays, mark as array in struct_type field
             if (spec.is_array) {
                 let->struct_type = strdup("__array__");  // Marker for array
+            } else if (!spec.is_pointer && spec.base_type) {
+                // Check if it's a known struct type (not a primitive)
+                // We'll store the type name and codegen will check if it's a struct
+                let->struct_type = strdup(spec.base_type);  // Store potential struct name
             }
         }
 
@@ -1095,6 +1117,20 @@ AstNode* parse_stmt(Parser* p) {
         return array_assign;
     }
 
+    // Check for field assignment: struct.field = value
+    if (expr && expr->type == AST_FIELD_ACCESS && check_tok(p, T_EQ)) {
+        advance_tok(p);  // Consume '='
+        AstNode* field_assign = ast_new(AST_FIELD_ASSIGN);
+        // name = field name
+        // children[0] = struct object
+        // children[1] = value expression
+        field_assign->name = strdup(expr->name);   // Field name
+        ast_add(field_assign, expr->children[0]);  // Struct object
+        ast_add(field_assign, parse_expr(p));      // Value expression
+        expect(p, T_SEMI);
+        return field_assign;
+    }
+
     expect(p, T_SEMI);
     return expr;
 }
@@ -1119,10 +1155,14 @@ AstNode* parse_struct_def(Parser* p) {
     while (!check_tok(p, T_RBRACE)) {
         Tok field_name = advance_tok(p);
         expect(p, T_COLON);
-        advance_tok(p);  // Type
+
+        // Parse field type (handles i32, *i8, [i32; 10], etc.)
+        TypeSpec field_type = parse_type(p);
 
         AstNode* field = ast_new(AST_IDENT);
         field->name = strndup(field_name.s, field_name.len);
+        field->value = field_type.base_type;      // Store type name
+        field->is_pointer = field_type.is_pointer;  // Store if it's a pointer
         ast_add(struct_def, field);
 
         if (!check_tok(p, T_RBRACE)) expect(p, T_COMMA);
@@ -1132,7 +1172,7 @@ AstNode* parse_struct_def(Parser* p) {
     return struct_def;
 }
 
-// Parse type specification: i32, [i32; 10], *i32, *mut i32
+// Parse type specification: i32, [i32; 10], *i32, *mut i32, Point (struct)
 TypeSpec parse_type(Parser* p) {
     TypeSpec spec = {0};
 
@@ -1172,7 +1212,7 @@ TypeSpec parse_type(Parser* p) {
         return spec;
     }
 
-    // Basic type
+    // Basic type or struct name (i32, i64, Point, Vector, etc.)
     Tok type = advance_tok(p);
     spec.base_type = strndup(type.s, type.len);
     return spec;
@@ -1226,9 +1266,11 @@ AstNode* parse_func(Parser* p) {
             // Handle pointer types: *Type
             if (match_tok(p, T_STAR)) {
                 par->is_pointer = 1;
-                advance_tok(p);  // Skip base type
+                Tok type_tok = advance_tok(p);  // Get base type
+                par->value = strndup(type_tok.s, type_tok.len);  // Save type name
             } else {
-                advance_tok(p);  // Skip type
+                Tok type_tok = advance_tok(p);  // Get type
+                par->value = strndup(type_tok.s, type_tok.len);  // Save type name
             }
         }
         if (!check_tok(p, T_RPAREN)) expect(p, T_COMMA);
@@ -1236,7 +1278,18 @@ AstNode* parse_func(Parser* p) {
     expect(p, T_RPAREN);
 
     if (match_tok(p, T_ARROW)) advance_tok(p);
-    ast_add(func, parse_block(p));
+
+    // Check if this is a forward declaration (ends with ;) or full definition (has body)
+    if (check_tok(p, T_SEMI)) {
+        // Forward declaration
+        expect(p, T_SEMI);
+        func->is_forward_decl = 1;
+        // Add empty block as placeholder
+        ast_add(func, ast_new(AST_BLOCK));
+    } else {
+        // Full function definition
+        ast_add(func, parse_block(p));
+    }
     return func;
 }
 
@@ -1385,6 +1438,53 @@ void gen_builtin_call(Codegen* cg, AstNode* n) {
             emit(cg, "    mov rax, 3\n");  // sys_close
             emit(cg, "    syscall\n");
         }
+    } else if (!strcmp(n->name, "malloc")) {
+        // malloc(size) -> pointer
+        // Uses mmap syscall (9) with size tracking header
+        // Layout: [8 bytes size][allocated memory]
+        // Returns pointer to allocated memory (after header)
+        if (n->child_count >= 1) {
+            gen_expr(cg, n->children[0]);  // size requested by user
+            emit(cg, "    mov r12, rax\n");  // Save original size in r12
+            emit(cg, "    add rax, 8\n");    // Add 8 bytes for size header
+            emit(cg, "    mov rsi, rax\n");  // length = size + 8
+            emit(cg, "    xor rdi, rdi\n");  // addr = 0 (let kernel choose)
+            emit(cg, "    mov rdx, 3\n");    // prot = PROT_READ | PROT_WRITE
+            emit(cg, "    mov r10, 34\n");   // flags = MAP_PRIVATE | MAP_ANONYMOUS (0x22)
+            emit(cg, "    mov r8, -1\n");    // fd = -1
+            emit(cg, "    xor r9, r9\n");    // offset = 0
+            emit(cg, "    mov rax, 9\n");    // sys_mmap
+            emit(cg, "    syscall\n");
+            // Check if mmap failed (returns -1)
+            emit(cg, "    cmp rax, -1\n");
+            emit(cg, "    je .Lmalloc_failed_%d\n", new_label(cg));
+            // Store size in header
+            emit(cg, "    mov [rax], r12\n");  // Store original size in first 8 bytes
+            emit(cg, "    add rax, 8\n");      // Return pointer after header
+            emit(cg, ".Lmalloc_failed_%d:\n", cg->label_count - 1);
+            // Returns pointer in rax (ptr+8, or -1 on error which stays -1)
+        }
+    } else if (!strcmp(n->name, "free")) {
+        // free(ptr) -> status
+        // Uses munmap syscall (11): munmap(addr, length)
+        // Reads size from header at (ptr - 8)
+        if (n->child_count >= 1) {
+            gen_expr(cg, n->children[0]);  // ptr (user pointer)
+            emit(cg, "    ; free(ptr) - read size from header and munmap\n");
+            emit(cg, "    test rax, rax\n");  // Check if ptr is NULL
+            emit(cg, "    jz .Lfree_null_%d\n", new_label(cg));
+            emit(cg, "    mov rdi, rax\n");   // Save user pointer
+            emit(cg, "    sub rdi, 8\n");     // rdi = actual allocation start (header)
+            emit(cg, "    mov rsi, [rdi]\n"); // Load size from header
+            emit(cg, "    add rsi, 8\n");     // Add header size to get total allocation
+            emit(cg, "    mov rax, 11\n");    // sys_munmap
+            emit(cg, "    syscall\n");
+            // Returns 0 on success, -1 on error
+            emit(cg, "    jmp .Lfree_done_%d\n", cg->label_count - 1);
+            emit(cg, ".Lfree_null_%d:\n", cg->label_count - 1);
+            emit(cg, "    xor rax, rax\n");   // free(NULL) returns 0
+            emit(cg, ".Lfree_done_%d:\n", cg->label_count - 1);
+        }
     } else if (!strcmp(n->name, "syscall") || !strcmp(n->name, "syscall6")) {
         // Generic syscall: syscall6(num, arg1, arg2, arg3, arg4, arg5, arg6)
         // This allows Chronos code to make ANY syscall directly
@@ -1431,7 +1531,15 @@ void gen_addr_of(Codegen* cg, AstNode* n) {
     if (var->type == AST_IDENT) {
         int off = symtab_lookup(cg->symtab, var->name);
         if (off) {
-            emit(cg, "    lea rax, [rbp%d]\n", off);
+            // Check if this is already a pointer - if so, just load the value
+            Symbol* sym = symtab_lookup_symbol(cg->symtab, var->name);
+            if (sym && sym->is_pointer) {
+                // Variable is already a pointer - just load it
+                emit(cg, "    mov rax, [rbp%d]\n", off);
+            } else {
+                // Regular variable - take its address
+                emit(cg, "    lea rax, [rbp%d]\n", off);
+            }
         }
     } else if (var->type == AST_INDEX) {
         // &array[index] - compute address of element
@@ -1480,6 +1588,95 @@ void gen_addr_of(Codegen* cg, AstNode* n) {
 void gen_array_index(Codegen* cg, AstNode* n) {
     AstNode* arr = n->children[0];
 
+    // Handle field access indexing: lex.source[i]
+    if (arr->type == AST_FIELD_ACCESS) {
+        AstNode* obj = arr->children[0];
+        char* field_name = arr->name;
+
+        Symbol* sym = symtab_lookup_symbol(cg->symtab, obj->name);
+        if (sym && sym->type_name) {
+            // Get struct type (remove pointer if present)
+            char* struct_type = sym->type_name;
+            int is_pointer = 0;
+            if (struct_type[0] == '*') {
+                struct_type = struct_type + 1;
+                is_pointer = 1;
+            }
+
+            int field_off = typetab_field_offset(cg->types, struct_type, field_name);
+            if (field_off >= 0) {
+                // Get field type to determine element size
+                char* field_type = typetab_field_type(cg->types, struct_type, field_name);
+                int elem_size = 1;  // Default to i8
+                int is_struct_elem = 0;
+
+                if (field_type) {
+                    char* base_type = field_type;
+                    if (base_type[0] == '*') base_type++;  // Skip '*' to get element type
+
+                    if (!strcmp(base_type, "i8") || !strcmp(base_type, "u8")) {
+                        elem_size = 1;
+                    } else if (!strcmp(base_type, "i16")) {
+                        elem_size = 2;
+                    } else if (!strcmp(base_type, "i32") || !strcmp(base_type, "u32")) {
+                        elem_size = 4;
+                    } else if (!strcmp(base_type, "i64") || !strcmp(base_type, "u64")) {
+                        elem_size = 8;
+                    } else {
+                        // Not a primitive type - check if it's a struct
+                        StructType* st = typetab_lookup(cg->types, base_type);
+                        if (st) {
+                            elem_size = st->size;
+                            is_struct_elem = 1;
+                        }
+                    }
+                }
+
+                // Generate index expression first
+                gen_expr(cg, n->children[1]);  // Index in rax
+
+                // Scale index by element size
+                if (elem_size > 1) {
+                    emit(cg, "    imul rax, %d\n", elem_size);
+                }
+
+                emit(cg, "    push rax\n");     // Save scaled index
+
+                // Load the pointer from struct field
+                if (is_pointer) {
+                    emit(cg, "    mov rbx, [rbp%d]\n", sym->offset);  // Load struct pointer
+                    if (field_off == 0) {
+                        emit(cg, "    mov rbx, [rbx]\n");  // Load field (pointer)
+                    } else {
+                        emit(cg, "    mov rbx, [rbx+%d]\n", field_off);  // Load field (pointer)
+                    }
+                } else {
+                    emit(cg, "    mov rbx, [rbp%d]\n", sym->offset + field_off);  // Load field (pointer)
+                }
+
+                emit(cg, "    pop rax\n");      // Restore scaled index
+                emit(cg, "    add rbx, rax\n"); // Add scaled index to pointer
+
+                // For structs, return address; for primitives, load value
+                if (is_struct_elem) {
+                    emit(cg, "    mov rax, rbx\n");  // Return address of struct element
+                } else {
+                    // Load element based on size
+                    if (elem_size == 1) {
+                        emit(cg, "    movzx rax, byte [rbx]\n");
+                    } else if (elem_size == 2) {
+                        emit(cg, "    movzx rax, word [rbx]\n");
+                    } else if (elem_size == 4) {
+                        emit(cg, "    mov eax, [rbx]\n");
+                    } else {
+                        emit(cg, "    mov rax, [rbx]\n");
+                    }
+                }
+                return;
+            }
+        }
+    }
+
     // Handle string literal indexing: "Hello"[0]
     if (arr->type == AST_STRING) {
         char* label = strtab_add(cg->strtab, arr->value, strlen(arr->value));
@@ -1517,19 +1714,90 @@ void gen_array_index(Codegen* cg, AstNode* n) {
 
     Symbol* sym = symtab_lookup_symbol(cg->symtab, arr->name);
 
-    // Try local array first
+    // Try local array/pointer first
     if (sym) {
         gen_expr(cg, n->children[1]);  // Index in rax
 
+        // Check if this is a pointer parameter (not an array)
+        if (sym->is_pointer) {
+            // This is a pointer - no bounds checking, just index through it
+            // Determine element size from type_name (e.g., "*i8", "*i64", "*Point")
+            int elem_size = 1;  // Default to i8
+            int is_struct = 0;
+
+            if (sym->type_name) {
+                char* base_type = sym->type_name;
+                if (base_type[0] == '*') base_type++;  // Skip '*'
+
+                if (!strcmp(base_type, "i8") || !strcmp(base_type, "u8")) {
+                    elem_size = 1;
+                } else if (!strcmp(base_type, "i16")) {
+                    elem_size = 2;
+                } else if (!strcmp(base_type, "i32") || !strcmp(base_type, "u32")) {
+                    elem_size = 4;
+                } else if (!strcmp(base_type, "i64") || !strcmp(base_type, "u64")) {
+                    elem_size = 8;
+                } else {
+                    // Not a primitive type - check if it's a struct
+                    StructType* st = typetab_lookup(cg->types, base_type);
+                    if (st) {
+                        elem_size = st->size;
+                        is_struct = 1;
+                    }
+                }
+            }
+
+            emit(cg, "    mov rbx, [rbp%d]\n", sym->offset);  // Load pointer
+
+            // Scale index by element size
+            if (elem_size > 1) {
+                emit(cg, "    imul rax, %d\n", elem_size);
+            }
+
+            emit(cg, "    add rbx, rax\n");  // Add scaled index
+
+            // For structs, return address in rax (for field access)
+            // For primitives, load the value
+            if (is_struct) {
+                emit(cg, "    mov rax, rbx\n");  // Return address of struct element
+            } else {
+                // Load element based on size
+                if (elem_size == 1) {
+                    emit(cg, "    movzx rax, byte [rbx]\n");
+                } else if (elem_size == 2) {
+                    emit(cg, "    movzx rax, word [rbx]\n");
+                } else if (elem_size == 4) {
+                    emit(cg, "    mov eax, [rbx]\n");
+                } else {
+                    emit(cg, "    mov rax, [rbx]\n");
+                }
+            }
+            return;
+        }
+
+        // It's a real array - do bounds checking
         // Determine element size from type_name
         int elem_size = 8;  // Default to 8 bytes (i64)
         int array_count = sym->size;  // size is already the count for typed arrays
+        int is_struct = 0;
 
         if (sym->type_name) {
-            if (!strcmp(sym->type_name, "i8") || !strcmp(sym->type_name, "u8")) elem_size = 1;
-            else if (!strcmp(sym->type_name, "i16")) elem_size = 2;
-            else if (!strcmp(sym->type_name, "i32") || !strcmp(sym->type_name, "u32")) elem_size = 4;
-            else if (!strcmp(sym->type_name, "i64") || !strcmp(sym->type_name, "u64")) elem_size = 8;
+            if (!strcmp(sym->type_name, "i8") || !strcmp(sym->type_name, "u8")) {
+                elem_size = 1;
+            } else if (!strcmp(sym->type_name, "i16")) {
+                elem_size = 2;
+            } else if (!strcmp(sym->type_name, "i32") || !strcmp(sym->type_name, "u32")) {
+                elem_size = 4;
+            } else if (!strcmp(sym->type_name, "i64") || !strcmp(sym->type_name, "u64")) {
+                elem_size = 8;
+            } else {
+                // Not a primitive - check if struct
+                StructType* st = typetab_lookup(cg->types, sym->type_name);
+                if (st) {
+                    elem_size = st->size;
+                    is_struct = 1;
+                }
+            }
         } else {
             // If no type_name, assume old behavior (size is in qwords)
             array_count = sym->size;
@@ -1566,15 +1834,20 @@ void gen_array_index(Codegen* cg, AstNode* n) {
         }
         emit(cg, "    mov rbx, rax\n");
 
-        // Load value with correct width
-        if (elem_size == 1) {
-            emit(cg, "    movzx rax, byte [rbp%d+rbx]\n", sym->offset);
-        } else if (elem_size == 2) {
-            emit(cg, "    movzx rax, word [rbp%d+rbx]\n", sym->offset);
-        } else if (elem_size == 4) {
-            emit(cg, "    mov eax, [rbp%d+rbx]\n", sym->offset);
+        // For structs, return address; for primitives, load value
+        if (is_struct) {
+            emit(cg, "    lea rax, [rbp%d+rbx]\n", sym->offset);
         } else {
-            emit(cg, "    mov rax, [rbp%d+rbx]\n", sym->offset);
+            // Load value with correct width
+            if (elem_size == 1) {
+                emit(cg, "    movzx rax, byte [rbp%d+rbx]\n", sym->offset);
+            } else if (elem_size == 2) {
+                emit(cg, "    movzx rax, word [rbp%d+rbx]\n", sym->offset);
+            } else if (elem_size == 4) {
+                emit(cg, "    mov eax, [rbp%d+rbx]\n", sym->offset);
+            } else {
+                emit(cg, "    mov rax, [rbp%d+rbx]\n", sym->offset);
+            }
         }
     } else {
         // Try global array
@@ -1628,7 +1901,15 @@ void gen_expr(Codegen* cg, AstNode* n) {
         // Try local variable first
         int off = symtab_lookup(cg->symtab, n->name);
         if (off) {
-            emit(cg, "    mov rax, [rbp%d]\n", off);
+            // Check if this is an array - if so, load address not value
+            Symbol* sym = symtab_lookup_symbol(cg->symtab, n->name);
+            if (sym && sym->size > 1 && sym->type_name && !sym->is_pointer) {
+                // This is an array - use lea to get address
+                emit(cg, "    lea rax, [rbp%d]\n", off);
+            } else {
+                // Regular variable or pointer - load value
+                emit(cg, "    mov rax, [rbp%d]\n", off);
+            }
         } else {
             // Try global variable
             GlobalVar* gvar = global_symtab_lookup(cg->global_symtab, n->name);
@@ -1838,13 +2119,99 @@ void gen_expr(Codegen* cg, AstNode* n) {
                     emit(cg, "    mov rax, [rax+%d]\n", field_off);   // Access field
                 }
             }
-        } else {
-            // Regular struct field access
+        } else if (obj->type == AST_IDENT) {
+            // Regular struct field access from identifier
             Symbol* sym = symtab_lookup_symbol(cg->symtab, obj->name);
             if (sym && sym->type_name) {
-                int field_off = typetab_field_offset(cg->types, sym->type_name, field_name);
+                // Get the actual struct type name (remove pointer if present)
+                char* struct_type = sym->type_name;
+                int is_pointer = 0;
+                if (struct_type[0] == '*') {
+                    struct_type = struct_type + 1;  // Skip the '*'
+                    is_pointer = 1;
+                }
+
+                int field_off = typetab_field_offset(cg->types, struct_type, field_name);
                 if (field_off >= 0) {
-                    emit(cg, "    mov rax, [rbp%d]\n", sym->offset + field_off);
+                    if (is_pointer) {
+                        // For pointers: load pointer, then load field
+                        emit(cg, "    mov rax, [rbp%d]\n", sym->offset);  // Load pointer
+                        if (field_off == 0) {
+                            emit(cg, "    mov rax, [rax]\n");  // Load field at offset 0
+                        } else {
+                            emit(cg, "    mov rax, [rax+%d]\n", field_off);  // Load field
+                        }
+                    } else {
+                        // For direct structs: load directly
+                        emit(cg, "    mov rax, [rbp%d]\n", sym->offset + field_off);
+                    }
+                }
+            }
+        } else {
+            // Field access from expression (e.g., array[index].field)
+            // Generate the expression first (should leave struct address in rax)
+            gen_expr(cg, obj);
+
+            // Now rax contains the address of the struct
+            // We need to know the struct type to get field offset
+            // For now, we'll try to infer it from the expression
+            // This is a simplified approach - full implementation needs type inference
+
+            // Try to get type from INDEX expression
+            if (obj->type == AST_INDEX && obj->children && obj->child_count > 0) {
+                AstNode* base = obj->children[0];
+                char* struct_type = NULL;
+
+                if (base->type == AST_IDENT) {
+                    // Simple case: array[index].field
+                    Symbol* base_sym = symtab_lookup_symbol(cg->symtab, base->name);
+                    if (base_sym && base_sym->type_name) {
+                        struct_type = base_sym->type_name;
+                        // Remove pointer prefix if present
+                        if (struct_type[0] == '*') struct_type++;
+                    }
+                } else if (base->type == AST_FIELD_ACCESS) {
+                    // Complex case: struct.field[index].field
+                    // E.g., container.tokens[0].value
+                    // base is AST_FIELD_ACCESS for "container.tokens"
+                    // Now we CAN determine the element type using type tracking!
+
+                    if (base->children && base->child_count > 0) {
+                        AstNode* struct_obj = base->children[0];
+                        char* field_name_inner = base->name;  // "tokens"
+
+                        if (struct_obj->type == AST_IDENT) {
+                            // Look up the struct variable
+                            Symbol* struct_sym = symtab_lookup_symbol(cg->symtab, struct_obj->name);
+                            if (struct_sym && struct_sym->type_name) {
+                                // Get the struct type (e.g., "Container" or "*Container")
+                                char* container_type = struct_sym->type_name;
+                                if (container_type[0] == '*') container_type++;
+
+                                // Get the type of the field (e.g., "*Token" for tokens field)
+                                char* field_type = typetab_field_type(cg->types, container_type, field_name_inner);
+                                if (field_type) {
+                                    // If it's a pointer type, extract base type
+                                    if (field_type[0] == '*') {
+                                        struct_type = field_type + 1;  // Skip '*' to get "Token"
+                                    } else {
+                                        struct_type = field_type;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if (struct_type) {
+                    int field_off = typetab_field_offset(cg->types, struct_type, field_name);
+                    if (field_off >= 0) {
+                        if (field_off == 0) {
+                            emit(cg, "    mov rax, [rax]\n");
+                        } else {
+                            emit(cg, "    mov rax, [rax+%d]\n", field_off);
+                        }
+                    }
                 }
             }
         }
@@ -1868,34 +2235,72 @@ void gen_expr(Codegen* cg, AstNode* n) {
         // Evaluate index expression
         gen_expr(cg, index_expr);
 
-        // Try local array first
+        // Try local array/pointer first
         Symbol* sym = symtab_lookup_symbol(cg->symtab, arr->name);
         if (sym) {
-            // Determine element size from type_name
-            int elem_size = 8;  // Default to 8 bytes (i64)
-            if (sym->type_name) {
-                if (!strcmp(sym->type_name, "i8") || !strcmp(sym->type_name, "u8")) elem_size = 1;
-                else if (!strcmp(sym->type_name, "i16")) elem_size = 2;
-                else if (!strcmp(sym->type_name, "i32") || !strcmp(sym->type_name, "u32")) elem_size = 4;
-                else if (!strcmp(sym->type_name, "i64") || !strcmp(sym->type_name, "u64")) elem_size = 8;
-            }
+            // Check if this is a pointer (not an array)
+            if (sym->is_pointer) {
+                // Pointer assignment: ptr[index] = value
+                // Determine element size from type_name
+                int elem_size = 8;  // Default to i64
+                if (sym->type_name) {
+                    char* base_type = sym->type_name;
+                    if (base_type[0] == '*') base_type++;  // Skip '*'
 
-            // Local array assignment with correct element size
-            if (elem_size > 1) {
-                emit(cg, "    imul rax, %d\n", elem_size);
-            }
-            emit(cg, "    mov rbx, rax\n");
-            emit(cg, "    pop rax\n");  // Restore value
+                    if (!strcmp(base_type, "i8") || !strcmp(base_type, "u8")) elem_size = 1;
+                    else if (!strcmp(base_type, "i16")) elem_size = 2;
+                    else if (!strcmp(base_type, "i32") || !strcmp(base_type, "u32")) elem_size = 4;
+                    else if (!strcmp(base_type, "i64") || !strcmp(base_type, "u64")) elem_size = 8;
+                }
 
-            // Store with correct width
-            if (elem_size == 1) {
-                emit(cg, "    mov byte [rbp%d+rbx], al\n", sym->offset);
-            } else if (elem_size == 2) {
-                emit(cg, "    mov word [rbp%d+rbx], ax\n", sym->offset);
-            } else if (elem_size == 4) {
-                emit(cg, "    mov dword [rbp%d+rbx], eax\n", sym->offset);
+                // Scale index by element size
+                if (elem_size > 1) {
+                    emit(cg, "    imul rax, %d\n", elem_size);
+                }
+
+                // Load pointer and add offset
+                emit(cg, "    mov rbx, [rbp%d]\n", sym->offset);  // Load pointer
+                emit(cg, "    add rbx, rax\n");  // Add scaled index
+                emit(cg, "    pop rax\n");  // Restore value
+
+                // Store with correct width
+                if (elem_size == 1) {
+                    emit(cg, "    mov byte [rbx], al\n");
+                } else if (elem_size == 2) {
+                    emit(cg, "    mov word [rbx], ax\n");
+                } else if (elem_size == 4) {
+                    emit(cg, "    mov dword [rbx], eax\n");
+                } else {
+                    emit(cg, "    mov qword [rbx], rax\n");
+                }
             } else {
-                emit(cg, "    mov qword [rbp%d+rbx], rax\n", sym->offset);
+                // Local array assignment
+                // Determine element size from type_name
+                int elem_size = 8;  // Default to 8 bytes (i64)
+                if (sym->type_name) {
+                    if (!strcmp(sym->type_name, "i8") || !strcmp(sym->type_name, "u8")) elem_size = 1;
+                    else if (!strcmp(sym->type_name, "i16")) elem_size = 2;
+                    else if (!strcmp(sym->type_name, "i32") || !strcmp(sym->type_name, "u32")) elem_size = 4;
+                    else if (!strcmp(sym->type_name, "i64") || !strcmp(sym->type_name, "u64")) elem_size = 8;
+                }
+
+                // Local array assignment with correct element size
+                if (elem_size > 1) {
+                    emit(cg, "    imul rax, %d\n", elem_size);
+                }
+                emit(cg, "    mov rbx, rax\n");
+                emit(cg, "    pop rax\n");  // Restore value
+
+                // Store with correct width
+                if (elem_size == 1) {
+                    emit(cg, "    mov byte [rbp%d+rbx], al\n", sym->offset);
+                } else if (elem_size == 2) {
+                    emit(cg, "    mov word [rbp%d+rbx], ax\n", sym->offset);
+                } else if (elem_size == 4) {
+                    emit(cg, "    mov dword [rbp%d+rbx], eax\n", sym->offset);
+                } else {
+                    emit(cg, "    mov qword [rbp%d+rbx], rax\n", sym->offset);
+                }
             }
         } else {
             // Try global array
@@ -1926,6 +2331,108 @@ void gen_expr(Codegen* cg, AstNode* n) {
                     emit(cg, "    mov dword [rbx], eax\n");
                 } else {
                     emit(cg, "    mov qword [rbx], rax\n");
+                }
+            }
+        }
+    } else if (n->type == AST_FIELD_ASSIGN) {
+        // Field assignment: struct.field = value or array[index].field = value
+        // name = field name
+        // children[0] = struct object or array index expression
+        // children[1] = value expression
+
+        if (!n->children || n->child_count < 2) return;
+        AstNode* obj = n->children[0];
+        AstNode* value_expr = n->children[1];
+        char* field_name = n->name;
+
+        if (!obj || !field_name) return;
+
+        // Evaluate value expression
+        gen_expr(cg, value_expr);
+        emit(cg, "    push rax\n");  // Save value
+
+        // Check if object is an array index expression (e.g., arr[0])
+        if (obj->type == AST_INDEX) {
+            // Field assignment to array element: arr[index].field = value
+            if (!obj->children || obj->child_count < 2) return;
+            AstNode* arr_base = obj->children[0];
+            AstNode* index_expr = obj->children[1];
+
+            if (!arr_base || !arr_base->name) return;
+
+            // Evaluate index expression
+            gen_expr(cg, index_expr);
+            emit(cg, "    push rax\n");  // Save index
+
+            // Look up array in symbol table
+            Symbol* sym = symtab_lookup_symbol(cg->symtab, arr_base->name);
+            if (sym && sym->type_name) {
+                char* type_name = sym->type_name;
+
+                // Determine element size and struct type
+                int elem_size = 8;
+                char* struct_type = type_name;
+
+                // Check if it's a struct type
+                StructType* st = typetab_lookup(cg->types, type_name);
+                if (st) {
+                    elem_size = st->size;
+                    struct_type = type_name;
+                }
+
+                // Get field offset
+                int field_off = typetab_field_offset(cg->types, struct_type, field_name);
+                if (field_off >= 0) {
+                    emit(cg, "    pop rbx\n");  // Restore index
+                    emit(cg, "    ; Array element field assignment: %s[index].%s (elem_size=%d, offset %d)\n",
+                         arr_base->name, field_name, elem_size, field_off);
+
+                    // Calculate array element address
+                    if (elem_size > 1) {
+                        emit(cg, "    imul rbx, %d\n", elem_size);
+                    }
+                    emit(cg, "    lea rcx, [rbp%d+rbx]\n", sym->offset);  // rcx = address of array element
+
+                    // Add field offset
+                    if (field_off > 0) {
+                        emit(cg, "    add rcx, %d\n", field_off);
+                    }
+
+                    emit(cg, "    pop rax\n");  // Restore value
+                    emit(cg, "    mov [rcx], rax\n");  // Store value at field location
+                }
+            }
+        } else if (obj->name) {
+            // Simple struct field assignment: struct.field = value
+            // Look up struct object in symbol table
+            Symbol* sym = symtab_lookup_symbol(cg->symtab, obj->name);
+            if (sym && sym->type_name) {
+                // Get the actual struct type name (remove pointer if present)
+                char* struct_type = sym->type_name;
+                int is_pointer = 0;
+                if (struct_type[0] == '*') {
+                    struct_type = struct_type + 1;  // Skip the '*'
+                    is_pointer = 1;
+                }
+
+                // Get field offset
+                int field_off = typetab_field_offset(cg->types, struct_type, field_name);
+                if (field_off >= 0) {
+                    emit(cg, "    pop rcx\n");  // Restore value into rcx
+                    emit(cg, "    ; Field assignment: %s.%s (offset %d)\n", obj->name, field_name, field_off);
+
+                    if (is_pointer) {
+                        // For pointers: load pointer, add offset, store
+                        emit(cg, "    mov rbx, [rbp%d]\n", sym->offset);  // Load pointer
+                        if (field_off == 0) {
+                            emit(cg, "    mov [rbx], rcx\n");  // Store through pointer (no offset)
+                        } else {
+                            emit(cg, "    mov [rbx+%d], rcx\n", field_off);  // Store through pointer with offset
+                        }
+                    } else {
+                        // For direct structs: store directly
+                        emit(cg, "    mov [rbp%d], rcx\n", sym->offset + field_off);
+                    }
                 }
             }
         }
@@ -1979,6 +2486,21 @@ void gen_stmt(Codegen* cg, AstNode* n) {
             return;
         }
 
+        // Check if this is a struct type: let p: Point;
+        if (n->struct_type && strcmp(n->struct_type, "__array__") != 0) {
+            StructType* st = typetab_lookup(cg->types, n->struct_type);
+            if (st) {
+                emit(cg, "    ; Struct local: %s: %s (%d bytes)\n", n->name, n->struct_type, st->size);
+                int off = symtab_add_struct(cg->symtab, n->name, n->struct_type, st->size);
+
+                // If there's an initializer (struct literal), generate it
+                if (n->child_count > 0) {
+                    gen_expr(cg, n->children[0]);
+                }
+                return;
+            }
+        }
+
         if (n->child_count > 0) {
             if (n->children[0]->type == AST_ARRAY_LITERAL) {
                 size = n->children[0]->array_size;
@@ -1996,6 +2518,15 @@ void gen_stmt(Codegen* cg, AstNode* n) {
         // Check if pointer type
         if (n->is_pointer) {
             int off = symtab_add_pointer(cg->symtab, n->name);
+
+            // Store type name for element size calculation
+            if (n->value && cg->symtab && cg->symtab->count > 0) {
+                // Build type_name as "*BaseType"
+                char* type_buf = malloc(strlen(n->value) + 2);
+                sprintf(type_buf, "*%s", n->value);
+                cg->symtab->symbols[cg->symtab->count - 1].type_name = type_buf;
+            }
+
             if (n->child_count > 0) {
                 gen_expr(cg, n->children[0]);
                 emit(cg, "    mov [rbp%d], rax\n", off);
@@ -2032,7 +2563,7 @@ void gen_stmt(Codegen* cg, AstNode* n) {
         for (int i = 0; i < n->children[1]->child_count; i++)
             gen_stmt(cg, n->children[1]->children[i]);
         emit(cg, "    jmp .L%d\n.L%d:\n", start_lab, end_lab);
-    } else if (n->type == AST_CALL || n->type == AST_ASSIGN || n->type == AST_ARRAY_ASSIGN) {
+    } else if (n->type == AST_CALL || n->type == AST_ASSIGN || n->type == AST_ARRAY_ASSIGN || n->type == AST_FIELD_ASSIGN) {
         gen_expr(cg, n);
     }
 }
@@ -2052,16 +2583,26 @@ void gen_func(Codegen* cg, AstNode* n) {
         int off;
         if (n->children[i]->is_pointer) {
             off = symtab_add_pointer(cg->symtab, n->children[i]->name);
+            // Set the type_name for pointer parameters (needed for struct field access)
+            if (n->children[i]->value && cg->symtab && cg->symtab->count > 0) {
+                char* type_with_ptr = malloc(strlen(n->children[i]->value) + 2);
+                sprintf(type_with_ptr, "*%s", n->children[i]->value);
+                cg->symtab->symbols[cg->symtab->count - 1].type_name = type_with_ptr;
+            }
         } else {
             off = symtab_add(cg->symtab, n->children[i]->name, 1);
+            // Set the type_name for non-pointer parameters
+            if (n->children[i]->value && cg->symtab && cg->symtab->count > 0) {
+                cg->symtab->symbols[cg->symtab->count - 1].type_name = strdup(n->children[i]->value);
+            }
         }
         emit(cg, "    mov [rbp%d], %s\n", off, regs[i]);
     }
 
     // Allocate stack space based on actual usage (aligned to 16 bytes)
     int stack_size = cg->symtab->stack_size;
-    // Add 256 bytes for temporary operations (print_int buffer, etc.)
-    stack_size += 256;
+    // Add 1024 bytes for temporary operations (print_int buffer, debug code, etc.)
+    stack_size += 1024;
     // Align to 16 bytes (required by x86-64 ABI)
     stack_size = ((stack_size + 15) / 16) * 16;
     if (stack_size > 0) {
@@ -2185,7 +2726,25 @@ void build_type_table(TypeTable* tt, AstNode* ast) {
             typetab_add(tt, struct_def->name);
 
             for (int j = 0; j < struct_def->child_count; j++) {
-                typetab_add_field(tt, struct_def->name, struct_def->children[j]->name);
+                AstNode* field = struct_def->children[j];
+                // field->name = field name
+                // field->value = base type (e.g., "i64", "Token")
+                // field->is_pointer = 1 if pointer type
+                char* field_type = field->value;
+                int is_ptr = field->is_pointer;
+
+                // Build full type name for pointer types (e.g., "*Token")
+                char* full_type = NULL;
+                if (is_ptr && field_type) {
+                    full_type = malloc(strlen(field_type) + 2);
+                    sprintf(full_type, "*%s", field_type);
+                } else if (field_type) {
+                    full_type = strdup(field_type);
+                }
+
+                typetab_add_field(tt, struct_def->name, field->name, full_type, is_ptr);
+
+                if (full_type) free(full_type);
             }
         }
     }
@@ -2274,7 +2833,10 @@ void codegen(AstNode* ast, const char* file, StringTable* strtab, TypeTable* typ
 
     for (int i = 0; i < ast->child_count; i++) {
         if (ast->children[i]->type == AST_FUNCTION) {
-            gen_func(&cg, ast->children[i]);
+            // Skip forward declarations, only generate code for full definitions
+            if (!ast->children[i]->is_forward_decl) {
+                gen_func(&cg, ast->children[i]);
+            }
         }
     }
 

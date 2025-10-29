@@ -281,6 +281,100 @@ fn main() -> i32 {
 
 ---
 
+## Memory Management Functions
+
+**NEW in v0.18** - Dynamic memory allocation is now available!
+
+### `malloc(size: i32) -> *i8`
+
+Allocate memory dynamically on the heap.
+
+```chronos
+fn main() -> i32 {
+    // Allocate 100 bytes
+    let ptr = malloc(100);
+
+    if (ptr == 0) {
+        println("malloc failed");
+        return 1;
+    }
+
+    // Use the memory...
+
+    free(ptr);
+    return 0;
+}
+```
+
+**Implementation**: Uses `mmap` syscall with `MAP_ANONYMOUS | MAP_PRIVATE`
+
+**Returns**:
+- Pointer to allocated memory (> 0) on success
+- 0 on failure
+
+**Notes**:
+- Memory is zero-initialized by the kernel
+- Minimum allocation size is enforced by mmap (usually 4KB)
+- Suitable for dynamic data structures
+
+---
+
+### `free(ptr: *i8) -> i32`
+
+Free previously allocated memory.
+
+```chronos
+fn main() -> i32 {
+    let data = malloc(1024);
+
+    // Use data...
+
+    free(data);  // Release memory
+    return 0;
+}
+```
+
+**Implementation**: Currently a placeholder (bump allocator)
+
+**Returns**: 0 (always succeeds)
+
+**Notes**:
+- In current implementation, memory is not actually freed
+- Sufficient for single-pass compilation
+- Will be improved with proper free list in v0.19+
+
+---
+
+### Example: Dynamic Struct Allocation
+
+```chronos
+struct Token {
+    type: i32,
+    line: i32
+}
+
+fn main() -> i32 {
+    // Allocate array of 10 tokens
+    let token_size = 16;  // 2 fields * 8 bytes
+    let capacity = 10;
+    let tokens = malloc(capacity * token_size);
+
+    if (tokens == 0) {
+        println("Allocation failed");
+        return 1;
+    }
+
+    println("Token array allocated!");
+
+    // Use tokens...
+
+    free(tokens);
+    return 0;
+}
+```
+
+---
+
 ## System Call Reference
 
 Built-in functions map directly to Linux syscalls:
@@ -291,6 +385,8 @@ Built-in functions map directly to Linux syscalls:
 | `write(fd, buf, count)` | sys_write | 1 |
 | `open(path, flags)` | sys_open | 2 |
 | `close(fd)` | sys_close | 3 |
+| `malloc(size)` | sys_mmap | 9 |
+| `free(ptr)` | (placeholder) | - |
 | `exit(code)` | sys_exit | 60 |
 
 ---
@@ -304,7 +400,7 @@ Chronos currently does NOT have:
 - ❌ `strlen()` - Calculate string length manually
 - ❌ `strcmp()` - Compare strings manually
 - ❌ `strcpy()` - Copy strings manually
-- ❌ `malloc()`/`free()` - Use stack arrays only
+- ✅ `malloc()`/`free()` - **NOW AVAILABLE!** (v0.18+)
 - ❌ `printf()` - Use `print()` + `print_int()` instead
 - ❌ Network functions - Implement via direct syscalls
 - ❌ Math functions - Implement manually
