@@ -1,0 +1,5 @@
+Program test_negative_simple
+  Variables:
+    x: i32 = -20
+
+  Print x

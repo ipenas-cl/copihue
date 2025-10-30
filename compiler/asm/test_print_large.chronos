@@ -1,0 +1,5 @@
+Program test_large
+  Variables:
+    x: i32 = 123456789
+
+  Print x

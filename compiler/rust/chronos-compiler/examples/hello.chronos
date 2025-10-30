@@ -1,0 +1,6 @@
+Program:
+  name: hello
+  description: Simple hello world program
+
+  actions:
+    - Print: "Hello, World!"

@@ -1,0 +1,5 @@
+Program test_expr
+  Variables:
+    result: i32 = 10 + 20
+
+  Print result

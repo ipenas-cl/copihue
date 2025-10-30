@@ -1,0 +1,7 @@
+Program test_negative
+  Variables:
+    x: i32 = 10
+    y: i32 = 30
+    result: i32 = x - y
+
+  Print result

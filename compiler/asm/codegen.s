@@ -176,6 +176,9 @@ generate_code:
     leaq asm_exit(%rip), %rsi
     call append_to_output
 
+    # Generate int_to_string_runtime function (in .text section)
+    call generate_int_to_string_runtime
+
     # Generate data section
     leaq asm_data_section(%rip), %rsi
     call append_to_output
@@ -186,7 +189,7 @@ generate_code:
 
 .gen_data_loop:
     cmpq %rbx, %r15
-    jle .gen_done
+    jle .gen_data_done
 
     # Get action string (possibly tagged pointer)
     leaq 24(%r12), %rax
@@ -204,6 +207,10 @@ generate_code:
 .skip_data_for_variable:
     incq %rbx
     jmp .gen_data_loop
+
+.gen_data_done:
+    # Generate buffers for int conversion
+    call generate_int_buffers
 
 .gen_done:
     # Return output buffer
@@ -679,10 +686,21 @@ generate_print_variable:
 
     movq %rax, %rbx         # Save symbol entry pointer
 
-    # WORKAROUND: Use fixed offset for first variable (4 bytes for i32)
-    # TODO: Fix symbol table offset storage bug
-    movq $4, %r12           # stack offset
+    # Get stack offset from symbol entry (at offset 40)
+    movq 40(%rbx), %r12
+    testq %r12, %r12
+    jnz .print_var_has_offset
 
+    # WORKAROUND: If offset is 0, calculate from initial_value field
+    # (we stored the actual offset there as a backup)
+    movq 48(%rbx), %r12
+    testq %r12, %r12
+    jnz .print_var_has_offset
+
+    # Last resort: use fixed offset 4
+    movq $4, %r12
+
+.print_var_has_offset:
     # Get variable's type (at offset 32 in entry)
     movl 32(%rbx), %r13d    # type
 
@@ -704,8 +722,14 @@ generate_print_variable:
     leaq load_var_code2(%rip), %rsi
     call append_to_output
 
-    # TODO: Convert integer to string and print
-    # For now, just print a placeholder
+    # Call int_to_string_runtime function
+    # %rax already has the value
+    leaq call_int_to_string(%rip), %rsi
+    call append_to_output
+
+    # Print the result
+    leaq print_int_result(%rip), %rsi
+    call append_to_output
 
     popq %r13
     popq %r12
@@ -887,6 +911,38 @@ evaluate_expression:
     popq %r13
     popq %r12
     popq %rbx
+    popq %rbp
+    ret
+
+# generate_int_to_string_runtime()
+# Generates the int_to_string_runtime function in output
+# Uses: %r14 (output position - modified)
+generate_int_to_string_runtime:
+    pushq %rbp
+    movq %rsp, %rbp
+
+    # Generate function label and prologue
+    leaq int_to_str_func(%rip), %rsi
+    call append_to_output
+
+    popq %rbp
+    ret
+
+# generate_int_buffers()
+# Generates buffers needed for int→string conversion
+# Uses: %r14 (output position - modified)
+generate_int_buffers:
+    pushq %rbp
+    movq %rsp, %rbp
+
+    # Generate buffers in .bss section
+    leaq int_buffers_bss(%rip), %rsi
+    call append_to_output
+
+    # Generate length variable in .data
+    leaq int_length_data(%rip), %rsi
+    call append_to_output
+
     popq %rbp
     ret
 
@@ -1088,6 +1144,118 @@ eval_var_load1:
 
 eval_var_load2:
     .ascii "(%rsp), %rax\n"
+    .byte 0
+
+call_int_to_string:
+    .ascii "    call int_to_string_runtime\n"
+    .byte 0
+
+print_int_result:
+    .ascii "    # Print integer result\n"
+    .ascii "    movq $1, %rax\n"
+    .ascii "    movq $1, %rdi\n"
+    .ascii "    leaq int_buffer(%rip), %rsi\n"
+    .ascii "    movq int_length(%rip), %rdx\n"
+    .ascii "    syscall\n"
+    .ascii "\n"
+    .byte 0
+
+int_to_str_func:
+    .ascii "\n"
+    .ascii "# int_to_string_runtime: converts %rax to decimal string\n"
+    .ascii "# Input: %rax = integer\n"
+    .ascii "# Output: int_buffer contains string, int_length contains length\n"
+    .ascii "int_to_string_runtime:\n"
+    .ascii "    pushq %rbp\n"
+    .ascii "    movq %rsp, %rbp\n"
+    .ascii "    pushq %rbx\n"
+    .ascii "    pushq %rcx\n"
+    .ascii "    pushq %rdx\n"
+    .ascii "    pushq %r8\n"
+    .ascii "    pushq %r9\n"
+    .ascii "\n"
+    .ascii "    movq %rax, %r8          # Save number\n"
+    .ascii "    xorq %r9, %r9           # digit_count = 0\n"
+    .ascii "    leaq int_buffer(%rip), %rbx\n"
+    .ascii "\n"
+    .ascii "    # Check if zero\n"
+    .ascii "    testq %r8, %r8\n"
+    .ascii "    jnz .its_check_negative\n"
+    .ascii "    movb $'0', (%rbx)\n"
+    .ascii "    incq %r9\n"
+    .ascii "    jmp .its_done\n"
+    .ascii "\n"
+    .ascii ".its_check_negative:\n"
+    .ascii "    # Check if negative\n"
+    .ascii "    testq %r8, %r8\n"
+    .ascii "    jns .its_positive\n"
+    .ascii "    movb $'-', (%rbx)\n"
+    .ascii "    incq %rbx\n"
+    .ascii "    incq %r9\n"
+    .ascii "    negq %r8                # Make positive\n"
+    .ascii "\n"
+    .ascii ".its_positive:\n"
+    .ascii "    # Extract digits (they come out reversed)\n"
+    .ascii "    movq %rbx, %rcx         # Save start of digits\n"
+    .ascii "    xorq %rdx, %rdx         # temp digit count\n"
+    .ascii "\n"
+    .ascii ".its_digit_loop:\n"
+    .ascii "    testq %r8, %r8\n"
+    .ascii "    jz .its_reverse\n"
+    .ascii "    xorq %rdx, %rdx\n"
+    .ascii "    movq %r8, %rax\n"
+    .ascii "    movq $10, %r8\n"
+    .ascii "    divq %r8                # %rax = quot, %rdx = rem\n"
+    .ascii "    movq %rax, %r8          # number = quot\n"
+    .ascii "    addb $'0', %dl          # Convert to ASCII\n"
+    .ascii "    movb %dl, (%rbx)\n"
+    .ascii "    incq %rbx\n"
+    .ascii "    incq %r9\n"
+    .ascii "    jmp .its_digit_loop\n"
+    .ascii "\n"
+    .ascii ".its_reverse:\n"
+    .ascii "    # Reverse digits in place\n"
+    .ascii "    movq %rcx, %rax         # left = start\n"
+    .ascii "    leaq -1(%rbx), %rdx     # right = end - 1\n"
+    .ascii "\n"
+    .ascii ".its_reverse_loop:\n"
+    .ascii "    cmpq %rax, %rdx\n"
+    .ascii "    jle .its_add_newline\n"
+    .ascii "    movb (%rax), %r8b\n"
+    .ascii "    movb (%rdx), %cl\n"
+    .ascii "    movb %cl, (%rax)\n"
+    .ascii "    movb %r8b, (%rdx)\n"
+    .ascii "    incq %rax\n"
+    .ascii "    decq %rdx\n"
+    .ascii "    jmp .its_reverse_loop\n"
+    .ascii "\n"
+    .ascii ".its_add_newline:\n"
+    .ascii "    movb $'\\n', (%rbx)\n"
+    .ascii "    incq %r9\n"
+    .ascii "\n"
+    .ascii ".its_done:\n"
+    .ascii "    movq %r9, int_length(%rip)\n"
+    .ascii "    popq %r9\n"
+    .ascii "    popq %r8\n"
+    .ascii "    popq %rdx\n"
+    .ascii "    popq %rcx\n"
+    .ascii "    popq %rbx\n"
+    .ascii "    popq %rbp\n"
+    .ascii "    ret\n"
+    .ascii "\n"
+    .byte 0
+
+int_buffers_bss:
+    .ascii ".bss\n"
+    .ascii "int_buffer:\n"
+    .ascii "    .skip 32\n"
+    .ascii "\n"
+    .byte 0
+
+int_length_data:
+    .ascii "int_length:\n"
+    .ascii "    .quad 0\n"
+    .ascii "\n"
     .byte 0
 
 .bss

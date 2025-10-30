@@ -1,0 +1,5 @@
+Program test_zero
+  Variables:
+    x: i32 = 0
+
+  Print x

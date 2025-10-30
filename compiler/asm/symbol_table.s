@@ -238,8 +238,9 @@ symbol_table_add_expr:
     # Store expression AST pointer (at offset 56 - in the padding area)
     movq %r15, 56(%rbx)
 
-    # Store initial value as 0 (will be calculated from expression)
-    movq $0, 48(%rbx)
+    # WORKAROUND: Also store offset in initial_value as backup (offset 48)
+    # This is because offset 40 has a known bug
+    movq %rax, 48(%rbx)
 
     # Increment symbol count
     movq symbol_count(%rip), %rcx
