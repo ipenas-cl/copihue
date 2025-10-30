@@ -77,18 +77,34 @@ fn codegen_init() -> i64 {
 fn emit(cg: *Codegen, line: *i8) -> i64 {
     let buf: *i8 = cg.output_buf;
     let i: i64 = 0;
+    let max_line_len: i64 = 8192;  // SECURITY FIX: Prevent infinite loops
+    let truncated: i64 = 0;
 
-    while (line[i] != 0) {
+    while (line[i] != 0 && i < max_line_len) {
         if (cg.output_len < cg.output_cap) {
             buf[cg.output_len] = line[i];
             cg.output_len = cg.output_len + 1;
+        } else {
+            truncated = 1;  // FIX: Track when buffer is full
         }
         i = i + 1;
+    }
+
+    if (i >= max_line_len) {
+        println("ERROR: Input line exceeded maximum length");
+        return 1;  // FIX: Return error code
     }
 
     if (cg.output_len < cg.output_cap) {
         buf[cg.output_len] = 10;
         cg.output_len = cg.output_len + 1;
+    } else {
+        truncated = 1;
+    }
+
+    if (truncated == 1) {
+        println("WARNING: Output buffer full, truncating");
+        return 1;  // FIX: Return error when truncated
     }
 
     return 0;
@@ -97,14 +113,27 @@ fn emit(cg: *Codegen, line: *i8) -> i64 {
 fn str_to_num(s: *i8) -> i64 {
     let result: i64 = 0;
     let i: i64 = 0;
+    let max_digits: i64 = 19;  // SECURITY FIX: i64 max ~19 digits
+    let digit_count: i64 = 0;
+    let max_iterations: i64 = 100;  // SECURITY FIX: Prevent infinite loops
 
-    while (s[i] != 0) {
+    while (s[i] != 0 && i < max_iterations) {
         if (s[i] >= 48) {
             if (s[i] <= 57) {
+                if (digit_count >= max_digits) {
+                    println("ERROR: Number too large in str_to_num");
+                    return 0;  // FIX: Return 0 on overflow
+                }
                 result = result * 10 + (s[i] - 48);
+                digit_count = digit_count + 1;
             }
         }
         i = i + 1;
+    }
+
+    if (i >= max_iterations) {
+        println("ERROR: String too long in str_to_num");
+        return 0;
     }
 
     return result;
@@ -323,8 +352,9 @@ fn parse_number(s: *i8, pos: i64) -> i64 {
 
 fn find_let_x(s: *i8) -> i64 {
     let i: i64 = 0;
+    let max_iterations: i64 = 8192;  // SECURITY FIX: Prevent infinite loops
 
-    while (s[i] != 0) {
+    while (s[i] != 0 && i < max_iterations) {
         if (s[i] == 108) {  // 'l'
             if (s[i+1] == 101) {  // 'e'
                 if (s[i+2] == 116) {  // 't'
@@ -332,19 +362,24 @@ fn find_let_x(s: *i8) -> i64 {
                         if (s[i+4] == 120) {  // 'x'
                             // Found "let x", now skip to '='
                             let pos: i64 = i + 5;
-                            while (s[pos] != 0) {
+                            let inner_iter: i64 = 0;
+                            while (s[pos] != 0 && inner_iter < max_iterations) {
                                 if (s[pos] == 61) {  // '='
                                     // Skip whitespace after '='
                                     pos = pos + 1;
-                                    while (s[pos] == 32) {
+                                    let ws_iter: i64 = 0;
+                                    while (s[pos] == 32 && ws_iter < 100) {
                                         pos = pos + 1;
+                                        ws_iter = ws_iter + 1;
                                     }
                                     // Parse number
                                     let value: i64 = 0;
-                                    while (s[pos] >= 48) {
+                                    let digit_iter: i64 = 0;
+                                    while (s[pos] >= 48 && digit_iter < 20) {
                                         if (s[pos] <= 57) {
                                             value = value * 10 + (s[pos] - 48);
                                             pos = pos + 1;
+                                            digit_iter = digit_iter + 1;
                                         } else {
                                             return value;
                                         }
@@ -352,6 +387,7 @@ fn find_let_x(s: *i8) -> i64 {
                                     return value;
                                 }
                                 pos = pos + 1;
+                                inner_iter = inner_iter + 1;
                             }
                         }
                     }
@@ -361,13 +397,18 @@ fn find_let_x(s: *i8) -> i64 {
         i = i + 1;
     }
 
+    if (i >= max_iterations) {
+        println("ERROR: Source too long in find_let_x");
+    }
+
     return 0;  // No variable found
 }
 
 fn find_return(s: *i8) -> i64 {
     let i: i64 = 0;
+    let max_iterations: i64 = 8192;  // SECURITY FIX: Prevent infinite loops
 
-    while (s[i] != 0) {
+    while (s[i] != 0 && i < max_iterations) {
         if (s[i] == 114) {  // 'r'
             if (s[i+1] == 101) {  // 'e'
                 if (s[i+2] == 116) {  // 't'
@@ -382,6 +423,10 @@ fn find_return(s: *i8) -> i64 {
             }
         }
         i = i + 1;
+    }
+
+    if (i >= max_iterations) {
+        println("ERROR: Source too long in find_return");
     }
 
     return 0;

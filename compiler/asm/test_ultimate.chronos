@@ -1,0 +1,8 @@
+Program ultimate
+  Variables:
+    a: i32 = 2
+    b: i32 = 3
+    c: i32 = 4
+    result: i32 = (a + b) * c
+
+  Print "Ultimate: (2 + 3) * 4 = 20"

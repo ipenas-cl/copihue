@@ -1,372 +1,461 @@
-# Chronos Roadmap
+# Chronos v0.0.1 - Roadmap de Implementación
 
-**Current Version**: v0.17
-**Last Updated**: 2025-10-27
-
----
-
-## Overview
-
-Chronos is a systems programming language focused on safety, determinism, and performance. This roadmap outlines planned features and improvements for future releases.
-
-**Philosophy**: Each release adds value while maintaining our core principles:
-- 🛡️ Safety first (bounds checking, no undefined behavior)
-- 🎯 Determinism (same input → same output)
-- ⚡ Performance (optimizations without compromising safety)
-- 🎓 Simplicity (clear syntax, predictable behavior)
+**Fecha:** 29 de octubre de 2025
+**Versión:** 0.0.1 (Design Phase)
+**Enfoque:** Assembly-First, Security-First, Determinism-Always
 
 ---
 
-## Version History
+## Nuevo Comienzo
 
-### ✅ v0.17 - Self-Hosting Achieved! (CURRENT)
-**Released**: 2025-10-29
-**Status**: 🎉 100% Self-Hosting
+### Approach Anterior (Abandonado)
+- ❌ Bootstrap compiler en C con bugs fundamentales
+- ❌ Sintaxis C-like sin cuestionar si es óptimo
+- ❌ Features RT como afterthought
+- ❌ Fighting con herramientas rotas
+- ❌ Sin dirección clara
 
-**Major Achievement**:
-- ✅ **Fully self-hosting compiler** - Compiler written in Chronos compiles Chronos!
-- ✅ **4,082 lines** of self-hosted compiler code
-- ✅ **End-to-end verified** - Programs compile and execute correctly
-
-**Self-Hosted Components**:
-- lexer.ch (576 lines) - Tokenization
-- parser.ch (570 lines) - Syntax analysis
-- ast.ch (370 lines) - AST construction
-- codegen.ch (468 lines) - x86-64 code generation
-- compiler.ch - Basic integration
-- compiler_v2.ch (355 lines) - File-based compilation
-- compiler_v3.ch (503 lines) - **Arithmetic expressions: +, -, *, /**
-
-**Bootstrap Compiler Features**:
-- Optimizing compiler with 3 levels (-O0, -O1, -O2)
-- Constant folding optimization
-- Strength reduction for power-of-2 operations
-- Types: i8, i16, i32, i64, arrays, structs, pointers
-- Operators: arithmetic, logical, compound assignment
-- Control flow: if/else, while, for
-- Safety guarantees always active
+### Nuevo Diseño (v0.0.1 - Desde Cero)
+- ✅ Diseño completo del lenguaje PRIMERO
+- ✅ Sintaxis repensada para determinismo
+- ✅ Codegen directo a Assembly x86-64
+- ✅ No dependencia de C
+- ✅ Seguridad y determinismo en el core
+- ✅ Accesibilidad para las masas
 
 ---
 
-## 🎯 v0.18 - Code Quality & Developer Experience
+## Fases de Implementación
 
-**Target**: Q1 2026 (Jan-Mar)
-**Focus**: Better code generation and error messages
+### FASE 0: Diseño del Lenguaje ✅ COMPLETADO
 
-### Compiler Optimizations
-- [ ] **Peephole optimization** - Pattern-based assembly improvements
-- [ ] **Dead code elimination** - Remove unreachable code
-- [ ] **Common subexpression elimination** - Reuse computed values
+**Duración:** 1 día
+**Estado:** ✅ COMPLETADO
 
-### Developer Experience
-- [ ] **Better error messages** - More helpful, with suggestions
-- [ ] **Line/column numbers in errors** - Precise error location
-- [ ] **Warnings** - Potential issues (unused variables, etc.)
-
-### Self-Hosted Compiler Enhancements
-- [ ] **Local variables in expressions** - Use variables in arithmetic (compiler_v3)
-  ```chronos
-  let x: i64 = 10;
-  return x + 5;  // Should work in self-hosted compiler
-  ```
-- [ ] **Operator precedence** - Proper evaluation order (`2 + 3 * 4` = 14, not 20)
-- [ ] **Comparison operators** - `==`, `!=`, `<`, `>`, `<=`, `>=` in compiler_v3
-
-### Language Improvements
-- [ ] **Else-if construct** - `else if` instead of nested else
-- [ ] **String variable indexing** - `var[i]` not just `"literal"[i]`
-- [ ] **Array initialization syntax** - Better initializer support
-
-### Performance
-- Expected: 5-10% additional code size reduction
-- Expected: Faster compilation times
-- Expected: Better error recovery
-
-**Estimated Work**: 40-60 hours
-**Priority**: High
+**Entregables:**
+- [x] docs/CHRONOS_LANGUAGE_SPEC_v2.md (completo)
+- [x] Sintaxis definida
+- [x] Sistema de tipos especificado
+- [x] Ownership rules diseñadas
+- [x] RT features especificadas
 
 ---
 
-## 🏗️ v0.19 - Advanced Optimizations & Types
+### FASE 1: Minimal Working Compiler (6-8 semanas)
 
-**Target**: Q2 2026 (Apr-Jun)
-**Focus**: Loop optimizations and basic structs
+**Objetivo:** Compiler que puede compilar un programa "Hello World"
 
-### Compiler Optimizations
-- [ ] **Loop unrolling** - Unroll small loops
-- [ ] **Loop-invariant code motion** - Move calculations out of loops
-- [ ] **Function inlining** - Inline small functions
+#### 1.1 Lexer (1 semana)
+```chronos
+// Debe poder tokenizar:
+fn main() {
+    print("Hello, World!");
+}
+```
 
-### Type System
-- [ ] **Structs (basic)** - User-defined types with fields
-  ```chronos
-  struct Point {
-      x: i32,
-      y: i32
-  }
-  ```
-- [ ] **Struct literals** - `Point { x: 10, y: 20 }`
-- [ ] **Struct methods** - Functions tied to types
+**Tareas:**
+- [ ] Token types (keywords, operators, literals)
+- [ ] Lexer state machine
+- [ ] String literal parsing
+- [ ] Number literal parsing
+- [ ] Comment handling
+- [ ] Error reporting con line/column
 
-### Standard Library (Start)
-- [ ] **String utilities** - strlen, strcmp, strcpy
-- [ ] **Memory utilities** - memcpy, memset
-- [ ] **Math utilities** - abs, min, max
+**Test:** Tokenizar 100 programas de ejemplo
 
-**Estimated Work**: 60-80 hours
-**Priority**: Medium-High
+#### 1.2 Parser (2 semanas)
+```chronos
+// Debe poder parsear:
+fn add(a: i32, b: i32) -> i32 {
+    return a + b;
+}
+```
 
----
+**Tareas:**
+- [ ] AST design (simple, sin ownership por ahora)
+- [ ] Expression parsing (precedence climbing)
+- [ ] Statement parsing
+- [ ] Function declaration parsing
+- [ ] Basic type parsing (i32, i64, bool, str)
+- [ ] Error recovery
 
-## 🚀 v0.20 - Enums & Pattern Matching
+**Test:** Parsear 100 programas, generar AST
 
-**Target**: Q3 2026 (Jul-Sep)
-**Focus**: Algebraic data types
+#### 1.3 Semantic Analysis Básico (1 semana)
+- [ ] Symbol table
+- [ ] Type checking básico
+- [ ] Function signature validation
+- [ ] Variable scope checking
+- [ ] Return type checking
 
-### Language Features
-- [ ] **Enums** - Sum types
-  ```chronos
-  enum Result {
-      Ok(i32),
-      Error(string)
-  }
-  ```
-- [ ] **Pattern matching** - Match expressions
-  ```chronos
-  match result {
-      Ok(value) => print_int(value),
-      Error(msg) => println(msg)
-  }
-  ```
-- [ ] **Option type** - Built-in Maybe/Option
-  ```chronos
-  enum Option<T> {
-      Some(T),
-      None
-  }
-  ```
+**Test:** Detectar errores de tipo
 
-### Compiler
-- [ ] **Exhaustiveness checking** - Ensure all cases covered
-- [ ] **Optimization for enums** - Efficient representation
+#### 1.4 Codegen Assembly x86-64 (2-3 semanas)
+```assembly
+; Debe generar:
+.global main
+main:
+    push rbp
+    mov rbp, rsp
+    ; ... código ...
+    pop rbp
+    ret
+```
 
-**Estimated Work**: 80-100 hours
-**Priority**: Medium
+**Tareas:**
+- [ ] Assembly templates
+- [ ] Register allocation (simple)
+- [ ] Stack frame management
+- [ ] Function calls (calling convention)
+- [ ] Arithmetic operations
+- [ ] Memory access
+- [ ] System calls (write para print)
 
----
+**Test:** Compilar y ejecutar "Hello World"
 
-## 🎓 v0.21 - Generics (Basic)
+#### 1.5 Assembler Integrado (1 semana)
+- [ ] Parse assembly syntax
+- [ ] Generate ELF64 header
+- [ ] Encode x86-64 instructions
+- [ ] Symbol resolution
+- [ ] Relocation
 
-**Target**: Q4 2026 (Oct-Dec)
-**Focus**: Generic programming foundations
+**Test:** Generar ejecutables funcionales
 
-### Language Features
-- [ ] **Generic functions**
-  ```chronos
-  fn identity<T>(x: T) -> T {
-      return x;
-  }
-  ```
-- [ ] **Generic structs**
-  ```chronos
-  struct Pair<A, B> {
-      first: A,
-      second: B
-  }
-  ```
-- [ ] **Type inference** - Improved type inference for generics
-- [ ] **Monomorphization** - Generate specialized code per type
-
-**Estimated Work**: 100-120 hours
-**Priority**: Medium
+**Milestone:** Compiler auto-compilable (bootstrap en Assembly puro)
 
 ---
 
-## 🌟 v1.0 - Self-Hosting & Module System
+### FASE 2: Type System Completo (8-10 semanas)
 
-**Target**: 2027 (Mid-year)
-**Focus**: Production-ready for serious projects
+#### 2.1 Advanced Types (2 semanas)
+- [ ] Structs con layout memory
+- [ ] Enums (tagged unions)
+- [ ] Arrays de tamaño fijo
+- [ ] Tuples
+- [ ] Slices (&[T])
+- [ ] Generics básicos
 
-### Self-Hosting
-- [ ] **Compiler written in Chronos** - Bootstrap complete
-- [ ] **Standard library in Chronos** - No C dependencies
-- [ ] **Build system** - Chronos-based build tool
+#### 2.2 Ownership System (3 semanas)
+- [ ] Move semantics
+- [ ] Borrow checker
+- [ ] Lifetime tracking
+- [ ] Drop implementation
+- [ ] Copy vs Clone
 
-### Module System
-- [ ] **Modules** - Namespaces and organization
-  ```chronos
-  mod math {
-      pub fn abs(x: i32) -> i32 { ... }
-  }
-  ```
-- [ ] **Imports** - `use math::abs;`
-- [ ] **Visibility** - `pub` and private
-- [ ] **Package manager** (basic) - Dependency management
+**Test:** Detectar use-after-move, dangling pointers
 
-### Standard Library (Complete)
-- [ ] **Collections** - Vec, HashMap, HashSet
-- [ ] **Strings** - String type (not just literals)
-- [ ] **Iterators** - Functional iteration
-- [ ] **Error handling** - Result/Option utilities
-- [ ] **I/O** - File, network, stdio abstractions
-- [ ] **Formatting** - Printf-like formatting
+#### 2.3 Type Inference (2 semanas)
+- [ ] Local variable inference
+- [ ] Hindley-Milner algorithm
+- [ ] Generic instantiation
+- [ ] Trait resolution
 
-### Tooling
-- [ ] **Debugger support** - DWARF debug info
-- [ ] **Language Server Protocol** - IDE support
-- [ ] **Documentation generator** - Doc comments
-- [ ] **Testing framework** - Built-in test runner
+#### 2.4 Advanced Generics (2 semanas)
+- [ ] Trait bounds
+- [ ] Where clauses
+- [ ] Associated types
+- [ ] Generic functions
+- [ ] Generic structs/enums
 
-**Estimated Work**: 300-400 hours
-**Priority**: High (for v1.0)
+**Milestone:** Type safety completa
 
 ---
 
-## 🔮 v2.0+ - Advanced Features (Future)
+### FASE 3: Optimizaciones (4-6 semanas)
 
-**Target**: 2028+
-**Focus**: Advanced language features
+#### 3.1 Optimización de Assembly (2 semanas)
+- [ ] Dead code elimination
+- [ ] Constant propagation
+- [ ] Common subexpression elimination
+- [ ] Register allocation mejorado
 
-### Potential Features
-- [ ] **Async/await** - Asynchronous programming
-- [ ] **Traits/Interfaces** - Ad-hoc polymorphism
-- [ ] **Macros** - Hygienic macros
-- [ ] **Compile-time computation** - Const evaluation
-- [ ] **SIMD support** - Explicit vectorization
-- [ ] **Link-time optimization** - Cross-module optimization
-- [ ] **Multiple backends** - LLVM, Cranelift, or custom
-- [ ] **Garbage collection** (optional) - RC or GC for managed mode
-- [ ] **Foreign function interface** - Call C/Rust libraries
-- [ ] **WebAssembly target** - Compile to WASM
+#### 3.2 Inline Optimization (1 semana)
+- [ ] Inline small functions
+- [ ] Inline analysis
+- [ ] Size/speed tradeoff
 
-**Note**: These are exploratory. Not all may be implemented.
+#### 3.3 SIMD (1 semana)
+- [ ] Vector types
+- [ ] SIMD instructions
+- [ ] Auto-vectorization hints
 
----
+#### 3.4 Link-Time Optimization (1 semana)
+- [ ] Whole-program analysis
+- [ ] Cross-function optimization
+- [ ] Dead code elimination global
 
-## 🎯 Priorities by Theme
-
-### Compiler (Ongoing)
-1. **Optimization quality** - Better code generation
-2. **Compilation speed** - Faster builds
-3. **Error messages** - More helpful feedback
-4. **Safety checks** - More compile-time verification
-
-### Language (Incremental)
-1. **Type system** - Structs, enums, generics
-2. **Pattern matching** - Powerful control flow
-3. **Module system** - Organization and reuse
-4. **Standard library** - Common utilities
-
-### Tooling (v1.0+)
-1. **Self-hosting** - Compiler in Chronos
-2. **IDE support** - LSP, syntax highlighting
-3. **Build system** - Integrated build tool
-4. **Package manager** - Dependency management
+**Milestone:** Performance competitivo con C
 
 ---
 
-## 📅 Release Schedule
+### FASE 4: Real-Time Extensions (8-10 semanas)
 
-| Version | Target | Focus | Estimated Hours |
-|---------|--------|-------|-----------------|
-| **v0.17** | ✅ Released | Optimizing compiler | - |
-| **v0.18** | Q1 2026 | Code quality & DX | 40-60 |
-| **v0.19** | Q2 2026 | Advanced opts & structs | 60-80 |
-| **v0.20** | Q3 2026 | Enums & pattern matching | 80-100 |
-| **v0.21** | Q4 2026 | Generics | 100-120 |
-| **v1.0** | Mid 2027 | Self-hosting & modules | 300-400 |
-| **v2.0+** | 2028+ | Advanced features | TBD |
+#### 4.1 WCET Analysis (3 semanas)
+- [ ] Control flow graph
+- [ ] Loop bound analysis
+- [ ] Path analysis
+- [ ] Cache analysis (básico)
+- [ ] WCET annotations
 
-**Note**: These are estimates. Real timelines depend on available development time and priorities.
+**Test:** Calcular WCET de funciones RT
 
----
+#### 4.2 Determinismo Garantizado (2 semanas)
+- [ ] Arithmetic con overflow checking
+- [ ] Sequence points
+- [ ] Evaluation order enforcement
+- [ ] No undefined behavior
 
-## 🚧 Non-Goals
+#### 4.3 Fixed-Point Arithmetic (1 semana)
+- [ ] Fix<N, P> type
+- [ ] Arithmetic operations
+- [ ] Conversions
 
-Features we explicitly **won't** add (preserving simplicity):
+#### 4.4 RT Task Scheduling (2 semanas)
+- [ ] Task annotations
+- [ ] Priority assignment
+- [ ] Schedulability analysis
+- [ ] Response time analysis
 
-- ❌ **Complex macros** - Hygienic macros only (v2.0+)
-- ❌ **Exceptions** - Use Result/Option instead
-- ❌ **Inheritance** - Prefer composition
-- ❌ **Implicit conversions** - All conversions explicit
-- ❌ **Null pointers** - Use Option<&T> instead
-- ❌ **Undefined behavior** - Never, ever
-- ❌ **Hidden allocations** - All allocation explicit
-- ❌ **Thread-local storage** - Explicit state only
-
----
-
-## 💡 Contributing
-
-Want to help shape Chronos? Here's how:
-
-### Current Needs (v0.18)
-- Better error messages
-- Peephole optimization patterns
-- Dead code elimination
-- Test coverage
-
-### Future Needs (v0.19+)
-- Struct implementation
-- Loop optimization algorithms
-- Standard library design
-- Documentation improvements
-
-### How to Contribute
-1. Check [issues](https://github.com/your-repo/issues) for open tasks
-2. Discuss design in issues before implementing
-3. Follow the coding style in existing code
-4. Add tests for new features
-5. Update documentation
+**Milestone:** RT-capable compiler
 
 ---
 
-## 📊 Metrics & Goals
+### FASE 5: Concurrencia (6-8 semanas)
 
-### Code Quality
-- **Test coverage**: Target 80%+ (currently ~60%)
-- **Documentation coverage**: Target 100% (currently 95%)
-- **Example coverage**: Target all features (currently 90%)
+#### 5.1 Threads (2 semanas)
+- [ ] Thread spawning
+- [ ] Join/detach
+- [ ] Thread-local storage
 
-### Performance
-- **Compilation speed**: < 1s for 1000 lines (currently ~200ms)
-- **Generated code**: Within 20% of hand-written assembly
-- **Optimization impact**: 20-40% improvement with -O2 (achieved)
+#### 5.2 Atomics (2 semanas)
+- [ ] Atomic types
+- [ ] Memory ordering
+- [ ] Compare-exchange
+- [ ] Fences
 
-### Safety
-- **Bounds checking**: Always active (achieved)
-- **Type safety**: 100% (achieved)
-- **Memory safety**: 100% (no heap yet)
-- **Undefined behavior**: 0% (achieved)
+#### 5.3 Channels (2 semanas)
+- [ ] MPSC channel
+- [ ] Bounded queue
+- [ ] Send/Recv with timeout
 
----
+#### 5.4 Async/Await (2 semanas)
+- [ ] Future trait
+- [ ] Async runtime básico
+- [ ] Poll mechanism
 
-## 🤝 Community & Support
-
-- **GitHub**: [your-repo](https://github.com/your-repo)
-- **Documentation**: `docs/` directory
-- **Examples**: `examples/` directory
-- **Issues**: Report bugs and request features
-- **Discussions**: Design discussions welcome
+**Milestone:** Concurrencia segura
 
 ---
 
-## 📝 Changelog
+### FASE 6: Standard Library (12-16 semanas)
 
-See [CHANGELOG.md](CHANGELOG.md) for detailed release notes.
+#### 6.1 Core (4 semanas)
+- [ ] Option, Result
+- [ ] Iterator trait
+- [ ] Common collections (Vec, HashMap)
+- [ ] String types
+
+#### 6.2 Memory (2 semanas)
+- [ ] Allocators
+- [ ] Smart pointers (Box, Rc, Arc)
+- [ ] Memory pools
+
+#### 6.3 I/O (2 semanas)
+- [ ] File operations
+- [ ] Buffered I/O
+- [ ] Formatting
+
+#### 6.4 Time (1 semana)
+- [ ] Duration, Instant
+- [ ] Timers
+- [ ] Sleep
+
+#### 6.5 Sync (2 semanas)
+- [ ] Mutex, RwLock
+- [ ] Condvar
+- [ ] Barriers
+
+#### 6.6 Network (3 semanas)
+- [ ] TCP/UDP sockets
+- [ ] Async I/O
+
+**Milestone:** Standard library funcional
 
 ---
 
-## 🎉 Conclusion
+## Timeline Total
 
-Chronos is on a clear path toward v1.0 and beyond. Each release adds meaningful features while maintaining our core values: **safety**, **determinism**, and **performance**.
+| Fase | Duración | Acumulado |
+|------|----------|-----------|
+| FASE 0: Diseño | 1 día | 1 día |
+| FASE 1: Minimal Compiler | 6-8 semanas | 2 meses |
+| FASE 2: Type System | 8-10 semanas | 4.5 meses |
+| FASE 3: Optimizaciones | 4-6 semanas | 6 meses |
+| FASE 4: RT Extensions | 8-10 semanas | 8.5 meses |
+| FASE 5: Concurrencia | 6-8 semanas | 10.5 meses |
+| FASE 6: Std Library | 12-16 semanas | 14.5 meses |
 
-The roadmap is ambitious but achievable. With steady progress, Chronos will become a production-ready systems programming language that prioritizes developer happiness without compromising on principles.
-
-**Join us on this journey!** 🚀
+**Total: ~15 meses** (1.25 años) para un compiler production-ready
 
 ---
 
-**Last Updated**: 2025-10-27
-**Current Version**: v0.17
-**Next Release**: v0.18 (Q1 2026)
+## Estrategia de Implementación
+
+### Bootstrap Strategy
+
+1. **Stage 0:** Minimal compiler en Assembly puro
+   - Puede compilar subset de Chronos
+   - Genera Assembly
+
+2. **Stage 1:** Compiler en Chronos (compilado por Stage 0)
+   - Puede compilar más features
+   - Self-hosting limitado
+
+3. **Stage 2:** Full compiler en Chronos (compilado por Stage 1)
+   - Puede compilar todas las features
+   - Completamente self-hosted
+
+4. **Stage 3:** Verificación (compilado por Stage 2)
+   - Stage 2 y Stage 3 deben ser idénticos (determinismo)
+
+### Testing Strategy
+
+- **Unit tests:** Para cada componente
+- **Integration tests:** End-to-end compilation
+- **Regression tests:** Prevenir bugs conocidos
+- **Fuzzing:** Input aleatorio para robustez
+- **Benchmarks:** Performance tracking
+
+### Documentation Strategy
+
+- **Language spec:** Especificación completa
+- **Compiler architecture:** Diseño interno
+- **API docs:** Standard library
+- **Tutorial:** Getting started
+- **Reference:** Comprehensive reference
+
+---
+
+## Métricas de Éxito
+
+### Phase 1 (Minimal Compiler)
+- ✅ Compila "Hello World"
+- ✅ Self-hosts (compila a sí mismo)
+- ✅ Genera ejecutables funcionales
+
+### Phase 2 (Type System)
+- ✅ Detecta 95% de memory safety issues
+- ✅ Detecta 95% de type errors
+- ✅ Zero false positives en borrow checker
+
+### Phase 3 (Optimizations)
+- ✅ Performance dentro de 2x de C optimizado
+- ✅ Binary size razonable (<10% overhead vs C)
+
+### Phase 4 (Real-Time)
+- ✅ WCET analysis con <20% error
+- ✅ Schedulability analysis funcional
+- ✅ Zero undefined behavior
+
+### Phase 5 (Concurrency)
+- ✅ Zero data races en safe code
+- ✅ Deadlock detection
+- ✅ Lock-free primitives correctos
+
+### Phase 6 (Std Library)
+- ✅ API completa y documentada
+- ✅ Performance competitiva
+- ✅ Memory safety garantizada
+
+---
+
+## Riesgos y Mitigación
+
+### Riesgo 1: Complejidad del Borrow Checker
+**Probabilidad:** Alta
+**Impacto:** Alto
+**Mitigación:** Implementar subset primero, iterar
+
+### Riesgo 2: WCET Analysis
+**Probabilidad:** Media
+**Impacto:** Alto
+**Mitigación:** Integrar tool existente (aiT, Bound-T)
+
+### Riesgo 3: Performance del Compiler
+**Probabilidad:** Media
+**Impacto:** Medio
+**Mitigación:** Profiling temprano, optimizar hot paths
+
+### Riesgo 4: Bugs en Codegen
+**Probabilidad:** Alta
+**Impacto:** Alto
+**Mitigación:** Testing exhaustivo, fuzzing, formal verification
+
+---
+
+## Recursos Necesarios
+
+### Desarrollo
+- **Tiempo:** 15 meses full-time (1 desarrollador)
+- **O:** 30 meses part-time (20 hrs/semana)
+
+### Herramientas
+- Assembler (integrado en compiler)
+- Debugger (gdb integration)
+- Profiler (perf integration)
+- WCET analyzer (aiT o custom)
+
+### Testing
+- CI/CD pipeline
+- Fuzzing infrastructure
+- Benchmark suite
+
+---
+
+## Próximo Paso Inmediato
+
+**Iniciar FASE 1.1: Implementar Lexer**
+
+```chronos
+// Target: tokenizar este programa
+fn main() -> i32 {
+    let x: i32 = 42;
+    return x;
+}
+```
+
+**Tareas:**
+1. Definir token types
+2. Implementar lexer en Assembly puro
+3. Tests de tokenización
+4. Compilar lexer
+
+**Tiempo estimado:** 1 semana
+
+---
+
+**¿Comenzamos con el Lexer en Assembly puro?**
+
+Opciones:
+
+**A) SÍ - Comenzar Lexer en Assembly**
+- Escribir lexer.asm directamente
+- Control total, sin dependencias
+- Aprendizaje de Assembly x86-64
+
+**B) Prototipo rápido en Chronos actual**
+- Implementar lexer en Chronos actual (con bugs)
+- Luego reescribir en Assembly
+- Más rápido inicialmente
+
+**C) Diseñar más primero**
+- Documentar formato AST
+- Documentar formato Assembly
+- Documentar calling conventions
+
+---
+
+**Firmado:** Chronos v0.0.1 Team
+**Estado:** Diseño en progreso - Repensando sintaxis
+**Versión:** 0.0.1 (Design Phase)

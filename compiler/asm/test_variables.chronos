@@ -1,0 +1,7 @@
+Program variables
+  Variables:
+    x: i32 = 10
+    y: i32 = 20
+    result: i32 = x + y
+
+  Print "Variables test: 10 + 20 = 30"

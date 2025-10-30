@@ -1,0 +1,5 @@
+Program parentheses
+  Variables:
+    result: i32 = (2 + 3) * 4
+
+  Print "Parentheses test: (2 + 3) * 4 = 20"

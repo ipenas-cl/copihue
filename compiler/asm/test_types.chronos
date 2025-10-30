@@ -1,0 +1,10 @@
+Program test_types
+  Variables:
+    x: i32 = 42
+    y: i64 = 100
+    z: bool = 1
+
+  Print "Testing variables:"
+  Print x
+  Print y
+  Print z

@@ -1,0 +1,4 @@
+Program test
+Variables:
+  x: i32 = 42
+Print x

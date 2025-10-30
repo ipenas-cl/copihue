@@ -1,0 +1,9 @@
+Program complex
+  Variables:
+    a: i32 = 5
+    b: i32 = 3
+    c: i32 = 2
+    d: i32 = 1
+    result: i32 = a + b * c - d
+
+  Print "Complex: 5 + 3 * 2 - 1 = 10"

@@ -1,0 +1,5 @@
+Program precedence
+  Variables:
+    result: i32 = 2 + 3 * 4
+
+  Print "Precedence test: 2 + 3 * 4 = 14"

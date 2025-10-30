@@ -1,0 +1,103 @@
+# Chronos Integrated Toolchain v0.3 - Instruction Set
+
+## Arithmetic Operations
+
+### ADD (48 01 XX)
+- add rax, rbx: 48 01 d8
+- add rax, rcx: 48 01 c8
+- add rax, rdx: 48 01 d0
+
+### SUB (48 29 XX)
+- sub rax, rbx: 48 29 d8
+- sub rax, rcx: 48 29 c8
+- sub rax, rdx: 48 29 d0
+
+### IMUL (48 0f af XX)
+- imul rax, rbx: 48 0f af c3
+- imul rax, rcx: 48 0f af c1
+- imul rax, rdx: 48 0f af c2
+
+### XOR
+- xor rax, rax: 48 31 c0 (common zero idiom)
+- xor rbx, rbx: 48 31 db
+- xor rcx, rcx: 48 31 c9
+- xor rdx, rdx: 48 31 d2
+
+### DIV/IDIV
+- idiv rbx: 48 f7 fb (signed division, rax/rbx -> quotient in rax, remainder in rdx)
+- div rbx: 48 f7 f3 (unsigned)
+
+## MOV with immediates (48 bX [imm64])
+- mov rax, imm: 48 b8 [imm64] ✅ Already implemented
+- mov rbx, imm: 48 bb [imm64]
+- mov rcx, imm: 48 b9 [imm64]
+- mov rdx, imm: 48 ba [imm64]
+- mov rsi, imm: 48 be [imm64]
+- mov rdi, imm: 48 bf [imm64]
+
+## MOV register to register (48 89/8b XX)
+- mov rax, rbx: 48 89 d8
+- mov rbx, rax: 48 89 c3
+- mov rax, rcx: 48 89 c8
+- mov rcx, rax: 48 89 c1
+- mov rdi, rax: 48 89 c7 ✅ Already implemented
+- mov rax, rdi: 48 89 f8
+- mov rbp, rsp: 48 89 e5 ✅ Already implemented
+
+## Comparison (48 39/3b/85 XX)
+- cmp rax, rbx: 48 39 d8
+- cmp rax, rcx: 48 39 c8
+- cmp rax, rdx: 48 39 d0
+- test rax, rax: 48 85 c0
+- test rbx, rbx: 48 85 db
+
+## Conditional Jumps (7X [rel8]) - Short jumps only
+- jmp rel8: eb [rel8]
+- je/jz rel8: 74 [rel8]
+- jne/jnz rel8: 75 [rel8]
+- jl/jnge rel8: 7c [rel8] (less than, signed)
+- jle/jng rel8: 7e [rel8] (less or equal, signed)
+- jg/jnle rel8: 7f [rel8] (greater than, signed)
+- jge/jnl rel8: 7d [rel8] (greater or equal, signed)
+
+## Stack Operations
+- push rax: 50
+- push rbx: 53
+- push rcx: 51
+- push rdx: 52
+- push rbp: 55 ✅ Already implemented
+- pop rax: 58
+- pop rbx: 5b
+- pop rcx: 59
+- pop rdx: 5a
+- pop rbp: 5d
+
+## Increment/Decrement (48 ff XX)
+- inc rax: 48 ff c0
+- inc rbx: 48 ff c3
+- dec rax: 48 ff c8
+- dec rbx: 48 ff cb
+
+## LEA (Load Effective Address) - 48 8d XX
+- lea rax, [rbx]: 48 8d 03
+- lea rax, [rbp-8]: 48 8d 45 f8
+
+## Already Implemented
+- call main: e8 [rel32] ✅
+- mov rdi, rax: 48 89 c7 ✅
+- mov rbp, rsp: 48 89 e5 ✅
+- mov rax, N: 48 b8 [imm64] ✅
+- syscall: 0f 05 ✅
+- ret: c3 ✅
+- push rbp: 55 ✅
+- leave: c9 ✅
+
+## Priority for v0.3
+1. Arithmetic: add, sub, imul (needed for compiler)
+2. XOR (zero idiom)
+3. MOV variants (rbx, rcx, rdx with immediates)
+4. Basic jumps (jmp, je, jne)
+5. Test/cmp
+6. More stack ops (push/pop rax,rbx,rcx,rdx)
+
+Total: ~30 new instructions

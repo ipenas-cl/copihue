@@ -1,0 +1,5 @@
+Program complex
+  Variables:
+    x: i32 = 2 + 3 * 4
+
+  Print "Success"
