@@ -1,4 +1,4 @@
-tests/errors/bad_escape.cph:2:11: error: unknown escape sequence '\q' in string
+tests/errors/bad_escape.lap:2:11: error: unknown escape sequence '\q' in string
       2 |     print("bad \q escape");
         |           ^
 1 error, compilation failed

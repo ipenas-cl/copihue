@@ -1,4 +1,4 @@
-tests/errors/index_scalar.cph:2:12: error: cannot index 'buf': it is not an array or a pointer (declare it as e.g. 'buf: *i8')
+tests/errors/index_scalar.lap:2:12: error: cannot index 'buf': it is not an array or a pointer (declare it as e.g. 'buf: *i8')
       2 |     return buf[0];
         |            ^
 1 error, compilation failed

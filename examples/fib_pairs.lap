@@ -1,4 +1,4 @@
-// fib.cph: iterative Fibonacci with a loop, else-if and a struct
+// fib_pairs.lap: iterative Fibonacci with a loop, else-if and a struct
 struct Pair {
     a: i64,
     b: i64,

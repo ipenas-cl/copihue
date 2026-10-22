@@ -1,4 +1,4 @@
-tests/errors/bss_start_hosted.cph:2:18: error: bss_start() is only available with --flat
+tests/errors/bss_start_hosted.lap:2:18: error: bss_start() is only available with --flat
       2 |     let p: *u8 = bss_start();
         |                  ^
 1 error, compilation failed

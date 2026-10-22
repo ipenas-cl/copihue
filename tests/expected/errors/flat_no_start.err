@@ -1,4 +1,4 @@
-tests/errors/flat_no_start.cph:1:1: error: --flat needs a function named _start (the entry point)
+tests/errors/flat_no_start.lap:1:1: error: --flat needs a function named _start (the entry point)
       1 | // flags: --flat 0x10000
         | ^
 1 error, compilation failed

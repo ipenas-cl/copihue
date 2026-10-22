@@ -14,10 +14,11 @@
 
 // ==== NAMING (single place to change when the language is renamed) ====
 #define LANG_NAME     "Copihue"
-#define LANG_VERSION  "0.18.2"
+#define LANG_VERSION  "0.19.0"
 #define COMPILER_BIN  "copihue"
-#define SRC_EXT       ".cph"
-#define OLD_SRC_EXT   ".ch"   /* pre-rename (Chronos) extension, still accepted */
+#define SRC_EXT       ".lap"   /* Lapageria rosea, the copihue */
+#define OLD_SRC_EXT   ".cph"   /* v0.18.x extension, still accepted with a warning */
+#define OLDER_SRC_EXT ".ch"    /* pre-rename (Chronos) extension, still accepted */
 
 // ==== DIAGNOSTICS ====
 const char* g_src_file = "<input>";
@@ -3416,9 +3417,11 @@ int main(int argc, char** argv) {
     }
     if (!input) { usage(stderr); return 2; }
     {
-        size_t il = strlen(input), ol = strlen(OLD_SRC_EXT);
+        size_t il = strlen(input), ol = strlen(OLD_SRC_EXT), ol2 = strlen(OLDER_SRC_EXT);
         if (il > ol && !strcmp(input + il - ol, OLD_SRC_EXT))
-            fprintf(stderr, "%s: warning: the '" OLD_SRC_EXT "' extension is deprecated (the language was renamed from Chronos); use '" SRC_EXT "'\n", input);
+            fprintf(stderr, "%s: warning: the '" OLD_SRC_EXT "' extension is deprecated; rename the file to '" SRC_EXT "'\n", input);
+        else if (il > ol2 && !strcmp(input + il - ol2, OLDER_SRC_EXT))
+            fprintf(stderr, "%s: warning: the '" OLDER_SRC_EXT "' extension is deprecated (the language was renamed from Chronos); use '" SRC_EXT "'\n", input);
     }
 
     FILE* f = fopen(input, "r");

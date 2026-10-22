@@ -2,6 +2,14 @@
 
 Todos los cambios importantes del proyecto.
 
+## [0.19.0] - 2026-10-22
+
+### Changed
+- Source files now use the `.lap` extension (from *Lapageria rosea*, the copihue). All tests and examples were renamed.
+
+### Deprecated
+- `.cph` (v0.18.x) and `.ch` (Chronos) are still accepted, with a warning asking you to rename the file to `.lap`.
+
 ## [0.18.2] - 2026-10-22
 
 ### Fixed
