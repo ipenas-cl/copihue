@@ -1,0 +1,66 @@
+section .data
+row: dq 0
+section .text
+vga_put:
+    push rbp
+    mov rbp, rsp
+    sub rsp, __frame_vga_put
+    mov [rbp-8], rdi
+    mov [rbp-16], rsi
+    mov rax, 753664
+    mov [rbp-24], rax
+    mov rax, 3840
+    push rax
+    mov rax, [rbp-16]
+    mov rbx, rax
+    pop rax
+    or rax, rbx
+    push rax
+    mov rax, [row]
+    push rax
+    mov rax, 80
+    mov rbx, rax
+    pop rax
+    imul rax, rbx
+    push rax
+    mov rax, [rbp-8]
+    mov rbx, rax
+    pop rax
+    add rax, rbx
+    imul rax, 2
+    mov rbx, [rbp-24]
+    add rbx, rax
+    pop rax
+    mov word [rbx], ax
+    mov rax, 0
+    leave
+    ret
+    xor rax, rax
+    leave
+    ret
+__frame_vga_put equ 96
+kmain:
+    push rbp
+    mov rbp, rsp
+    sub rsp, __frame_kmain
+    mov rax, 0
+    push rax
+    mov rax, 72
+    push rax
+    pop rsi
+    pop rdi
+    call vga_put
+    mov rax, 1
+    push rax
+    mov rax, 105
+    push rax
+    pop rsi
+    pop rdi
+    call vga_put
+    mov rax, 0
+    leave
+    ret
+    xor rax, rax
+    leave
+    ret
+__frame_kmain equ 64
