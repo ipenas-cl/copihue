@@ -1,0 +1,25 @@
+// --flat: _start runs first even when defined after other functions,
+// and bss_start()/bss_end() bound the zero-initialized globals.
+let counter: i64;
+let table: [u8; 32];
+
+fn helper() -> i64 {
+    counter = counter + 1;
+    return counter;
+}
+
+fn _start() -> i64 {
+    let bss: *u8 = bss_start();
+    let n: i64 = bss_end() - bss_start();
+    let i: i64 = 0;
+    while (i < n) {
+        bss[i] = 0;
+        i = i + 1;
+    }
+    helper();
+    while (1) {
+        cli();
+        hlt();
+    }
+    return 0;
+}

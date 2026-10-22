@@ -15,9 +15,9 @@
 set -u
 cd "$(dirname "$0")/.."
 ROOT=$PWD
-CC=$ROOT/compiler/bootstrap-c/copihuec
+CC=$ROOT/compiler/bootstrap-c/copihue
 UPDATE=0; [ "${1:-}" = "--update" ] && UPDATE=1
-gcc -O2 -Wall -o "$CC" compiler/bootstrap-c/copihuec.c || exit 1
+gcc -O2 -Wall -o "$CC" compiler/bootstrap-c/copihue.c || exit 1
 
 # Programs that are not batch tests (servers / need a peer) or need input.
 # They are covered by tests/net_test.sh instead.
@@ -41,7 +41,7 @@ check() {  # $1 = name, $2 = golden file, $3 = actual file
   else fail=$((fail+1)); failed+=("$1"); echo "FAIL $1"; [ -f "$2" ] && diff "$2" "$3" | head -10; fi
 }
 
-for src in $(ls tests/*.cph tests/*/*.cph examples/*.cph | grep -v -e '^tests/errors/' -e '^tests/freestanding/'); do
+for src in $(ls tests/*.cph tests/*/*.cph examples/*.cph | grep -v -e '^tests/errors/' -e '^tests/freestanding/' -e "^tests/flat/"); do
   case "$SKIP" in *" $src "*) continue ;; esac
   golden=tests/expected/${src%.cph}.out
   run_program "$src" -O0 > "$WORK/o0"
@@ -75,6 +75,20 @@ for src in tests/freestanding/*.cph; do
   # Keep only instructions (drop comments/blank lines) as the golden output.
   grep -vE '^\s*(;|$)' "$WORK/fs.asm" | grep -v '^; Generated' > "$WORK/fs.norm"
   check "$src" "tests/expected/freestanding/$name.asm.txt" "$WORK/fs.norm"
+done
+
+# 4. Flat-binary tests: tests/flat/*.cph build with --flat 0x10000 into a raw
+#    image; _start must be at offset 0 and the bytes must match the golden hexdump.
+for src in tests/flat/*.cph; do
+  name=$(basename "$src" .cph)
+  if ! ( cd "$WORK" && "$CC" --flat 0x10000 -o flat.bin "$ROOT/$src" 2>err.txt && "$CC" --flat 0x10000 -S -o flat.asm "$ROOT/$src" 2>>err.txt ); then
+    fail=$((fail+1)); failed+=("$src"); echo "FAIL $src:"; cat "$WORK/err.txt"; continue
+  fi
+  if [ "$(grep -m1 -E "^[A-Za-z_][A-Za-z0-9_]*:$" <(sed -n "/^section .text/,\$p" "$WORK/flat.asm"))" != "_start:" ]; then
+    fail=$((fail+1)); failed+=("$src"); echo "FAIL $src: _start is not the first function"; continue
+  fi
+  od -An -tx1 -v "$WORK/flat.bin" > "$WORK/flat.hex"
+  check "$src" "tests/expected/flat/$name.hex" "$WORK/flat.hex"
 done
 
 rm -f "$CC"

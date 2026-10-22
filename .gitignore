@@ -56,7 +56,7 @@ output.o
 
 # Copihue build outputs
 a.out
-/copihuec
-compiler/bootstrap-c/copihuec
+/copihue
+compiler/bootstrap-c/copihue
 data.txt
 data_copy.txt

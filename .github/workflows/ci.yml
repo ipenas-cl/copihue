@@ -26,7 +26,7 @@ jobs:
               return 0;
           }
           CPH
-          cd /tmp && $HOME/.local/bin/copihuec hello.cph -o hello && ./hello | grep -q "Hello, Copihue!"
+          cd /tmp && $HOME/.local/bin/copihue hello.cph -o hello && ./hello | grep -q "Hello, Copihue!"
       - name: Pure-assembly compiler smoke test
         run: |
           cd compiler/asm && ./build.sh
