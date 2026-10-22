@@ -1,0 +1,8 @@
+=== Pointer Type Test ===
+✅ Allocated at: ADDR
+Writing values...
+ptr[0] = 42
+ptr[1] = 99
+ptr[2] = 123
+✅ Test complete!
+exit=0

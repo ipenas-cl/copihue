@@ -1,0 +1,10 @@
+=== Lexer Debug Test ===
+Initial pos: 0
+After first advance: ch=102 pos=1
+Is alpha!
+  Peeking: ch=110
+  After advance: pos=2
+Token length: 2
+After first token: pos=2
+After skip whitespace: pos=3 ch=109
+exit=0

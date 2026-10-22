@@ -1,0 +1,7 @@
+=== Test check_keyword ===
+arr[0] = 102
+arr[1] = 110
+check_keyword result: 4
+T_FN = 4
+✅ Correctly identified as T_FN
+exit=0

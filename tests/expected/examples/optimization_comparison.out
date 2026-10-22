@@ -1,0 +1,49 @@
+=== Comparación de Optimizaciones ===
+
+Compila este programa con diferentes flags:
+  -O0: Sin optimizaciones
+  -O1: Constant folding
+  -O2: Todas las optimizaciones
+
+Luego compara output.asm para ver las diferencias.
+
+---
+
+1. Constant Folding (-O1+)
+   a = 10 + 20 = 30
+   b = 5 * 6 = 30
+   c = 100 - 25 = 75
+   d = 50 / 2 = 25
+   Total: 160
+
+2. Strength Reduction (-O2)
+   x * 2 = 200
+   x * 4 = 400
+   x * 8 = 800
+   x / 2 = 50
+   x / 4 = 25
+   x / 8 = 12
+   x % 2 = 0
+   x % 4 = 0
+   x % 8 = 4
+
+3. Expresión Compleja
+   (10+20)*4/2 + (100-50)%8 = 62
+
+4. Loop con Constantes
+   Suma de (i*2) para i=0..9: 90
+
+5. Indexación de Arrays
+   Array[3] = 3*4 = 12
+   Array[7] = 7*4 = 28
+
+✅ Demostración completada
+
+Resumen de optimizaciones:
+  -O0: Código directo, debuggable
+  -O1: 10-20% más pequeño (constant folding)
+  -O2: 20% más pequeño, 3-40x más rápido
+
+Las bounds checks y division-by-zero checks
+están SIEMPRE activos, incluso en -O2.
+exit=0

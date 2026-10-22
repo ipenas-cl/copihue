@@ -1,0 +1,6 @@
+=== Test Struct Field Pointer Index ===
+arr[0] = 65
+cont.ptr addr = ADDR
+cont.ptr[0] = 65
+✅ Success!
+exit=0

@@ -1,0 +1,9 @@
+=== Test Pointer-to-Struct Field Pointer Index ===
+arr[0] = 65
+  In store_ptr: p addr = ADDR
+  In store_ptr: p[0] = 65
+  After assignment: cont.ptr = ADDR
+  After assignment: cont.ptr[0] = 65
+After store_ptr: cont.ptr = ADDR
+After store_ptr: cont.ptr[0] = 65
+exit=0

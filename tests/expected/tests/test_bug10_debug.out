@@ -1,0 +1,7 @@
+=== Bug #10 Debug ===
+In main, arr[0].x = 42
+In main, arr[0].y = 99
+  In process, points[0].x = 42
+Result: 42
+✅ Correct!
+exit=0

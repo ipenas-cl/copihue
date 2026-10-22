@@ -1,0 +1,4 @@
+Testing struct pointer assignment
+p.x = 10
+p.y = 20
+exit=0

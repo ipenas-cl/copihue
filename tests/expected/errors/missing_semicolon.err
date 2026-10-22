@@ -1,0 +1,3 @@
+tests/errors/missing_semicolon.ch:2:14: error: expected ';' after this, found 'return'
+      2 |     let x = 5
+        |              ^

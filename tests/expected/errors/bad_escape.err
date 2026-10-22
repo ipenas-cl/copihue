@@ -1,0 +1,4 @@
+tests/errors/bad_escape.ch:2:11: error: unknown escape sequence '\q' in string
+      2 |     print("bad \q escape");
+        |           ^
+1 error, compilation failed

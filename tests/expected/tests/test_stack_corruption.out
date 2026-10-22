@@ -1,0 +1,8 @@
+=== Test Stack Corruption ===
+[main] arr[0]=102
+[main] After init: arr[0]=102
+  [process] Start: d.ptr[0]=102
+  [process] After let x: d.ptr[0]=102
+  [process] After let y: d.ptr[0]=102
+[main] After process: arr[0]=102
+exit=0

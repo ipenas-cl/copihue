@@ -1,0 +1,4 @@
+Testing struct field array indexing
+buf.data[0] = 102
+buf.data[1] = 110
+exit=0

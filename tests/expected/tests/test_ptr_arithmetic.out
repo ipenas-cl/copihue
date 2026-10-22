@@ -1,0 +1,11 @@
+=== Test Pointer Arithmetic ===
+Test 1: Pass array directly
+  ptr[0] = 102
+  ptr[1] = 110
+Result: 1
+
+Test 2: Pass array + 2 (should see ' m')
+  ptr[0] = 32
+  ptr[1] = 109
+Result: 0
+exit=0

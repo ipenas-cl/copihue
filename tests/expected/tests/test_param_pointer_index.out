@@ -1,0 +1,6 @@
+=== Test Pointer Parameter Indexing ===
+arr[0] in main = 65
+  In read_byte: ptr = ADDR
+  ptr[idx] = 65
+Result = 65
+exit=0

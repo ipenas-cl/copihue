@@ -1,0 +1,9 @@
+Step 1
+node_ptr = ADDR
+Calling helper...
+Inside helper
+Set value
+Back from helper
+ptr[0] = 42
+Done!
+exit=0

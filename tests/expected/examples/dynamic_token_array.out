@@ -1,0 +1,40 @@
+=== Dynamic Token Array for Lexer ===
+
+1. Token structure:
+   sizeof(Token) = 16 bytes
+
+2. Allocating token array:
+   capacity = 10 tokens
+   total size = 160 bytes
+   ✓ Allocated at: 0xADDR
+
+3. Lexer simulation - creating tokens:
+   Adding: T_FN at line 1
+   Adding: T_IDENT at line 1
+   Adding: T_LPAREN at line 1
+   Adding: T_RPAREN at line 1
+   Adding: T_ARROW at line 1
+   ✓ Created 5 tokens
+
+4. Parser simulation - reading tokens:
+   Parsing token stream...
+   ✓ Token array is accessible
+
+5. Growing token array:
+   new capacity = 20 tokens
+   ✓ Reallocated at: 0xADDR
+   (In real code: copy old data to new array)
+
+6. Cleanup:
+   ✓ Freed old token array
+   ✓ Freed new token array
+
+=== Success! ===
+
+This demonstrates:
+✓ Dynamic struct arrays (needed for token storage)
+✓ Memory reallocation (needed for growing arrays)
+✓ Manual memory management (needed for compiler)
+
+🚀 Ready to implement lexer in Chronos!
+exit=0

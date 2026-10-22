@@ -1,0 +1,28 @@
+=== Arrays Locales Tipados en Chronos ===
+
+1. Array de i8 (bytes)
+   Valores ASCII: 72, 101, 108, 108, 111
+
+2. Array de i16 (short)
+   Valores: 100, 200, 300, 400
+   Suma total: 1000
+
+3. Array de i32 (int)
+   Valores: 1000, 2000, 3000, 4000, 5000, 6000
+   Máximo: 6000
+
+4. Array de i64 (long)
+   Valores: 1000000, 2000000, 3000000
+   Suma: 6000000
+
+5. Simulación de Array 2D (3x3)
+   Matriz:
+   1 2 3
+   4 5 6
+   7 8 9
+   Suma diagonal: 15
+
+✅ Todos los tipos de array funcionan correctamente
+
+Nota: Los arrays son de tamaño fijo y bounds-checked.
+exit=0

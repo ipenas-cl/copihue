@@ -1,0 +1,52 @@
+========================================
+  CHRONOS v0.17 - DEMO OPTIMIZACIONES
+========================================
+
+=== Test 1: Constant Folding ===
+  a = 10 + 20 = 30
+  b = 100 - 25 = 75
+  c = 5 * 8 = 40
+  d = 100 / 4 = 25
+  e = 17 % 5 = 2
+  Total: 172
+
+=== Test 2: Strength Reduction ===
+  x = 1000
+  x * 2 = 2000
+  x * 4 = 4000
+  x / 8 = 125
+  x % 16 = 8
+  Total: 6133
+
+=== Test 3: Procesamiento de Arrays ===
+  Elementos procesados: 500
+  Suma total: 62286
+
+=== Test 4: Operaciones Mixtas ===
+  size = 100 * 100 = 10000
+  limite = 1024
+  size / 2 = 5000
+  size / 4 = 2500
+  size % 256 = 16
+  Total: 7516
+
+========================================
+  RESULTADOS FINALES
+========================================
+Test 1 (Constant Folding): 172
+Test 2 (Strength Reduction): 6133
+Test 3 (Array Processing): 62286
+Test 4 (Mixed Operations): 7516
+
+TOTAL: 76107
+
+========================================
+  COMPILAR Y COMPARAR
+========================================
+./chronos_v10 -O0 demo_optimizaciones.ch
+./chronos_v10 -O1 demo_optimizaciones.ch
+./chronos_v10 -O2 demo_optimizaciones.ch
+
+Los 3 niveles producen el mismo output!
+========================================
+exit=0

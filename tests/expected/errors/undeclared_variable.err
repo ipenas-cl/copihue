@@ -1,0 +1,4 @@
+tests/errors/undeclared_variable.ch:3:12: error: use of undeclared variable 'totl'
+      3 |     return totl + 1;
+        |            ^
+1 error, compilation failed

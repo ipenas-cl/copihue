@@ -1,0 +1,38 @@
+========================================
+  OPTIMIZATION EXAMPLES
+========================================
+
+1. Division:
+   Unoptimized: 24995000
+   Optimized:   24995000
+
+2. Loop Unrolling:
+   Unoptimized: 499500
+   Optimized:   499500
+
+3. Powers of 2:
+   Unoptimized: 38806
+   Optimized:   50932
+
+4. Cache Access:
+   Unoptimized: 0
+   Optimized:   0
+
+5. Bounds Checks:
+   Unoptimized: 0
+   Optimized:   0
+
+6. Constants:
+   Unoptimized: 499500
+   Optimized:   49995000
+
+========================================
+  KEY TAKEAWAYS
+========================================
+1. Avoid divisions in hot loops
+2. Use powers of 2 when possible
+3. Access memory sequentially (cache)
+4. Reuse values to minimize checks
+5. Precalculate constants
+6. Unroll loops for fewer branches
+exit=0

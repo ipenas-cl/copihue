@@ -1,0 +1,4 @@
+Testing passing pointer to struct
+In main: counter.value = 99
+In print_counter: c.value = 99
+exit=0

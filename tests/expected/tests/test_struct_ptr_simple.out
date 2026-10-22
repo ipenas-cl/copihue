@@ -1,0 +1,4 @@
+Testing struct with pointer field
+Direct access: arr[0] = 65
+After assignment: buf.data addr = ADDR
+exit=0

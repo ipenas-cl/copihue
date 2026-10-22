@@ -1,0 +1,6 @@
+=== Minimal Lexer Test ===
+tok.type = 99
+tok.start = 10
+tok.length = 5
+tok.line = 1
+exit=0

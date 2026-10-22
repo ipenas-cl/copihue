@@ -1,0 +1,5 @@
+=== Simple malloc Test ===
+✅ malloc succeeded, address: ADDR
+✅ free succeeded!
+✅ All tests passed!
+exit=0

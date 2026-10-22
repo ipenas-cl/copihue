@@ -1,0 +1,4 @@
+Testing pointer to array
+ptr[0] = 102
+ptr[1] = 110
+exit=0

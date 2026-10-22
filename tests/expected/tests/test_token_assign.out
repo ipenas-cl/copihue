@@ -1,0 +1,5 @@
+=== Test Token Assignment ===
+tok.type = 4
+tok.length = 2
+✅ Correct!
+exit=0
