@@ -10,7 +10,7 @@ fn helper(ptr: *i64, value: i64) -> i64 {
 fn main() -> i64 {
     println("Step 1");
 
-    let node_ptr = malloc(80);
+    let node_ptr: *i64 = malloc(80);
 
     if (node_ptr == 0) {
         println("ERROR: malloc failed!");

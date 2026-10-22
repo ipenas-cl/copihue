@@ -32,9 +32,8 @@ fn main() -> i32 {
         i++;
     }
     sockaddr[0] = 2;  // AF_INET
-    let port_be = htons(8000);
-    sockaddr[2] = port_be / 256;
-    sockaddr[3] = port_be % 256;
+    sockaddr[2] = 8000 / 256;  // sin_port, network byte order
+    sockaddr[3] = 8000 % 256;
     sockaddr[4] = 127;  // 127.0.0.1
     sockaddr[5] = 0;
     sockaddr[6] = 0;

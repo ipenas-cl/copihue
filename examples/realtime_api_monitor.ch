@@ -24,9 +24,9 @@ fn setup_sockaddr_ip(a: i32, b: i32, c: i32, d: i32, port: i32) -> i32 {
     }
     sockaddr[0] = 2;  // AF_INET
     
-    let port_be = htons(port);
-    sockaddr[2] = port_be / 256;
-    sockaddr[3] = port_be % 256;
+    // sin_port in network byte order (big-endian): high byte, then low byte
+    sockaddr[2] = port / 256;
+    sockaddr[3] = port % 256;
     
     sockaddr[4] = a;
     sockaddr[5] = b;
@@ -135,7 +135,7 @@ fn http_get(host_a: i32, host_b: i32, host_c: i32, host_d: i32,
     return total;
 }
 
-fn find_json_value(json: i32, key: i32, output: i32) -> i32 {
+fn find_json_value(json: *i8, key: *i8, output: *i8) -> i32 {
     let key_len = strlen(key);
     let json_len = strlen(json);
     
