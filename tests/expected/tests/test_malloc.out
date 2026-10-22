@@ -1,0 +1,11 @@
+=== malloc/free Test ===
+Allocating 100 bytes...
+✅ Allocated at address: ADDR
+Writing data...
+ptr[0] = 42
+ptr[1] = 99
+ptr[2] = 123
+Freeing memory...
+✅ free succeeded!
+✅ All tests passed!
+exit=0

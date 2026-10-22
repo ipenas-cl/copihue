@@ -1,0 +1,6 @@
+=== Simple AST Test v2 ===
+✅ Allocated node at: ADDR
+node_type = 0
+value = 0
+✅ Test complete!
+exit=0

@@ -1,0 +1,9 @@
+Test 1: x++ should increment
+  PASS: x is now 11
+Test 2: x-- should decrement
+  PASS: x is now 10
+Test 3: Multiple increments
+  PASS: y is 3
+Test 4: Multiple decrements
+  PASS: y is 1
+exit=0

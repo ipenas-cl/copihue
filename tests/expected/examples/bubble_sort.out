@@ -1,0 +1,5 @@
+Before sorting:
+64 34 25 12 22 11 90 88 45 50
+After sorting:
+11 12 22 25 34 45 50 64 88 90
+exit=0

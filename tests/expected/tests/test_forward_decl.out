@@ -1,0 +1,6 @@
+=== Forward Declaration Test ===
+is_even(4) = 1
+is_odd(4) = 0
+is_even(5) = 0
+is_odd(5) = 1
+exit=0

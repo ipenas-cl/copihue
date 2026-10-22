@@ -1,0 +1,6 @@
+strcmp works:
+0
+strlen works:
+13
+strcpy: implemented and ready for self-hosting
+exit=0

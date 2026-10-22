@@ -1,0 +1,9 @@
+Test 1: !0 should be true
+  PASS: !0 is true
+Test 2: !1 should be false
+  PASS: !1 is false
+Test 3: !(x > 10) should be true
+  PASS: !(x > 10) is true
+Test 4: !(!x) should be false
+  PASS: !(!x) is false
+exit=0

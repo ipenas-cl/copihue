@@ -1,0 +1,18 @@
+=== Testing && operator ===
+1. PASS: 1 && 1 = true
+2. PASS: 0 && 1 = false
+3. PASS: 1 && 0 = false
+
+=== Testing || operator ===
+4. PASS: 1 || 1 = true
+5. PASS: 1 || 0 = true
+6. PASS: 0 || 1 = true
+7. PASS: 0 || 0 = false
+
+=== Testing with comparisons ===
+8. PASS: x>5 && y>15 && x<15
+9. PASS: x>100 || y>15 || x<0
+10. PASS: (x>5 && y>15) || x<0
+
+All tests passed!
+exit=0

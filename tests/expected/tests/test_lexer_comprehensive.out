@@ -1,0 +1,27 @@
+=== Comprehensive Lexer Test ===
+
+Test 1: Keywords and identifiers
+  Expected values: 4, 5, 1
+  [DEBUG] expected ptr: ADDR, expected[0]: 4
+  [DEBUG] i=0 expected[i]=4 tok.type=4
+  [DEBUG] i=1 expected[i]=5 tok.type=5
+  [DEBUG] i=2 expected[i]=1 tok.type=1
+  Passed: 3/3
+
+Test 2: Numbers and operators
+  [DEBUG] expected ptr: ADDR, expected[0]: 2
+  [DEBUG] i=0 expected[i]=2 tok.type=2
+  [DEBUG] i=1 expected[i]=24 tok.type=24
+  [DEBUG] i=2 expected[i]=2 tok.type=2
+  Passed: 3/3
+
+Test 3: Delimiters and arrow
+  [DEBUG] expected ptr: ADDR, expected[0]: 13
+  [DEBUG] i=0 expected[i]=13 tok.type=13
+  [DEBUG] i=1 expected[i]=14 tok.type=14
+  [DEBUG] i=2 expected[i]=36 tok.type=36
+  [DEBUG] i=3 expected[i]=15 tok.type=15
+  Passed: 4/4
+
+✅ All tests passed!
+exit=0

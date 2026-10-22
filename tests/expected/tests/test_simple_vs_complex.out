@@ -1,0 +1,5 @@
+=== Simple vs Complex Test ===
+Simple: tokens[0].value = 42
+Pointer: ptr[0].value = 42
+✅ Test complete!
+exit=0

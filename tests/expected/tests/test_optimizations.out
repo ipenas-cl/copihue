@@ -1,0 +1,5 @@
+Testing Compiler Optimizations
+
+Constant Folding: 172
+Strength Reduction: 6133
+exit=0

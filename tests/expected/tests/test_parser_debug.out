@@ -1,0 +1,6 @@
+=== Parser Debug ===
+tokens[0].type = 1
+tokens[0].value = 42
+tokens[2].value = 99
+✅ Test complete!
+exit=0

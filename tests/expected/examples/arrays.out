@@ -1,0 +1,13 @@
+Elementos del array:
+  arr[0] = 0
+  arr[1] = 2
+  arr[2] = 4
+  arr[3] = 6
+  arr[4] = 8
+  arr[5] = 10
+  arr[6] = 12
+  arr[7] = 14
+  arr[8] = 16
+  arr[9] = 18
+Suma total: 90
+exit=0

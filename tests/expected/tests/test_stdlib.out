@@ -1,0 +1,8 @@
+Chronos v0.5 Stdlib Test
+Testing print_int:
+42
+123
+Testing negative:
+-99
+Stdlib works!
+exit=0

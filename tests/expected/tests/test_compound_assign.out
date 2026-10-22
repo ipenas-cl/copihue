@@ -1,0 +1,13 @@
+Test 1: += operator
+  PASS: x is 15
+Test 2: -= operator
+  PASS: x is 12
+Test 3: *= operator
+  PASS: x is 24
+Test 4: /= operator
+  PASS: x is 6
+Test 5: %= operator
+  PASS: y is 2 (17 % 5)
+Test 6: Complex expression with +=
+  PASS: z is 20
+exit=0

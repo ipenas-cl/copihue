@@ -1,0 +1,3 @@
+tests/errors/unterminated_string.ch:2:13: error: unterminated string literal
+      2 |     println("never closed);
+        |             ^

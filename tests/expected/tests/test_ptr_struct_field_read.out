@@ -1,0 +1,4 @@
+Testing pointer to struct field read
+counter.value = 42
+get_value(&counter) = 42
+exit=0

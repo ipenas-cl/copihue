@@ -1,0 +1,28 @@
+=== Test: malloc with structs ===
+
+1. Allocating Point struct:
+   Point* allocated at: 0xADDR
+   ✓ Point struct allocated
+
+2. Allocating Rectangle struct:
+   Rectangle* allocated at: 0xADDR
+   ✓ Rectangle struct allocated
+
+3. Allocating second Point:
+   Point* allocated at: 0xADDR
+   ✓ Second Point allocated
+
+4. Verifying allocations:
+   ✓ All pointers are unique
+
+5. Freeing allocations:
+   ✓ Point freed
+   ✓ Rectangle freed
+   ✓ Point2 freed
+
+=== malloc struct test passed! ===
+
+✓ Dynamic memory allocation works!
+✓ Can allocate structs on heap!
+✓ Ready for self-hosting data structures!
+exit=0

@@ -1,0 +1,7 @@
+=== Field Access Bug Test ===
+Main: points[0].x = 42
+Main: points[0].y = 99
+Direct: arr[0].x = 42
+Direct: arr[0].y = 99
+✅ Test complete!
+exit=0

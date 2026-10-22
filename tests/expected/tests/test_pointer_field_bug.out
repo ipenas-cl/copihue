@@ -1,0 +1,7 @@
+=== Pointer Field Bug Test ===
+Main: container.tokens[0].type = 1
+Main: container.tokens[0].value = 42
+c.tokens[0].type = 1
+c.tokens[0].value = 42
+✅ Test complete!
+exit=0

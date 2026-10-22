@@ -1,0 +1,9 @@
+=== Lexer Step 1b: Init Debug ===
+source[0] = 102
+  In lexer_init: source addr = ADDR
+  In lexer_init: source[0] = 102
+  After assignment: lex.source = ADDR
+  After assignment: lex.source[0] = 102
+After init: lex.source = ADDR
+After init: lex.source[0] = 102
+exit=0

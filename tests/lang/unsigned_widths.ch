@@ -1,0 +1,22 @@
+let w: [u16; 4];
+let d: [u32; 4];
+let b: [u8; 4];
+fn main() -> i32 {
+    let q: *u16 = &w[0];
+    q[1] = 3855;
+    print_int(w[1]); println("");
+    print_int(q[1]); println("");
+    w[2] = 65535;
+    print_int(q[2]); println("");
+    let r: *u32 = &d[0];
+    r[3] = 4000000000;
+    print_int(d[3]); println("");
+    let p: *u8 = &b[0];
+    p[0] = 300;
+    print_int(b[0]); println("");
+    print_int(p[0]); println("");
+    let a = 4096;
+    let z: *u8 = a;
+    print_int(z); println("");
+    return 0;
+}

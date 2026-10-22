@@ -1,0 +1,4 @@
+Testing struct pointer field read
+p.x = 42
+get_x(&p) = 42
+exit=0

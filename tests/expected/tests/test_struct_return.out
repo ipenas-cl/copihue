@@ -1,0 +1,6 @@
+Testing struct return values
+p1.x = 7
+p1.y = 7
+p2.x = 7
+p2.y = 7
+exit=0

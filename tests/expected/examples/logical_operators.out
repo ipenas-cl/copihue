@@ -1,0 +1,21 @@
+=== Demostración de Operadores Lógicos ===
+
+Test 1: Operador AND (&&)
+  Edad 25 es válida? Sí
+  Edad 70 es válida? No
+
+Test 2: Operador OR (||)
+  Día 6 es fin de semana? Sí
+  Día 3 es fin de semana? No
+
+Test 3: Operador NOT (!)
+  Día 2 es laboral? Sí
+  Día 7 es laboral? No
+
+Test 4: Operadores Combinados
+  Edad=25, Miembro=1, VIP=0: Acceso OK
+  Edad=16, Miembro=1, VIP=0: Acceso Denegado
+  Edad=16, Miembro=0, VIP=1: Acceso OK
+
+✅ Tests completados
+exit=0

@@ -1,0 +1,17 @@
+=== Chronos Struct Demonstration ===
+
+1. Declaration with type:
+   p1 = (10, 20)
+2. Struct literal:
+   p2 = (30, 40)
+3. Field access in expressions:
+   sum = (40, 60)
+4. Function with struct parameters:
+   distance(p1, p2) = 40
+5. Multiple struct types:
+   rect(15x25) area = 375
+6. Field modification:
+   modified p1 = (15, 40)
+
+=== All struct features working! ===
+exit=0

@@ -1,0 +1,4 @@
+tests/errors/unknown_field.ch:3:26: error: struct 'P' has no field named 'z'
+      3 |     let p = P { x: 1, z: 2 };
+        |                          ^
+1 error, compilation failed

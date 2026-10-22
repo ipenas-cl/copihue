@@ -1,0 +1,7 @@
+=== Test Global Let ===
+x = 0
+T_EOF = 0
+T_IDENT = 1
+x == T_EOF: TRUE
+y == T_IDENT: TRUE
+exit=0

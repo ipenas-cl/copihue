@@ -1,0 +1,6 @@
+=== Lexer Step 1: Basic Access ===
+peek() = 102
+advance() = 102
+peek() after advance = 110
+✅ Step 1 complete!
+exit=0

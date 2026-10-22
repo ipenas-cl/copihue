@@ -1,0 +1,6 @@
+Searching for 13 in sorted array:
+Found at index: 6
+
+Searching for 8 (not in array):
+Not found
+exit=255

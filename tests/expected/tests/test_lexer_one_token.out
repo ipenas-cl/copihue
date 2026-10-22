@@ -1,0 +1,7 @@
+=== Test One Token ===
+Got char: 102
+Is alpha: 1
+Token type: 1
+Token length: 1
+✅ Success!
+exit=0

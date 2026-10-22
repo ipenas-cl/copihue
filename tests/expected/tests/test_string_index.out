@@ -1,0 +1,9 @@
+Test 1: Index string literal directly
+  PASS: 'H' is 72
+Test 2: Index middle character
+  PASS: 'l' is 108
+Test 3: Index last character
+  PASS: 'o' is 111
+Test 4: Use in expression
+  PASS: 'W' is 87
+exit=0

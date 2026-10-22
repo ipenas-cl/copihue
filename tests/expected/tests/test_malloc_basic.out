@@ -1,0 +1,14 @@
+=== Test: Basic malloc ===
+✓ malloc(40) succeeded
+  ptr = 0xADDR
+✓ Wrote 5 values to allocated memory
+  ptr[0] = 10
+  ptr[1] = 20
+  ptr[2] = 30
+  ptr[3] = 40
+  ptr[4] = 50
+✓ Values verified correctly
+✓ free() called
+
+=== All malloc tests passed! ===
+exit=0
