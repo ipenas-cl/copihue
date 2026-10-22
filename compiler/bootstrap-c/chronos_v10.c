@@ -12,6 +12,43 @@
 #include <ctype.h>
 #include <math.h>
 
+// ==== NAMING (single place to change when the language is renamed) ====
+#define LANG_NAME     "Chronos"
+#define LANG_VERSION  "0.18.0"
+#define COMPILER_BIN  "chronos"
+#define SRC_EXT       ".ch"
+
+// ==== DIAGNOSTICS ====
+const char* g_src_file = "<input>";
+const char* g_src_text = NULL;
+int g_cur_line = 0, g_cur_col = 0;   // position of the last consumed token
+int g_error_count = 0;
+int g_freestanding = 0;              // --freestanding: no OS, no syscalls, no _start
+
+static void print_source_line(int line, int col) {
+    if (!g_src_text || line <= 0) return;
+    const char* p = g_src_text;
+    for (int l = 1; l < line && *p; p++) if (*p == '\n') l++;
+    const char* e = p;
+    while (*e && *e != '\n') e++;
+    fprintf(stderr, "  %5d | %.*s\n", line, (int)(e - p), p);
+    fprintf(stderr, "        | ");
+    for (int i = 1; i < col; i++) fputc(p[i - 1] == '\t' ? '\t' : ' ', stderr);
+    fprintf(stderr, "^\n");
+}
+
+// Report an error at line:col in "file:line:col: error: message" form
+void diag_error(int line, int col, const char* fmt, ...) {
+    va_list ap;
+    fprintf(stderr, "%s:%d:%d: error: ", g_src_file, line, col);
+    va_start(ap, fmt);
+    vfprintf(stderr, fmt, ap);
+    va_end(ap);
+    fputc('\n', stderr);
+    print_source_line(line, col);
+    g_error_count++;
+}
+
 // Optimization level (0 = none, 1 = basic, 2 = aggressive)
 int optimization_level = 0;
 
@@ -24,7 +61,8 @@ typedef enum {
     T_PLUS, T_MINUS, T_STAR, T_SLASH, T_MOD,
     T_EQ, T_EQEQ, T_NEQ, T_LT, T_GT, T_LTE, T_GTE, T_ARROW,
     T_AND_AND, T_OR_OR, T_BANG,
-    T_PLUSPLUS, T_MINUSMINUS, T_PLUSEQ, T_MINUSEQ, T_STAREQ, T_SLASHEQ, T_MODEQ
+    T_PLUSPLUS, T_MINUSMINUS, T_PLUSEQ, T_MINUSEQ, T_STAREQ, T_SLASHEQ, T_MODEQ,
+    T_PIPE, T_CARET, T_TILDE, T_SHL, T_SHR
 } TokType;
 
 typedef struct { TokType t; char* s; int len; int line; int col; } Tok;
@@ -97,6 +135,7 @@ typedef struct AstNode {
     char* struct_type;
     int is_pointer;  // For type tracking
     int is_forward_decl;  // For function forward declarations
+    int line, col;        // Source position (for diagnostics)
 } AstNode;
 
 // Symbol table
@@ -106,6 +145,7 @@ typedef struct {
     int size;
     char* type_name;
     int is_pointer;
+    int is_array;
 } Symbol;
 
 typedef struct {
@@ -219,7 +259,9 @@ void typetab_add_field(TypeTable* tt, char* struct_name, char* field_name, char*
     st->fields[st->field_count - 1].offset = st->size;
     st->fields[st->field_count - 1].type_name = field_type ? strdup(field_type) : NULL;
     st->fields[st->field_count - 1].is_pointer = is_pointer;
-    st->size += 8;
+    // An embedded (non-pointer) struct field occupies the full nested struct
+    StructType* nested = (!is_pointer && field_type) ? typetab_lookup(tt, field_type) : NULL;
+    st->size += (nested && nested != st && nested->size > 0) ? nested->size : 8;
 }
 
 int typetab_field_offset(TypeTable* tt, char* struct_name, char* field_name) {
@@ -284,6 +326,7 @@ int symtab_add(SymbolTable* st, char* name, int size) {
     st->symbols[st->count - 1].size = size;
     st->symbols[st->count - 1].type_name = NULL;
     st->symbols[st->count - 1].is_pointer = 0;
+    st->symbols[st->count - 1].is_array = 0;
     return -st->stack_size;
 }
 
@@ -296,6 +339,7 @@ int symtab_add_struct(SymbolTable* st, char* name, char* type_name, int size_byt
     st->symbols[st->count - 1].size = size_bytes;
     st->symbols[st->count - 1].type_name = strdup(type_name);
     st->symbols[st->count - 1].is_pointer = 0;
+    st->symbols[st->count - 1].is_array = 0;
     return -st->stack_size;
 }
 
@@ -308,6 +352,7 @@ int symtab_add_pointer(SymbolTable* st, char* name) {
     st->symbols[st->count - 1].size = 8;
     st->symbols[st->count - 1].type_name = NULL;
     st->symbols[st->count - 1].is_pointer = 1;
+    st->symbols[st->count - 1].is_array = 0;
     return -st->stack_size;
 }
 
@@ -452,7 +497,23 @@ Tok lex_tok(Lex* l) {
         return (Tok){kw(st, l->cur - st), st, l->cur - st, tok_line, tok_col};
     }
     if (isdigit(c)) {
-        while (isdigit(peek(l))) adv(l);
+        if (c == '0' && (peek(l) == 'x' || peek(l) == 'X' || peek(l) == 'b' || peek(l) == 'B')) {
+            adv(l);
+            while (isxdigit(peek(l)) || peek(l) == '_') adv(l);
+        } else {
+            while (isdigit(peek(l)) || peek(l) == '_') adv(l);
+        }
+        return (Tok){T_NUM, st, l->cur - st, tok_line, tok_col};
+    }
+    if (c == '\'') {
+        // Character literal: 'a', '\n', '\t', '\0', '\\', '\''
+        if (peek(l) == '\\') adv(l);
+        adv(l);
+        if (peek(l) != '\'') {
+            fprintf(stderr, "%s:%d:%d: error: unterminated character literal\n", g_src_file, tok_line, tok_col); print_source_line(tok_line, tok_col);
+            exit(1);
+        }
+        adv(l);
         return (Tok){T_NUM, st, l->cur - st, tok_line, tok_col};
     }
     if (c == '"') {
@@ -461,7 +522,7 @@ Tok lex_tok(Lex* l) {
             adv(l);
         }
         if (peek(l) != '"') {
-            fprintf(stderr, "Error at line %d, col %d: Unterminated string literal\n", tok_line, tok_col);
+            fprintf(stderr, "%s:%d:%d: error: unterminated string literal\n", g_src_file, tok_line, tok_col); print_source_line(tok_line, tok_col);
             exit(1);
         }
         adv(l);  // Consume closing quote
@@ -481,6 +542,11 @@ Tok lex_tok(Lex* l) {
     if (c == '&' && peek(l) == '&') { adv(l); return (Tok){T_AND_AND, st, 2, tok_line, tok_col}; }
     if (c == '&') return (Tok){T_AMP, st, 1, tok_line, tok_col};
     if (c == '|' && peek(l) == '|') { adv(l); return (Tok){T_OR_OR, st, 2, tok_line, tok_col}; }
+    if (c == '|') return (Tok){T_PIPE, st, 1, tok_line, tok_col};
+    if (c == '^') return (Tok){T_CARET, st, 1, tok_line, tok_col};
+    if (c == '~') return (Tok){T_TILDE, st, 1, tok_line, tok_col};
+    if (c == '<' && peek(l) == '<') { adv(l); return (Tok){T_SHL, st, 2, tok_line, tok_col}; }
+    if (c == '>' && peek(l) == '>') { adv(l); return (Tok){T_SHR, st, 2, tok_line, tok_col}; }
     if (c == '+' && peek(l) == '+') { adv(l); return (Tok){T_PLUSPLUS, st, 2, tok_line, tok_col}; }
     if (c == '+' && peek(l) == '=') { adv(l); return (Tok){T_PLUSEQ, st, 2, tok_line, tok_col}; }
     if (c == '+') return (Tok){T_PLUS, st, 1, tok_line, tok_col};
@@ -503,7 +569,8 @@ Tok lex_tok(Lex* l) {
     if (c == '-' && peek(l) == '>') { adv(l); return (Tok){T_ARROW, st, 2, tok_line, tok_col}; }
     if (c == '-') return (Tok){T_MINUS, st, 1, tok_line, tok_col};
 
-    return (Tok){T_EOF, st, 0, tok_line, tok_col};
+    fprintf(stderr, "%s:%d:%d: error: unexpected character '%c'\n", g_src_file, tok_line, tok_col, c); print_source_line(tok_line, tok_col);
+    exit(1);
 }
 
 Tok* tokenize(char* src, int* count) {
@@ -536,6 +603,8 @@ Tok* tokenize(char* src, int* count) {
 AstNode* ast_new(AstType type) {
     AstNode* n = calloc(1, sizeof(AstNode));
     n->type = type;
+    n->line = g_cur_line;
+    n->col = g_cur_col;
     return n;
 }
 
@@ -575,18 +644,24 @@ const char* tok_name(TokType t) {
 }
 
 Tok peek_tok(Parser* p) { return p->tokens[p->pos]; }
-Tok advance_tok(Parser* p) { return p->tokens[p->pos++]; }
+Tok advance_tok(Parser* p) {
+    Tok t = p->tokens[p->pos++];
+    g_cur_line = t.line; g_cur_col = t.col;
+    return t;
+}
 int check_tok(Parser* p, TokType t) { return peek_tok(p).t == t; }
 int match_tok(Parser* p, TokType t) { if (check_tok(p, t)) { advance_tok(p); return 1; } return 0; }
 
 void expect(Parser* p, TokType t) {
     if (!match_tok(p, t)) {
         Tok got = peek_tok(p);
-        fprintf(stderr, "Parse error at line %d, col %d: expected %s, got %s\n",
-                got.line, got.col, tok_name(t), tok_name(got.t));
-        // Show a snippet of what we got
-        if (got.len > 0 && got.len < 50) {
-            fprintf(stderr, "  Got: '%.*s'\n", got.len, got.s);
+        if (t == T_SEMI && p->pos > 0) {
+            // Point just after the previous token: that is where ';' is missing
+            Tok prev = p->tokens[p->pos - 1];
+            diag_error(prev.line, prev.col + prev.len, "expected ';' after this, found '%.*s'",
+                       got.len, got.s);
+        } else {
+            diag_error(got.line, got.col, "expected %s, found '%.*s'", tok_name(t), got.len, got.s);
         }
         exit(1);
     }
@@ -642,17 +717,67 @@ AstNode* parse_expr(Parser* p);
 AstNode* parse_stmt(Parser* p);
 TypeSpec parse_type(Parser* p);
 
+// Turn 42, 1_000, 0xFF, 0b1010, 'A', '\n' into a decimal string
+char* number_literal_to_decimal(Tok t) {
+    char buf[64];
+    long long v = 0;
+    if (t.s[0] == '\'') {
+        char c = t.s[1];
+        if (c == '\\') {
+            switch (t.s[2]) {
+                case 'n': v = 10; break; case 't': v = 9; break; case 'r': v = 13; break;
+                case '0': v = 0; break; case 'b': v = 8; break; default: v = (unsigned char)t.s[2];
+            }
+        } else v = (unsigned char)c;
+    } else {
+        char digits[64]; int k = 0;
+        for (int i = 0; i < t.len && k < 63; i++) if (t.s[i] != '_') digits[k++] = t.s[i];
+        digits[k] = 0;
+        if (k > 2 && digits[0] == '0' && (digits[1] == 'b' || digits[1] == 'B'))
+            v = (long long)strtoull(digits + 2, NULL, 2);
+        else
+            v = (long long)strtoull(digits, NULL, 0);
+    }
+    snprintf(buf, sizeof(buf), "%lld", v);
+    return strdup(buf);
+}
+
+// Decode escape sequences in a string literal body: \n \t \r \0 \\ \" \'
+static char* decode_string_literal(const char* s, int len) {
+    char* out = malloc(len + 1);
+    int o = 0;
+    for (int i = 0; i < len; i++) {
+        if (s[i] == '\\' && i + 1 < len) {
+            char e = s[++i];
+            switch (e) {
+                case 'n': out[o++] = '\n'; break;
+                case 't': out[o++] = '\t'; break;
+                case 'r': out[o++] = '\r'; break;
+                case '0': out[o++] = '\0'; break;
+                case '\\': out[o++] = '\\'; break;
+                case '"': out[o++] = '"'; break;
+                case '\'': out[o++] = '\''; break;
+                default:
+                    diag_error(g_cur_line, g_cur_col, "unknown escape sequence '\\%c' in string", e);
+                    out[o++] = e;
+            }
+        } else out[o++] = s[i];
+    }
+    out[o] = '\0';
+    return out;
+}
+
 AstNode* parse_primary(Parser* p) {
     if (check_tok(p, T_NUM)) {
         Tok t = advance_tok(p);
         AstNode* n = ast_new(AST_NUMBER);
-        n->value = strndup(t.s, t.len);
+        n->value = number_literal_to_decimal(t);
         return n;
     }
     if (check_tok(p, T_STR)) {
         Tok t = advance_tok(p);
         AstNode* n = ast_new(AST_STRING);
-        n->value = strndup(t.s + 1, t.len - 2);
+        n->value = decode_string_literal(t.s + 1, t.len - 2);
         return n;
     }
     if (check_tok(p, T_LBRACKET)) {
@@ -725,11 +850,8 @@ AstNode* parse_primary(Parser* p) {
         return n;
     }
     Tok err = peek_tok(p);
-    fprintf(stderr, "Parse error at line %d, col %d: unexpected %s\n",
-            err.line, err.col, tok_name(err.t));
-    if (err.len > 0 && err.len < 50) {
-        fprintf(stderr, "  Got: '%.*s'\n", err.len, err.s);
-    }
+    if (err.t == T_EOF) diag_error(err.line, err.col, "unexpected end of file, expected an expression");
+    else diag_error(err.line, err.col, "expected an expression, found '%.*s'", err.len, err.s);
     exit(1);
 }
 
@@ -752,6 +874,14 @@ AstNode* parse_unary(Parser* p) {
         AstNode* not_node = ast_new(AST_UNARY);
         not_node->op = strdup("!");
         ast_add(not_node, parse_unary(p));  // Allow chaining (!(!x))
+        return not_node;
+    }
+    if (check_tok(p, T_TILDE)) {
+        // Bitwise NOT: ~x
+        advance_tok(p);
+        AstNode* not_node = ast_new(AST_UNARY);
+        not_node->op = strdup("~");
+        ast_add(not_node, parse_unary(p));
         return not_node;
     }
     if (check_tok(p, T_AMP)) {
@@ -894,13 +1024,52 @@ AstNode* parse_additive(Parser* p) {
     return left;
 }
 
-AstNode* parse_comparison(Parser* p) {
+AstNode* make_binop(Tok op, AstNode* l, AstNode* r) {
+    AstNode* b = ast_new(AST_BINOP);
+    b->op = strndup(op.s, op.len);
+    ast_add(b, l); ast_add(b, r);
+    return b;
+}
+AstNode* parse_shift(Parser* p) {
     AstNode* left = parse_additive(p);
+    while (check_tok(p, T_SHL) || check_tok(p, T_SHR)) {
+        Tok op = advance_tok(p);
+        left = make_binop(op, left, parse_additive(p));
+    }
+    return left;
+}
+AstNode* parse_bitand(Parser* p) {
+    AstNode* left = parse_shift(p);
+    while (check_tok(p, T_AMP)) {
+        Tok op = advance_tok(p);
+        left = make_binop(op, left, parse_shift(p));
+    }
+    return left;
+}
+AstNode* parse_bitxor(Parser* p) {
+    AstNode* left = parse_bitand(p);
+    while (check_tok(p, T_CARET)) {
+        Tok op = advance_tok(p);
+        left = make_binop(op, left, parse_bitand(p));
+    }
+    return left;
+}
+AstNode* parse_bitor(Parser* p) {
+    AstNode* left = parse_bitxor(p);
+    while (check_tok(p, T_PIPE)) {
+        Tok op = advance_tok(p);
+        left = make_binop(op, left, parse_bitxor(p));
+    }
+    return left;
+}
+
+AstNode* parse_comparison(Parser* p) {
+    AstNode* left = parse_bitor(p);
     while (check_tok(p, T_EQEQ) || check_tok(p, T_NEQ) ||
            check_tok(p, T_LT) || check_tok(p, T_GT) ||
            check_tok(p, T_LTE) || check_tok(p, T_GTE)) {
         Tok op = advance_tok(p);
-        AstNode* right = parse_additive(p);
+        AstNode* right = parse_bitor(p);
         AstNode* cmp = ast_new(AST_COMPARE);
         cmp->op = strndup(op.s, op.len);
         ast_add(cmp, left);
@@ -1333,22 +1502,106 @@ int new_label(Codegen* cg) { return cg->label_count++; }
 void gen_expr(Codegen* cg, AstNode* n);
 
 // Helper: Generate builtin function calls
+static const char* hosted_only_builtins[] = {
+    "print", "println", "print_int", "malloc", "free", "open", "read", "write",
+    "close", "exit", "syscall", NULL
+};
+
+// Evaluate up to two call arguments into rdx (first) and rax (second)
+static void gen_two_args(Codegen* cg, AstNode* n) {
+    gen_expr(cg, n->children[0]);
+    emit(cg, "    push rax\n");
+    gen_expr(cg, n->children[1]);
+    emit(cg, "    pop rdx\n");
+}
+
+// Builtins that work everywhere, including --freestanding (kernel) code.
+// Returns 1 if handled.
+static int gen_core_builtin(Codegen* cg, AstNode* n) {
+    const char* f = n->name;
+    if (!strcmp(f, "outb") || !strcmp(f, "outw") || !strcmp(f, "outl")) {
+        if (n->child_count != 2) { diag_error(n->line, n->col, "%s(port, value) takes 2 arguments", f); return 1; }
+        gen_two_args(cg, n);
+        emit(cg, "    out dx, %s\n", f[3] == 'b' ? "al" : f[3] == 'w' ? "ax" : "eax");
+        return 1;
+    }
+    if (!strcmp(f, "inb") || !strcmp(f, "inw") || !strcmp(f, "inl")) {
+        if (n->child_count != 1) { diag_error(n->line, n->col, "%s(port) takes 1 argument", f); return 1; }
+        gen_expr(cg, n->children[0]);
+        emit(cg, "    mov rdx, rax\n    xor rax, rax\n");
+        emit(cg, "    in %s, dx\n", f[2] == 'b' ? "al" : f[2] == 'w' ? "ax" : "eax");
+        return 1;
+    }
+    if (!strcmp(f, "hlt") || !strcmp(f, "cli") || !strcmp(f, "sti") || !strcmp(f, "pause")) {
+        emit(cg, "    %s\n", f);
+        return 1;
+    }
+    if (!strcmp(f, "asm")) {
+        // asm("instruction; instruction") - raw instructions, ';' separates lines
+        if (n->child_count != 1 || n->children[0]->type != AST_STRING) {
+            diag_error(n->line, n->col, "asm() takes one string literal");
+            return 1;
+        }
+        const char* src = n->children[0]->value;
+        emit(cg, "    ; inline asm\n    ");
+        for (const char* c = src; *c; c++) {
+            if (*c == ';') emit(cg, "\n    ");
+            else emit(cg, "%c", *c);
+        }
+        emit(cg, "\n");
+        return 1;
+    }
+    return 0;
+}
+
+// Evaluate the first `count` arguments left to right, then load them into
+// `regs`. Evaluating everything first means a call inside a later argument
+// (e.g. write(fd, s, strlen(s))) cannot clobber an earlier one.
+static void gen_args_to_regs(Codegen* cg, AstNode* n, const char** regs, int count) {
+    for (int i = 0; i < count; i++) {
+        gen_expr(cg, n->children[i]);
+        emit(cg, "    push rax\n");
+    }
+    for (int i = count - 1; i >= 0; i--) emit(cg, "    pop %s\n", regs[i]);
+}
+
+// print/println argument: a string literal (length known at compile time)
+// or any expression yielding a pointer to a NUL-terminated string.
+static void gen_print_arg(Codegen* cg, AstNode* arg) {
+    gen_expr(cg, arg);
+    if (arg->type == AST_STRING) {
+        emit(cg, "    mov rsi, rax\n    mov rdx, rbx\n");
+    } else {
+        emit(cg, "    push rax\n    mov rdi, rax\n    call __strlen\n");
+        emit(cg, "    mov rdx, rax\n    pop rsi\n");
+    }
+    emit(cg, "    mov rdi, 1\n    mov rax, 1\n    syscall\n");
+}
+
 void gen_builtin_call(Codegen* cg, AstNode* n) {
+    if (gen_core_builtin(cg, n)) return;
+    if (g_freestanding) {
+        for (int i = 0; hosted_only_builtins[i]; i++) {
+            if (!strcmp(n->name, hosted_only_builtins[i])) {
+                diag_error(n->line, n->col,
+                           "'%s' needs the hosted runtime (Linux syscalls) and is not available with --freestanding",
+                           n->name);
+                return;
+            }
+        }
+    }
     if (!strcmp(n->name, "print")) {
         if (n->child_count > 0) {
-            gen_expr(cg, n->children[0]);
-            emit(cg, "    mov rsi, rax\n    mov rdx, rbx\n");
-            emit(cg, "    mov rdi, 1\n    mov rax, 1\n    syscall\n");
+            gen_print_arg(cg, n->children[0]);
         }
     } else if (!strcmp(n->name, "println")) {
         if (n->child_count > 0) {
-            gen_expr(cg, n->children[0]);
-            emit(cg, "    mov rsi, rax\n    mov rdx, rbx\n");
-            emit(cg, "    mov rdi, 1\n    mov rax, 1\n    syscall\n");
+            gen_print_arg(cg, n->children[0]);
         }
-        emit(cg, "    mov byte [rbp-256], 10\n");
-        emit(cg, "    lea rsi, [rbp-256]\n");
+        // Newline from a temporary stack slot (never overlaps locals)
+        emit(cg, "    push 10\n    mov rsi, rsp\n");
         emit(cg, "    mov rdi, 1\n    mov rdx, 1\n    mov rax, 1\n    syscall\n");
+        emit(cg, "    add rsp, 8\n");
     } else if (!strcmp(n->name, "print_int")) {
         if (n->child_count > 0) {
             gen_expr(cg, n->children[0]);
@@ -1390,15 +1643,12 @@ void gen_builtin_call(Codegen* cg, AstNode* n) {
         // open(filename, flags, mode) -> fd
         // syscall 2: rax=2, rdi=filename, rsi=flags, rdx=mode
         if (n->child_count >= 2) {
-            gen_expr(cg, n->children[0]);  // filename
-            emit(cg, "    mov rdi, rax\n");
-            gen_expr(cg, n->children[1]);  // flags
-            emit(cg, "    mov rsi, rax\n");
+            static const char* r3[] = {"rdi", "rsi", "rdx"};
             if (n->child_count >= 3) {
-                gen_expr(cg, n->children[2]);  // mode (optional)
-                emit(cg, "    mov rdx, rax\n");
+                gen_args_to_regs(cg, n, r3, 3);  // filename, flags, mode
             } else {
-                emit(cg, "    mov rdx, 0644\n");  // Default permissions
+                gen_args_to_regs(cg, n, r3, 2);  // filename, flags
+                emit(cg, "    mov rdx, 420\n");  // Default permissions: 0644 octal
             }
             emit(cg, "    mov rax, 2\n");  // sys_open
             emit(cg, "    syscall\n");
@@ -1407,12 +1657,8 @@ void gen_builtin_call(Codegen* cg, AstNode* n) {
         // read(fd, buffer, count) -> bytes_read
         // syscall 0: rax=0, rdi=fd, rsi=buffer, rdx=count
         if (n->child_count >= 3) {
-            gen_expr(cg, n->children[0]);  // fd
-            emit(cg, "    mov rdi, rax\n");
-            gen_expr(cg, n->children[1]);  // buffer
-            emit(cg, "    mov rsi, rax\n");
-            gen_expr(cg, n->children[2]);  // count
-            emit(cg, "    mov rdx, rax\n");
+            static const char* r3[] = {"rdi", "rsi", "rdx"};
+            gen_args_to_regs(cg, n, r3, 3);  // fd, buffer, count
             emit(cg, "    mov rax, 0\n");  // sys_read
             emit(cg, "    syscall\n");
         }
@@ -1420,12 +1666,8 @@ void gen_builtin_call(Codegen* cg, AstNode* n) {
         // write(fd, buffer, count) -> bytes_written
         // syscall 1: rax=1, rdi=fd, rsi=buffer, rdx=count
         if (n->child_count >= 3) {
-            gen_expr(cg, n->children[0]);  // fd
-            emit(cg, "    mov rdi, rax\n");
-            gen_expr(cg, n->children[1]);  // buffer
-            emit(cg, "    mov rsi, rax\n");
-            gen_expr(cg, n->children[2]);  // count
-            emit(cg, "    mov rdx, rax\n");
+            static const char* r3[] = {"rdi", "rsi", "rdx"};
+            gen_args_to_regs(cg, n, r3, 3);  // fd, buffer, count
             emit(cg, "    mov rax, 1\n");  // sys_write
             emit(cg, "    syscall\n");
         }
@@ -1513,11 +1755,24 @@ void gen_builtin_call(Codegen* cg, AstNode* n) {
         }
     } else {
         // Regular function call
+        // Evaluate every argument first (pushing results) so that nested calls
+        // cannot clobber registers already loaded with earlier arguments.
         const char* regs[] = {"rdi", "rsi", "rdx", "rcx", "r8", "r9"};
-        for (int i = 0; i < n->child_count && i < 6; i++) {
-            gen_expr(cg, n->children[i]);
-            emit(cg, "    mov %s, rax\n", regs[i]);
+        int argc = n->child_count < 6 ? n->child_count : 6;
+        for (int i = 0; i < argc; i++) {
+            AstNode* a = n->children[i];
+            Symbol* asym = (a->type == AST_IDENT) ? symtab_lookup_symbol(cg->symtab, a->name) : NULL;
+            if (asym && !asym->is_pointer && asym->type_name && asym->type_name[0] != '*' &&
+                typetab_lookup(cg->types, asym->type_name)) {
+                // Struct passed by value: pass its address, the callee copies it
+                emit(cg, "    lea rax, [rbp%d]\n", asym->offset);
+            } else {
+                gen_expr(cg, a);
+            }
+            emit(cg, "    push rax\n");
         }
+        for (int i = argc - 1; i >= 0; i--)
+            emit(cg, "    pop %s\n", regs[i]);
         emit(cg, "    call %s\n", n->name);
     }
 }
@@ -1563,7 +1818,7 @@ void gen_addr_of(Codegen* cg, AstNode* n) {
                 if (gvar->elem_type) {
                     if (!strcmp(gvar->elem_type, "i32") || !strcmp(gvar->elem_type, "u32")) elem_size = 4;
                     else if (!strcmp(gvar->elem_type, "i64") || !strcmp(gvar->elem_type, "u64")) elem_size = 8;
-                    else if (!strcmp(gvar->elem_type, "i16")) elem_size = 2;
+                    else if ((!strcmp(gvar->elem_type, "i16") || !strcmp(gvar->elem_type, "u16"))) elem_size = 2;
                 }
                 gen_expr(cg, var->children[1]);  // Index expression
                 if (elem_size > 1) emit(cg, "    imul rax, %d\n", elem_size);
@@ -1609,8 +1864,22 @@ void gen_addr_of(Codegen* cg, AstNode* n) {
 }
 
 // Helper: Generate array indexing with bounds checking
+// Indexing x[i] requires x to be an array or a pointer. A plain scalar
+// (e.g. a parameter declared `buf: i32`) would otherwise index the stack slot.
+static void check_indexable(Codegen* cg, AstNode* arr) {
+    if (!arr || arr->type != AST_IDENT) return;
+    Symbol* sym = symtab_lookup_symbol(cg->symtab, arr->name);
+    if (!sym || sym->is_pointer || sym->is_array) return;
+    if (sym->type_name && sym->type_name[0] == '*') return;
+    if (sym->type_name && typetab_lookup(cg->types, sym->type_name)) return;
+    diag_error(arr->line, arr->col,
+               "cannot index '%s': it is not an array or a pointer (declare it as e.g. '%s: *i8')",
+               arr->name, arr->name);
+}
+
 void gen_array_index(Codegen* cg, AstNode* n) {
     AstNode* arr = n->children[0];
+    check_indexable(cg, arr);
 
     // Handle field access indexing: lex.source[i]
     if (arr->type == AST_FIELD_ACCESS) {
@@ -1640,7 +1909,7 @@ void gen_array_index(Codegen* cg, AstNode* n) {
 
                     if (!strcmp(base_type, "i8") || !strcmp(base_type, "u8")) {
                         elem_size = 1;
-                    } else if (!strcmp(base_type, "i16")) {
+                    } else if ((!strcmp(base_type, "i16") || !strcmp(base_type, "u16"))) {
                         elem_size = 2;
                     } else if (!strcmp(base_type, "i32") || !strcmp(base_type, "u32")) {
                         elem_size = 4;
@@ -1755,7 +2024,7 @@ void gen_array_index(Codegen* cg, AstNode* n) {
 
                 if (!strcmp(base_type, "i8") || !strcmp(base_type, "u8")) {
                     elem_size = 1;
-                } else if (!strcmp(base_type, "i16")) {
+                } else if ((!strcmp(base_type, "i16") || !strcmp(base_type, "u16"))) {
                     elem_size = 2;
                 } else if (!strcmp(base_type, "i32") || !strcmp(base_type, "u32")) {
                     elem_size = 4;
@@ -1808,7 +2077,7 @@ void gen_array_index(Codegen* cg, AstNode* n) {
         if (sym->type_name) {
             if (!strcmp(sym->type_name, "i8") || !strcmp(sym->type_name, "u8")) {
                 elem_size = 1;
-            } else if (!strcmp(sym->type_name, "i16")) {
+            } else if ((!strcmp(sym->type_name, "i16") || !strcmp(sym->type_name, "u16"))) {
                 elem_size = 2;
             } else if (!strcmp(sym->type_name, "i32") || !strcmp(sym->type_name, "u32")) {
                 elem_size = 4;
@@ -1883,9 +2152,9 @@ void gen_array_index(Codegen* cg, AstNode* n) {
             // For i32/i64, element size is 4/8 bytes
             int elem_size = 1;  // Default to byte for i8
             if (gvar->elem_type) {
-                if (!strcmp(gvar->elem_type, "i32")) elem_size = 4;
-                else if (!strcmp(gvar->elem_type, "i64")) elem_size = 8;
-                else if (!strcmp(gvar->elem_type, "i16")) elem_size = 2;
+                if ((!strcmp(gvar->elem_type, "i32") || !strcmp(gvar->elem_type, "u32"))) elem_size = 4;
+                else if ((!strcmp(gvar->elem_type, "i64") || !strcmp(gvar->elem_type, "u64"))) elem_size = 8;
+                else if ((!strcmp(gvar->elem_type, "i16") || !strcmp(gvar->elem_type, "u16"))) elem_size = 2;
             }
 
             // Calculate offset: index * elem_size
@@ -1909,6 +2178,38 @@ void gen_array_index(Codegen* cg, AstNode* n) {
             }
         } else {
             emit(cg, "    mov rax, 0  ; array not found\n");
+        }
+    }
+}
+
+// Store a struct literal into the frame at [rbp+base]. Nested struct
+// literals are stored in place; struct-typed variables are copied.
+static void gen_struct_literal_at(Codegen* cg, AstNode* n, int base) {
+    for (int i = 0; i < n->child_count; i++) {
+        AstNode* field_assign = n->children[i];
+        char* field_name = field_assign->name;
+        AstNode* field_value = field_assign->children[0];
+        int field_off = typetab_field_offset(cg->types, n->struct_type, field_name);
+        if (field_off < 0) {
+            diag_error(field_assign->line, field_assign->col,
+                       "struct '%s' has no field named '%s'", n->struct_type, field_name);
+            continue;
+        }
+        char* ftype = typetab_field_type(cg->types, n->struct_type, field_name);
+        StructType* fst = (ftype && ftype[0] != '*') ? typetab_lookup(cg->types, ftype) : NULL;
+        if (field_value->type == AST_STRUCT_LITERAL) {
+            gen_struct_literal_at(cg, field_value, base + field_off);
+        } else if (fst && field_value->type == AST_IDENT) {
+            Symbol* src = symtab_lookup_symbol(cg->symtab, field_value->name);
+            if (src) {
+                for (int b = 0; b < fst->size; b += 8) {
+                    emit(cg, "    mov rax, [rbp%+d]\n", src->offset + b);
+                    emit(cg, "    mov [rbp%+d], rax\n", base + field_off + b);
+                }
+            }
+        } else {
+            gen_expr(cg, field_value);
+            emit(cg, "    mov [rbp%+d], rax\n", base + field_off);
         }
     }
 }
@@ -1945,6 +2246,7 @@ void gen_expr(Codegen* cg, AstNode* n) {
                     emit(cg, "    mov rax, [%s]\n", gvar->name);
                 }
             } else {
+                diag_error(n->line, n->col, "use of undeclared variable '%s'", n->name);
                 emit(cg, "    mov rax, 0  ; unknown var %s\n", n->name);
             }
         }
@@ -1965,6 +2267,8 @@ void gen_expr(Codegen* cg, AstNode* n) {
                 emit(cg, "    test rax, rax\n");
                 emit(cg, "    setz al  ; Set al to 1 if rax was 0\n");
                 emit(cg, "    movzx rax, al\n");
+            } else if (n->op && n->op[0] == '~') {
+                emit(cg, "    not rax\n");
             }
         }
     } else if (n->type == AST_ASSIGN) {
@@ -1989,7 +2293,7 @@ void gen_expr(Codegen* cg, AstNode* n) {
 
         if (optimization_level >= 2 && right && right->type == AST_NUMBER) {
             right_val = atol(right->value);
-            if (is_power_of_2(right_val)) {
+            if (right_val > 1 && is_power_of_2(right_val)) {
                 use_shift = 1;
                 shift_amount = get_log2(right_val);
             }
@@ -2003,19 +2307,28 @@ void gen_expr(Codegen* cg, AstNode* n) {
             emit(cg, "    shl rax, %d\n", shift_amount);
         } else if (use_shift && n->op[0] == '/') {
             // Division by power of 2: use arithmetic right shift
-            emit(cg, "    ; Optimized: x / %ld => x >> %d\n", right_val, shift_amount);
-            emit(cg, "    sar rax, %d\n", shift_amount);
+            // Signed: bias negative dividends so the result truncates toward zero
+            emit(cg, "    ; Optimized: x / %ld => (x + bias) >> %d\n", right_val, shift_amount);
+            emit(cg, "    mov rdx, rax\n    sar rdx, 63\n    shr rdx, %d\n", 64 - shift_amount);
+            emit(cg, "    add rax, rdx\n    sar rax, %d\n", shift_amount);
         } else if (use_shift && n->op[0] == '%') {
             // Modulo by power of 2: use AND mask
             long mask = right_val - 1;
             emit(cg, "    ; Optimized: x %% %ld => x & %ld\n", right_val, mask);
-            emit(cg, "    and rax, %ld\n", mask);
+            // Signed remainder keeps the dividend's sign: ((x + bias) & mask) - bias
+            emit(cg, "    mov rdx, rax\n    sar rdx, 63\n    shr rdx, %d\n", 64 - shift_amount);
+            emit(cg, "    add rax, rdx\n    and rax, %ld\n    sub rax, rdx\n", mask);
         } else {
             // Normal codegen
             emit(cg, "    push rax\n");
             gen_expr(cg, n->children[1]);
             emit(cg, "    mov rbx, rax\n    pop rax\n");
-            if (n->op[0] == '+') emit(cg, "    add rax, rbx\n");
+            if (!strcmp(n->op, "<<")) emit(cg, "    mov rcx, rbx\n    shl rax, cl\n");
+            else if (!strcmp(n->op, ">>")) emit(cg, "    mov rcx, rbx\n    sar rax, cl\n");
+            else if (n->op[0] == '&') emit(cg, "    and rax, rbx\n");
+            else if (n->op[0] == '|') emit(cg, "    or rax, rbx\n");
+            else if (n->op[0] == '^') emit(cg, "    xor rax, rbx\n");
+            else if (n->op[0] == '+') emit(cg, "    add rax, rbx\n");
             else if (n->op[0] == '-') emit(cg, "    sub rax, rbx\n");
             else if (n->op[0] == '*') emit(cg, "    imul rax, rbx\n");
             else if (n->op[0] == '/') {
@@ -2027,7 +2340,7 @@ void gen_expr(Codegen* cg, AstNode* n) {
             emit(cg, "    xor rax, rax\n");
             emit(cg, "    jmp .L%d_end\n", skip_label);
             emit(cg, ".L%d:\n", skip_label);
-            emit(cg, "    xor rdx, rdx\n    idiv rbx\n");
+            emit(cg, "    cqo\n    idiv rbx\n");
             emit(cg, ".L%d_end:\n", skip_label);
         }
         else if (n->op[0] == '%') {
@@ -2039,7 +2352,7 @@ void gen_expr(Codegen* cg, AstNode* n) {
             emit(cg, "    xor rax, rax\n");
             emit(cg, "    jmp .L%d_end\n", skip_label);
             emit(cg, ".L%d:\n", skip_label);
-            emit(cg, "    xor rdx, rdx\n    idiv rbx\n");
+            emit(cg, "    cqo\n    idiv rbx\n");
             emit(cg, "    mov rax, rdx  ; Move remainder to rax\n");
             emit(cg, ".L%d_end:\n", skip_label);
             }
@@ -2116,15 +2429,7 @@ void gen_expr(Codegen* cg, AstNode* n) {
         emit(cg, "    ; struct literal %s\n", n->struct_type);
         if (cg->symtab && cg->symtab->count > 0) {
             Symbol* sym = &cg->symtab->symbols[cg->symtab->count - 1];
-            for (int i = 0; i < n->child_count; i++) {
-                AstNode* field_assign = n->children[i];
-                char* field_name = field_assign->name;
-                AstNode* field_value = field_assign->children[0];
-
-                int field_off = typetab_field_offset(cg->types, n->struct_type, field_name);
-                gen_expr(cg, field_value);
-                emit(cg, "    mov [rbp%d], rax\n", sym->offset + field_off);
-            }
+            gen_struct_literal_at(cg, n, sym->offset);
             emit(cg, "    lea rax, [rbp%d]\n", sym->offset);
         }
     } else if (n->type == AST_FIELD_ACCESS) {
@@ -2249,6 +2554,7 @@ void gen_expr(Codegen* cg, AstNode* n) {
         AstNode* arr = n->children[0];
         AstNode* index_expr = n->children[1];
         AstNode* value_expr = n->children[2];
+        check_indexable(cg, arr);
 
         if (!arr || !arr->name) return;
 
@@ -2272,7 +2578,7 @@ void gen_expr(Codegen* cg, AstNode* n) {
                     if (base_type[0] == '*') base_type++;  // Skip '*'
 
                     if (!strcmp(base_type, "i8") || !strcmp(base_type, "u8")) elem_size = 1;
-                    else if (!strcmp(base_type, "i16")) elem_size = 2;
+                    else if ((!strcmp(base_type, "i16") || !strcmp(base_type, "u16"))) elem_size = 2;
                     else if (!strcmp(base_type, "i32") || !strcmp(base_type, "u32")) elem_size = 4;
                     else if (!strcmp(base_type, "i64") || !strcmp(base_type, "u64")) elem_size = 8;
                 }
@@ -2303,7 +2609,7 @@ void gen_expr(Codegen* cg, AstNode* n) {
                 int elem_size = 8;  // Default to 8 bytes (i64)
                 if (sym->type_name) {
                     if (!strcmp(sym->type_name, "i8") || !strcmp(sym->type_name, "u8")) elem_size = 1;
-                    else if (!strcmp(sym->type_name, "i16")) elem_size = 2;
+                    else if ((!strcmp(sym->type_name, "i16") || !strcmp(sym->type_name, "u16"))) elem_size = 2;
                     else if (!strcmp(sym->type_name, "i32") || !strcmp(sym->type_name, "u32")) elem_size = 4;
                     else if (!strcmp(sym->type_name, "i64") || !strcmp(sym->type_name, "u64")) elem_size = 8;
                 }
@@ -2333,9 +2639,9 @@ void gen_expr(Codegen* cg, AstNode* n) {
                 // Calculate element size
                 int elem_size = 1;  // i8
                 if (gvar->elem_type) {
-                    if (!strcmp(gvar->elem_type, "i32")) elem_size = 4;
-                    else if (!strcmp(gvar->elem_type, "i64")) elem_size = 8;
-                    else if (!strcmp(gvar->elem_type, "i16")) elem_size = 2;
+                    if ((!strcmp(gvar->elem_type, "i32") || !strcmp(gvar->elem_type, "u32"))) elem_size = 4;
+                    else if ((!strcmp(gvar->elem_type, "i64") || !strcmp(gvar->elem_type, "u64"))) elem_size = 8;
+                    else if ((!strcmp(gvar->elem_type, "i16") || !strcmp(gvar->elem_type, "u16"))) elem_size = 2;
                 }
 
                 // Calculate offset
@@ -2488,13 +2794,20 @@ void gen_stmt(Codegen* cg, AstNode* n) {
             int elem_size = 8;  // Default to 8 bytes
             if (n->value) {
                 if (!strcmp(n->value, "i8") || !strcmp(n->value, "u8")) elem_size = 1;
-                else if (!strcmp(n->value, "i16")) elem_size = 2;
+                else if ((!strcmp(n->value, "i16") || !strcmp(n->value, "u16"))) elem_size = 2;
                 else if (!strcmp(n->value, "i32") || !strcmp(n->value, "u32")) elem_size = 4;
                 else if (!strcmp(n->value, "i64") || !strcmp(n->value, "u64")) elem_size = 8;
             }
 
+            if (n->value) {
+                StructType* est = typetab_lookup(cg->types, n->value);
+                if (est && est->size > 0) elem_size = est->size;  // array of structs
+            }
             int total_size = elem_size * n->array_size;
-            int off = symtab_add(cg->symtab, n->name, n->array_size);  // Use array_size as count
+            int slots = (total_size + 7) / 8;
+            if (slots < n->array_size) slots = n->array_size;
+            symtab_add(cg->symtab, n->name, slots);
+            cg->symtab->symbols[cg->symtab->count - 1].is_array = 1;
 
             // Store element type in symbol table for later use
             if (cg->symtab && cg->symtab->count > 0) {
@@ -2515,7 +2828,7 @@ void gen_stmt(Codegen* cg, AstNode* n) {
             StructType* st = typetab_lookup(cg->types, n->struct_type);
             if (st) {
                 emit(cg, "    ; Struct local: %s: %s (%d bytes)\n", n->name, n->struct_type, st->size);
-                int off = symtab_add_struct(cg->symtab, n->name, n->struct_type, st->size);
+                symtab_add_struct(cg->symtab, n->name, n->struct_type, st->size);
 
                 // If there's an initializer (struct literal), generate it
                 if (n->child_count > 0) {
@@ -2532,7 +2845,7 @@ void gen_stmt(Codegen* cg, AstNode* n) {
                 type_name = n->children[0]->struct_type;
                 StructType* st = typetab_lookup(cg->types, type_name);
                 if (st) {
-                    int off = symtab_add_struct(cg->symtab, n->name, type_name, st->size);
+                    symtab_add_struct(cg->symtab, n->name, type_name, st->size);
                     gen_expr(cg, n->children[0]);
                     return;
                 }
@@ -2559,6 +2872,8 @@ void gen_stmt(Codegen* cg, AstNode* n) {
         }
 
         int off = symtab_add(cg->symtab, n->name, size);
+        if (n->child_count > 0 && n->children[0]->type == AST_ARRAY_LITERAL)
+            cg->symtab->symbols[cg->symtab->count - 1].is_array = 1;
         if (n->child_count > 0) {
             gen_expr(cg, n->children[0]);
             if (n->children[0]->type != AST_ARRAY_LITERAL) {
@@ -2596,6 +2911,9 @@ void gen_func(Codegen* cg, AstNode* n) {
     if (!n || !n->name) return;  // Null safety
     emit(cg, "\n%s:\n", n->name);
     emit(cg, "    push rbp\n    mov rbp, rsp\n");
+    // Frame size is only known after the body is generated: use a NASM
+    // forward-referenced constant defined after the function.
+    emit(cg, "    sub rsp, __frame_%s\n", n->name);
 
     int param_count = n->child_count - 1;
     const char* regs[] = {"rdi", "rsi", "rdx", "rcx", "r8", "r9"};
@@ -2613,6 +2931,16 @@ void gen_func(Codegen* cg, AstNode* n) {
                 sprintf(type_with_ptr, "*%s", n->children[i]->value);
                 cg->symtab->symbols[cg->symtab->count - 1].type_name = type_with_ptr;
             }
+        } else if (n->children[i]->value && typetab_lookup(cg->types, n->children[i]->value)) {
+            // Struct by value: caller passes its address; copy it into our frame
+            StructType* stt = typetab_lookup(cg->types, n->children[i]->value);
+            int sz = stt->size > 0 ? stt->size : 8;
+            off = symtab_add_struct(cg->symtab, n->children[i]->name, n->children[i]->value, sz);
+            for (int f = 0; f < sz; f += 8) {
+                emit(cg, "    mov rax, [%s+%d]\n", regs[i], f);
+                emit(cg, "    mov [rbp%+d], rax\n", off + f);
+            }
+            continue;
         } else {
             off = symtab_add(cg->symtab, n->children[i]->name, 1);
             // Set the type_name for non-pointer parameters
@@ -2623,21 +2951,16 @@ void gen_func(Codegen* cg, AstNode* n) {
         emit(cg, "    mov [rbp%d], %s\n", off, regs[i]);
     }
 
-    // Allocate stack space based on actual usage (aligned to 16 bytes)
-    int stack_size = cg->symtab->stack_size;
-    // Add 1024 bytes for temporary operations (print_int buffer, debug code, etc.)
-    stack_size += 1024;
-    // Align to 16 bytes (required by x86-64 ABI)
-    stack_size = ((stack_size + 15) / 16) * 16;
-    if (stack_size > 0) {
-        emit(cg, "    sub rsp, %d\n", stack_size);
-    }
-
     AstNode* body = n->children[param_count];
     for (int i = 0; i < body->child_count; i++)
         gen_stmt(cg, body->children[i]);
 
     emit(cg, "    xor rax, rax\n    leave\n    ret\n");
+
+    // All locals (including nested-scope ones) are now known.
+    int stack_size = cg->symtab->stack_size + 64;
+    stack_size = ((stack_size + 15) / 16) * 16;   // keep rsp 16-byte aligned
+    emit(cg, "__frame_%s equ %d\n", n->name, stack_size);
 
     cg->symtab = old_symtab;
 }
@@ -2849,11 +3172,16 @@ void codegen(AstNode* ast, const char* file, StringTable* strtab, TypeTable* typ
         }
     }
 
-    emit(&cg, "\nsection .text\n    global _start\n\n");
-    emit(&cg, "_start:\n    call main\n    mov rdi, rax\n");
-    emit(&cg, "    mov rax, 60\n    syscall\n");
-
-    gen_helpers(&cg);
+    if (g_freestanding) {
+        // No entry point and no runtime: the embedding code (e.g. a kernel's
+        // asm entry) calls our functions with the System V calling convention.
+        emit(&cg, "\nsection .text\n\n");
+    } else {
+        emit(&cg, "\nsection .text\n    global _start\n\n");
+        emit(&cg, "_start:\n    call main\n    mov rdi, rax\n");
+        emit(&cg, "    mov rax, 60\n    syscall\n");
+        gen_helpers(&cg);
+    }
 
     for (int i = 0; i < ast->child_count; i++) {
         if (ast->children[i]->type == AST_FUNCTION) {
@@ -2865,7 +3193,8 @@ void codegen(AstNode* ast, const char* file, StringTable* strtab, TypeTable* typ
     }
 
     cg.out = fopen(file, "w");
-    fprintf(cg.out, "; CHRONOS v0.11 - Global Variables\n\n");
+    fprintf(cg.out, "; Generated by " LANG_NAME " " LANG_VERSION "%s\n\n",
+            g_freestanding ? " (freestanding)" : "");
     fprintf(cg.out, "section .data\n");
 
     // Emit string literals
@@ -2907,8 +3236,7 @@ void codegen(AstNode* ast, const char* file, StringTable* strtab, TypeTable* typ
             }
             // Scalar or single value
             else if (gv->init_value) {
-                const char* directive = type_asm_directive(gv->type_name);
-                fprintf(cg.out, "%s: %s %s\n", gv->name, directive, gv->init_value);
+                fprintf(cg.out, "%s: dq %s\n", gv->name, gv->init_value);
             }
         }
     }
@@ -2929,6 +3257,9 @@ void codegen(AstNode* ast, const char* file, StringTable* strtab, TypeTable* typ
             if (gv->is_array) {
                 // Array: reserve N elements of appropriate size
                 int elem_size = type_size(gv->elem_type);
+                StructType* gst = gv->elem_type ? typetab_lookup(cg.types, gv->elem_type) : NULL;
+                if (gst && gst->size > 0) { directive = "resb"; count = gv->array_count * gst->size;
+                    fprintf(cg.out, "%s: %s %d\n", gv->name, directive, count); continue; }
                 if (elem_size == 1) directive = "resb";
                 else if (elem_size == 2) directive = "resw";
                 else if (elem_size == 4) directive = "resd";
@@ -2936,11 +3267,8 @@ void codegen(AstNode* ast, const char* file, StringTable* strtab, TypeTable* typ
                 count = gv->array_count;
             } else {
                 // Scalar or pointer: reserve appropriate size
-                int size = gv->is_pointer ? 8 : gv->size;
-                if (size == 1) { directive = "resb"; count = 1; }
-                else if (size == 2) { directive = "resw"; count = 1; }
-                else if (size == 4) { directive = "resd"; count = 1; }
-                else { directive = "resq"; count = 1; }
+                // Scalars are always accessed as 64-bit values, so reserve 8 bytes
+                directive = "resq"; count = 1;
             }
 
             fprintf(cg.out, "%s: %s %d\n", gv->name, directive, count);
@@ -2954,38 +3282,70 @@ void codegen(AstNode* ast, const char* file, StringTable* strtab, TypeTable* typ
     free(global_symtab.vars);
 }
 
+static void usage(FILE* o) {
+    fprintf(o,
+        "Usage: " COMPILER_BIN " [options] <file" SRC_EXT ">\n"
+        "\n"
+        "Options:\n"
+        "  -O0 | -O1 | -O2     optimization level (default -O0)\n"
+        "  -o <file>           output executable (default ./chronos_program),\n"
+        "                      or assembly file with -S / --freestanding\n"
+        "  -S                  only generate NASM assembly, do not assemble or link\n"
+        "  --freestanding      no OS: no _start, no syscalls, no hosted builtins;\n"
+        "                      emits assembly to be included by your own entry code (implies -S)\n"
+        "  -v, --verbose       print compilation steps\n"
+        "  --version           print version and exit\n"
+        "  -h, --help          show this help\n");
+}
+
+static int run_cmd(const char* fmt, const char* a, const char* b) {
+    char cmd[4096];
+    snprintf(cmd, sizeof(cmd), fmt, a, b);
+    return system(cmd);
+}
+
 int main(int argc, char** argv) {
-    // Parse optimization flags
-    int file_arg = 1;
-    if (argc >= 3 && argv[1][0] == '-' && argv[1][1] == 'O') {
-        if (argv[1][2] == '0') optimization_level = 0;
-        else if (argv[1][2] == '1') optimization_level = 1;
-        else if (argv[1][2] == '2') optimization_level = 2;
-        file_arg = 2;
-    }
+    const char* input = NULL;
+    const char* out = NULL;
+    int only_asm = 0, verbose = 0;
 
-    if (argc < 2 || (file_arg == 2 && argc < 3)) {
-        printf("Usage: chronos [-O0|-O1|-O2] <file.ch>\n");
-        printf("  -O0: No optimizations (default)\n");
-        printf("  -O1: Basic (constant folding)\n");
-        printf("  -O2: Aggressive (constant folding + strength reduction)\n");
-        return 1;
+    for (int i = 1; i < argc; i++) {
+        const char* a = argv[i];
+        if (!strcmp(a, "-O0")) optimization_level = 0;
+        else if (!strcmp(a, "-O1")) optimization_level = 1;
+        else if (!strcmp(a, "-O2")) optimization_level = 2;
+        else if (!strcmp(a, "-S")) only_asm = 1;
+        else if (!strcmp(a, "--freestanding")) { g_freestanding = 1; only_asm = 1; }
+        else if (!strcmp(a, "-v") || !strcmp(a, "--verbose")) verbose = 1;
+        else if (!strcmp(a, "--version")) { printf(LANG_NAME " " LANG_VERSION "\n"); return 0; }
+        else if (!strcmp(a, "-h") || !strcmp(a, "--help")) { usage(stdout); return 0; }
+        else if (!strcmp(a, "-o")) {
+            if (i + 1 >= argc) { fprintf(stderr, COMPILER_BIN ": error: -o needs a file name\n"); return 2; }
+            out = argv[++i];
+        }
+        else if (a[0] == '-') { fprintf(stderr, COMPILER_BIN ": error: unknown option '%s'\n", a); usage(stderr); return 2; }
+        else if (!input) input = a;
+        else { fprintf(stderr, COMPILER_BIN ": error: more than one input file\n"); return 2; }
     }
+    if (!input) { usage(stderr); return 2; }
 
-    FILE* f = fopen(argv[file_arg], "r");
-    if (!f) { perror("Error"); return 1; }
+    FILE* f = fopen(input, "r");
+    if (!f) { fprintf(stderr, COMPILER_BIN ": error: cannot open '%s'\n", input); return 1; }
     fseek(f, 0, SEEK_END);
     long size = ftell(f);
     fseek(f, 0, SEEK_SET);
     char* src = malloc(size + 1);
-    fread(src, 1, size, f);
-    src[size] = '\0';
+    size_t got = fread(src, 1, size, f);
+    src[got] = '\0';
     fclose(f);
+    g_src_file = input;
+    g_src_text = src;
 
-    printf("🔥 CHRONOS v0.17 - COMPILER OPTIMIZATIONS\n");
-    printf("Constant folding, strength reduction, -O flags\n");
-    printf("Optimization level: -O%d\n", optimization_level);
-    printf("Compiling: %s\n", argv[file_arg]);
+    const char* asm_out = only_asm ? (out ? out : "output.asm") : "output.asm";
+    const char* exe_out = out ? out : "chronos_program";
+
+    if (verbose) fprintf(stderr, LANG_NAME " " LANG_VERSION ": compiling %s (-O%d%s)\n",
+                         input, optimization_level, g_freestanding ? ", freestanding" : "");
 
     int count;
     Tok* toks = tokenize(src, &count);
@@ -2996,20 +3356,26 @@ int main(int argc, char** argv) {
     build_type_table(types, ast);
 
     StringTable* strtab = strtab_new();
-    codegen(ast, "output.asm", strtab, types);
+    codegen(ast, asm_out, strtab, types);
 
-    printf("✅ Code generated\n");
+    if (g_error_count > 0) {
+        fprintf(stderr, "%d error%s, compilation failed\n", g_error_count, g_error_count == 1 ? "" : "s");
+        remove(asm_out);
+        return 1;
+    }
+    if (verbose) fprintf(stderr, "  wrote %s\n", asm_out);
+    if (only_asm) return 0;
+
     remove("output.o");
-    remove("chronos_program");
-    if (system("nasm -f elf64 output.asm -o output.o") != 0) {
-        fprintf(stderr, "❌ Assembly failed (nasm), see errors above\n");
+    remove(exe_out);
+    if (run_cmd("nasm -f elf64 '%s' -o output.o%s", asm_out, "") != 0) {
+        fprintf(stderr, COMPILER_BIN ": error: assembler (nasm) failed; this is a compiler bug, please report it\n");
         return 1;
     }
-    if (system("ld output.o -o chronos_program") != 0) {
-        fprintf(stderr, "❌ Link failed (ld), see errors above\n");
+    if (run_cmd("ld output.o -o '%s'%s", exe_out, "") != 0) {
+        fprintf(stderr, COMPILER_BIN ": error: linker (ld) failed\n");
         return 1;
     }
-    printf("✅ Compilation complete: ./chronos_program\n");
-
+    if (verbose) fprintf(stderr, "  linked ./%s\n", exe_out);
     return 0;
 }
