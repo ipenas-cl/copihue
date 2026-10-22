@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <title>Copihue</title>
+  <!-- Original minimal drawing of a copihue (Lapageria rosea): a pendant red bell on a curved stem. -->
+  <path d="M60 28 C 120 18, 150 40, 138 86" fill="none" stroke="#2f6b3a" stroke-width="7" stroke-linecap="round"/>
+  <path d="M96 30 C 70 46, 62 70, 74 92 C 92 74, 100 52, 96 30 Z" fill="#3f8a4b"/>
+  <path d="M138 84 C 104 98, 84 140, 86 196 C 106 186, 120 168, 128 146 Z" fill="#a3122a"/>
+  <path d="M138 84 C 172 98, 192 140, 190 196 C 170 186, 156 168, 148 146 Z" fill="#a3122a"/>
+  <path d="M138 84 C 116 104, 108 160, 120 222 C 130 214, 134 214, 138 226 C 142 214, 146 214, 156 222 C 168 160, 160 104, 138 84 Z" fill="#d7263d"/>
+  <path d="M138 96 C 128 118, 126 160, 132 200" fill="none" stroke="#f2a3ad" stroke-width="4" stroke-linecap="round" opacity="0.8"/>
+  <path d="M132 222 L130 240 M138 226 L138 244 M144 222 L146 240" stroke="#f4d35e" stroke-width="3" stroke-linecap="round"/>
+</svg>

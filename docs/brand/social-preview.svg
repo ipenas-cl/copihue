@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 640" width="1280" height="640">
+  <rect width="1280" height="640" fill="#fbf6f1"/>
+  <rect x="0" y="600" width="1280" height="40" fill="#d7263d"/>
+  <g transform="translate(110 120) scale(1.55)">
+    <path d="M60 28 C 120 18, 150 40, 138 86" fill="none" stroke="#2f6b3a" stroke-width="7" stroke-linecap="round"/>
+    <path d="M96 30 C 70 46, 62 70, 74 92 C 92 74, 100 52, 96 30 Z" fill="#3f8a4b"/>
+    <path d="M138 84 C 104 98, 84 140, 86 196 C 106 186, 120 168, 128 146 Z" fill="#a3122a"/>
+    <path d="M138 84 C 172 98, 192 140, 190 196 C 170 186, 156 168, 148 146 Z" fill="#a3122a"/>
+    <path d="M138 84 C 116 104, 108 160, 120 222 C 130 214, 134 214, 138 226 C 142 214, 146 214, 156 222 C 168 160, 160 104, 138 84 Z" fill="#d7263d"/>
+    <path d="M138 96 C 128 118, 126 160, 132 200" fill="none" stroke="#f2a3ad" stroke-width="4" stroke-linecap="round" opacity="0.8"/>
+    <path d="M132 222 L130 240 M138 226 L138 244 M144 222 L146 240" stroke="#f4d35e" stroke-width="3" stroke-linecap="round"/>
+  </g>
+  <text x="560" y="300" font-family="DejaVu Sans" font-weight="bold" font-size="120" fill="#2b1b1e">Copihue</text>
+  <text x="564" y="370" font-family="DejaVu Sans" font-size="36" fill="#5a4a4c">An experimental systems language</text>
+  <text x="564" y="420" font-family="DejaVu Sans" font-size="30" fill="#5a4a4c">x86-64 · no libc · bare-metal mode</text>
+  <text x="564" y="500" font-family="DejaVu Sans Mono" font-size="28" fill="#a3122a">github.com/ipenas-cl/copihue</text>
+</svg>
