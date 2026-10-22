@@ -74,7 +74,7 @@ for src in tests/freestanding/*.cph; do
   fi
   # Keep only instructions (drop comments/blank lines) as the golden output.
   grep -vE '^\s*(;|$)' "$WORK/fs.asm" | grep -v '^; Generated' > "$WORK/fs.norm"
-  check "$src" "tests/expected/freestanding/$name.asm" "$WORK/fs.norm"
+  check "$src" "tests/expected/freestanding/$name.asm.txt" "$WORK/fs.norm"
 done
 
 rm -f "$CC"
