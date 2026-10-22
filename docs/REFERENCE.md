@@ -5,9 +5,9 @@ Planned features are in the README roadmap.
 
 ## Source files and compilation
 
-- Source files use the `.cph` extension. `.ch` (the pre-rename Chronos extension) is accepted with a warning.
+- Source files use the `.lap` extension (from *Lapageria rosea*, the copihue). `.cph` (v0.18.x) and `.ch` (the pre-rename Chronos extension) are still accepted with a deprecation warning.
 - A program is a list of `struct` definitions, global `let` declarations, and functions. Hosted programs start at `fn main() -> i32`, whose return value becomes the process exit code (modulo 256).
-- `copihue file.cph [-o out]` writes `output.asm` (NASM), assembles it with `nasm -f elf64`, and links it with `ld` into a static ELF64 executable (default `a.out`). There is no libc.
+- `copihue file.lap [-o out]` writes `output.asm` (NASM), assembles it with `nasm -f elf64`, and links it with `ld` into a static ELF64 executable (default `a.out`). There is no libc.
 - `-S` writes assembly only. `--freestanding` writes assembly for bare metal (see below). `-O0`/`-O1`/`-O2` select the optimization level. `--flat ADDR` builds a raw bare-metal binary that starts at `fn _start` (see below).
 - On error the compiler prints `file:line:col: error: message`, followed by the source line and a caret, and exits with status 1.
 
@@ -93,7 +93,7 @@ As in Rust, bitwise operators bind tighter than comparisons: `x & 2 == 2` means 
 
 ## Freestanding mode
 
-`copihue --freestanding -o out.asm file.cph` emits NASM with no `_start`, no runtime helpers, and no syscalls.
+`copihue --freestanding -o out.asm file.lap` emits NASM with no `_start`, no runtime helpers, and no syscalls.
 Your own entry code `%include`s the result and calls Copihue functions using the convention above.
 The code uses `rax`, `rbx`, `rcx`, `rdx`, `rsi`, `rdi` and `r8`–`r11` freely, so do not assume `rbx` is preserved.
 Hosted built-ins are a compile error. These built-ins are available:
@@ -110,7 +110,7 @@ Memory-mapped I/O uses typed pointers, for example `let vga: *u16 = 0xB8000; vga
 
 ## Flat binaries
 
-`copihue --flat ADDR -o out.bin file.cph` implies `--freestanding` and produces a raw binary (assembled with `nasm -f bin`, `org ADDR`) instead of assembly. Execution starts at the first byte, and the compiler always emits `fn _start` first, wherever it appears in the source; without `_start` compilation fails. `bss_start()` and `bss_end()` bound the zero-initialized globals so `_start` can clear them before calling anything else. `-S` writes the assembly instead of the binary.
+`copihue --flat ADDR -o out.bin file.lap` implies `--freestanding` and produces a raw binary (assembled with `nasm -f bin`, `org ADDR`) instead of assembly. Execution starts at the first byte, and the compiler always emits `fn _start` first, wherever it appears in the source; without `_start` compilation fails. `bss_start()` and `bss_end()` bound the zero-initialized globals so `_start` can clear them before calling anything else. `-S` writes the assembly instead of the binary.
 
 ## Known limitations
 

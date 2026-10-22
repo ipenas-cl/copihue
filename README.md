@@ -36,21 +36,21 @@ make install              # installs copihue to ~/.local/bin (PREFIX=/usr/local 
 ## Hello world
 
 ```bash
-cat > hello.cph <<'CPH'
+cat > hello.lap <<'LAP'
 fn main() -> i32 {
     println("Hello, Copihue!");
     print_int(6 * 7);
     println("");
     return 0;
 }
-CPH
-copihue hello.cph -o hello && ./hello
+LAP
+copihue hello.lap -o hello && ./hello
 # Hello, Copihue!
 # 42
 ```
 
 ```
-copihue [-O0|-O1|-O2] [-o out] [-S] [--freestanding | --flat ADDR] [-v] file.cph
+copihue [-O0|-O1|-O2] [-o out] [-S] [--freestanding | --flat ADDR] [-v] file.lap
 ```
 
 `-S` stops after writing NASM assembly. `--freestanding` emits assembly for use without an OS (see below).
@@ -85,7 +85,7 @@ The full language reference is in [docs/REFERENCE.md](docs/REFERENCE.md).
 | 12 error tests | the compiler rejects the program with the exact expected message |
 | 2 freestanding tests | `--freestanding` output has no `_start`/syscalls and assembles |
 | 1 flat-binary test | `--flat` puts `_start` at offset 0; the raw image matches a golden hexdump |
-| `make net-test` | starts `examples/simple_api_server.cph`, queries it with `curl` and with two Copihue HTTP clients, then stops it |
+| `make net-test` | starts `examples/simple_api_server.lap`, queries it with `curl` and with two Copihue HTTP clients, then stops it |
 
 ### Known limitations
 
@@ -104,13 +104,13 @@ fn serial_putc(c: i64) -> i64 {
 }
 ```
 
-`copihue --freestanding -o kernel.asm kernel.cph` produces NASM with no `_start`, no syscalls and no runtime.
+`copihue --freestanding -o kernel.asm kernel.lap` produces NASM with no `_start`, no syscalls and no runtime.
 Your own entry code `%include`s it and calls your functions using the System V argument registers.
 Hosted built-ins such as `println` are a compile error in this mode.
 
 ### Flat binaries (`--flat`)
 
-`copihue --flat 0x10000 -o kernel.bin kernel.cph` goes one step further: it builds a raw binary (via `nasm -f bin`) meant to be loaded at the given address, with **no assembly entry stub**. Execution starts at the first byte, which is always `fn _start` (it is emitted first wherever it is defined; a missing `_start` is an error). Two extra built-ins, `bss_start()` and `bss_end()`, return the bounds of the zero-initialized globals so `_start` can clear them. The [AtomicOS](https://github.com/ipenas-cl/AtomicOS) kernel is built this way. Add `-S` to see the assembly instead.
+`copihue --flat 0x10000 -o kernel.bin kernel.lap` goes one step further: it builds a raw binary (via `nasm -f bin`) meant to be loaded at the given address, with **no assembly entry stub**. Execution starts at the first byte, which is always `fn _start` (it is emitted first wherever it is defined; a missing `_start` is an error). Two extra built-ins, `bss_start()` and `bss_end()`, return the bounds of the zero-initialized globals so `_start` can clear them. The [AtomicOS](https://github.com/ipenas-cl/AtomicOS) kernel is built this way. Add `-S` to see the assembly instead.
 
 ## Repository layout
 

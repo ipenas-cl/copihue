@@ -20,13 +20,13 @@ jobs:
       - name: Install instructions work
         run: |
           make install PREFIX=$HOME/.local
-          cat > /tmp/hello.cph <<'CPH'
+          cat > /tmp/hello.lap <<'LAP'
           fn main() -> i32 {
               println("Hello, Copihue!");
               return 0;
           }
-          CPH
-          cd /tmp && $HOME/.local/bin/copihue hello.cph -o hello && ./hello | grep -q "Hello, Copihue!"
+          LAP
+          cd /tmp && $HOME/.local/bin/copihue hello.lap -o hello && ./hello | grep -q "Hello, Copihue!"
       - name: Pure-assembly compiler smoke test
         run: |
           cd compiler/asm && ./build.sh

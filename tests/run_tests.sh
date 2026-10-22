@@ -4,13 +4,13 @@
 #   tests/run_tests.sh            run everything
 #   tests/run_tests.sh --update   regenerate golden files (review the diff!)
 #
-# 1. Program tests: every tests/**/*.cph and examples/*.cph is compiled at -O0
+# 1. Program tests: every tests/**/*.lap and examples/*.lap is compiled at -O0
 #    and -O2, run with a timeout, and its stdout + exit code compared with
 #    tests/expected/<path>.out. Both optimization levels must match the same
 #    golden file. Heap/stack addresses (9+ digit numbers) are masked.
-# 2. Error tests: every tests/errors/*.cph must FAIL to compile and its
+# 2. Error tests: every tests/errors/*.lap must FAIL to compile and its
 #    diagnostics must match tests/expected/errors/<name>.err.
-# 3. Freestanding tests: tests/freestanding/*.cph compile with --freestanding,
+# 3. Freestanding tests: tests/freestanding/*.lap compile with --freestanding,
 #    the output must assemble with nasm, and contain no _start or syscall.
 set -u
 cd "$(dirname "$0")/.."
@@ -21,7 +21,7 @@ gcc -O2 -Wall -o "$CC" compiler/bootstrap-c/copihue.c || exit 1
 
 # Programs that are not batch tests (servers / need a peer) or need input.
 # They are covered by tests/net_test.sh instead.
-SKIP=" examples/simple_api_server.cph examples/realtime_api_monitor.cph tests/test_http_simple.cph tests/http/test_http_client.cph tests/http/test_http_post.cph tests/http/test_suite_http.cph "
+SKIP=" examples/simple_api_server.lap examples/realtime_api_monitor.lap tests/test_http_simple.lap tests/http/test_http_client.lap tests/http/test_http_post.lap tests/http/test_suite_http.lap "
 
 WORK=$(mktemp -d); trap 'rm -rf "$WORK"' EXIT
 pass=0; fail=0; failed=()
@@ -41,9 +41,9 @@ check() {  # $1 = name, $2 = golden file, $3 = actual file
   else fail=$((fail+1)); failed+=("$1"); echo "FAIL $1"; [ -f "$2" ] && diff "$2" "$3" | head -10; fi
 }
 
-for src in $(ls tests/*.cph tests/*/*.cph examples/*.cph | grep -v -e '^tests/errors/' -e '^tests/freestanding/' -e "^tests/flat/"); do
+for src in $(ls tests/*.lap tests/*/*.lap examples/*.lap | grep -v -e '^tests/errors/' -e '^tests/freestanding/' -e "^tests/flat/"); do
   case "$SKIP" in *" $src "*) continue ;; esac
-  golden=tests/expected/${src%.cph}.out
+  golden=tests/expected/${src%.lap}.out
   run_program "$src" -O0 > "$WORK/o0"
   run_program "$src" -O2 > "$WORK/o2"
   if ! cmp -s "$WORK/o0" "$WORK/o2"; then
@@ -54,8 +54,8 @@ for src in $(ls tests/*.cph tests/*/*.cph examples/*.cph | grep -v -e '^tests/er
   check "$src" "$golden" "$WORK/o0"
 done
 
-for src in tests/errors/*.cph; do
-  name=$(basename "$src" .cph)
+for src in tests/errors/*.lap; do
+  name=$(basename "$src" .lap)
   flags=$(sed -n 's|^// flags: ||p' "$src" | head -1)
   if ( cd "$WORK" && "$CC" -S $flags -o out.asm "$ROOT/$src" >/dev/null 2>err.txt ); then
     fail=$((fail+1)); failed+=("$src"); echo "FAIL $src: compiled but should have failed"; continue
@@ -64,8 +64,8 @@ for src in tests/errors/*.cph; do
   check "$src" "tests/expected/errors/$name.err" "$WORK/err.norm"
 done
 
-for src in tests/freestanding/*.cph; do
-  name=$(basename "$src" .cph)
+for src in tests/freestanding/*.lap; do
+  name=$(basename "$src" .lap)
   if ! ( cd "$WORK" && "$CC" --freestanding -o fs.asm "$ROOT/$src" 2>err.txt ); then
     fail=$((fail+1)); failed+=("$src"); echo "FAIL $src:"; cat "$WORK/err.txt"; continue
   fi
@@ -77,10 +77,10 @@ for src in tests/freestanding/*.cph; do
   check "$src" "tests/expected/freestanding/$name.asm.txt" "$WORK/fs.norm"
 done
 
-# 4. Flat-binary tests: tests/flat/*.cph build with --flat 0x10000 into a raw
+# 4. Flat-binary tests: tests/flat/*.lap build with --flat 0x10000 into a raw
 #    image; _start must be at offset 0 and the bytes must match the golden hexdump.
-for src in tests/flat/*.cph; do
-  name=$(basename "$src" .cph)
+for src in tests/flat/*.lap; do
+  name=$(basename "$src" .lap)
   if ! ( cd "$WORK" && "$CC" --flat 0x10000 -o flat.bin "$ROOT/$src" 2>err.txt && "$CC" --flat 0x10000 -S -o flat.asm "$ROOT/$src" 2>>err.txt ); then
     fail=$((fail+1)); failed+=("$src"); echo "FAIL $src:"; cat "$WORK/err.txt"; continue
   fi

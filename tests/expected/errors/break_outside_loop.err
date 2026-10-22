@@ -1,4 +1,4 @@
-tests/errors/break_outside_loop.cph:2:5: error: 'break' outside of a loop
+tests/errors/break_outside_loop.lap:2:5: error: 'break' outside of a loop
       2 |     break;
         |     ^
 1 error, compilation failed
