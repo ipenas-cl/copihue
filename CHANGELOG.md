@@ -2,6 +2,11 @@
 
 Todos los cambios importantes del proyecto.
 
+## [0.18.2] - 2026-10-22
+
+### Fixed
+- `ptr->field` through a struct pointer parameter generated no code (reads returned garbage, writes were dropped). It now loads and stores the field, and an unknown field is a compile error.
+
 ## [0.18.1] - 2026-10-22
 
 ### Changed (breaking)

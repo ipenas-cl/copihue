@@ -1,0 +1,15 @@
+// ptr->field read and write through a struct pointer parameter (expect exit 3).
+struct Pair { a: i64, b: i64, }
+fn step(p: *Pair) -> i64 {
+    let t: i64 = p->a + p->b;
+    p->a = p->b;
+    p->b = t;
+    return t;
+}
+fn main() -> i32 {
+    let p: Pair = Pair { a: 0, b: 1 };
+    let v: i64 = step(&p);
+    v = step(&p);
+    v = step(&p);
+    return v;
+}

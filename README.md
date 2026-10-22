@@ -80,7 +80,7 @@ The full language reference is in [docs/REFERENCE.md](docs/REFERENCE.md).
 | Suite | What it checks |
 |---|---|
 | 127 test programs + 17 examples | compiled at `-O0` and `-O2`, run, and stdout + exit code compared to golden files in `tests/expected/` |
-| 11 error tests | the compiler rejects the program with the exact expected message |
+| 12 error tests | the compiler rejects the program with the exact expected message |
 | 2 freestanding tests | `--freestanding` output has no `_start`/syscalls and assembles |
 | 1 flat-binary test | `--flat` puts `_start` at offset 0; the raw image matches a golden hexdump |
 | `make net-test` | starts `examples/simple_api_server.cph`, queries it with `curl` and with two Copihue HTTP clients, then stops it |
