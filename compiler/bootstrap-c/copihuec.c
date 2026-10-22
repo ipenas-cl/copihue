@@ -1161,7 +1161,16 @@ AstNode* parse_stmt(Parser* p) {
         ast_add(ifnode, parse_expr(p));
         expect(p, T_RPAREN);
         ast_add(ifnode, parse_block(p));
-        if (match_tok(p, T_ELSE)) ast_add(ifnode, parse_block(p));
+        if (match_tok(p, T_ELSE)) {
+            if (check_tok(p, T_IF)) {
+                // else if: the nested if becomes the only statement of the else block
+                AstNode* else_block = ast_new(AST_BLOCK);
+                ast_add(else_block, parse_stmt(p));
+                ast_add(ifnode, else_block);
+            } else {
+                ast_add(ifnode, parse_block(p));
+            }
+        }
         return ifnode;
     }
     if (match_tok(p, T_WHILE)) {

@@ -56,7 +56,7 @@ The full language reference is in [docs/REFERENCE.md](docs/REFERENCE.md).
 - Functions, recursion, up to 6 parameters, structs passed by value (copied) or by pointer
 - `let` locals, globals, integer types `i8 i16 i32 i64 u8 u16 u32 u64`, typed arrays, pointers, `&`, `*`, `->`
 - `struct`s, including nested structs, arrays of structs, and nested struct literals
-- `if`/`else`, `while`, `for`, `break`/`continue`
+- `if`/`else if`/`else`, `while`, `for`, `break`/`continue`
 - Arithmetic with signed division and remainder that truncate toward zero, comparisons, `&&`/`||` (short-circuit),
   and bitwise `& | ^ ~ << >>` with Rust-like precedence. Hex `0xFF`, binary `0b1010`, `1_000_000` and `'A'` literals
 - String literals with escapes (`\n \t \r \0 \\ \" \'`)
