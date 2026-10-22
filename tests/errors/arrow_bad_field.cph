@@ -1,0 +1,7 @@
+struct Pair { a: i64, b: i64, }
+fn get(p: *Pair) -> i64 {
+    return p->c;
+}
+fn main() -> i32 {
+    return 0;
+}

@@ -14,7 +14,7 @@
 
 // ==== NAMING (single place to change when the language is renamed) ====
 #define LANG_NAME     "Copihue"
-#define LANG_VERSION  "0.18.1"
+#define LANG_VERSION  "0.18.2"
 #define COMPILER_BIN  "copihue"
 #define SRC_EXT       ".cph"
 #define OLD_SRC_EXT   ".ch"   /* pre-rename (Chronos) extension, still accepted */
@@ -2243,6 +2243,24 @@ static void gen_struct_literal_at(Codegen* cg, AstNode* n, int base) {
     }
 }
 
+// Offset of `field` in the struct that `ptr` (an identifier of type *Struct)
+// points to, for ptr->field. Reports an error and returns -1 if unresolved.
+static int deref_field_offset(Codegen* cg, AstNode* ptr, const char* field, AstNode* at) {
+    const char* type = NULL;
+    if (ptr && ptr->type == AST_IDENT && ptr->name) {
+        Symbol* sym = symtab_lookup_symbol(cg->symtab, ptr->name);
+        if (sym && sym->type_name) type = sym->type_name;
+    }
+    if (!type) {
+        diag_error(at->line, at->col, "'->%s' needs a variable of pointer-to-struct type on the left", field);
+        return -1;
+    }
+    if (type[0] == '*') type++;
+    int off = typetab_field_offset(cg->types, (char*)type, (char*)field);
+    if (off < 0) diag_error(at->line, at->col, "struct '%s' has no field '%s'", type, field);
+    return off;
+}
+
 void gen_expr(Codegen* cg, AstNode* n) {
     if (!n) return;  // Null safety guard
     if (n->type == AST_NUMBER) {
@@ -2469,13 +2487,10 @@ void gen_expr(Codegen* cg, AstNode* n) {
         if (obj->type == AST_DEREF) {
             // ptr->field case (already desugared)
             AstNode* ptr = obj->children[0];
-            Symbol* sym = symtab_lookup_symbol(cg->symtab, ptr->name);
-            if (sym && sym->is_pointer && sym->type_name) {
-                int field_off = typetab_field_offset(cg->types, sym->type_name, field_name);
-                if (field_off >= 0) {
-                    emit(cg, "    mov rax, [rbp%d]\n", sym->offset);  // Load pointer
-                    emit(cg, "    mov rax, [rax+%d]\n", field_off);   // Access field
-                }
+            int field_off = deref_field_offset(cg, ptr, field_name, n);
+            if (field_off >= 0) {
+                gen_expr(cg, ptr);                                  // pointer value
+                emit(cg, "    mov rax, [rax+%d]\n", field_off);   // load field
             }
         } else if (obj->type == AST_IDENT) {
             // Regular struct field access from identifier
@@ -2760,6 +2775,15 @@ void gen_expr(Codegen* cg, AstNode* n) {
                     emit(cg, "    pop rax\n");  // Restore value
                     emit(cg, "    mov [rcx], rax\n");  // Store value at field location
                 }
+            }
+        } else if (obj->type == AST_DEREF && obj->child_count == 1) {
+            // ptr->field = value
+            int field_off = deref_field_offset(cg, obj->children[0], field_name, n);
+            if (field_off >= 0) {
+                gen_expr(cg, obj->children[0]);   // pointer value
+                emit(cg, "    mov rcx, rax\n    pop rax\n    mov [rcx+%d], rax\n", field_off);
+            } else {
+                emit(cg, "    pop rax\n");
             }
         } else if (obj->name) {
             // Simple struct field assignment: struct.field = value
