@@ -10,6 +10,8 @@
 
 *Formerly Chronos.*
 
+<p align="center"><img src="docs/media/copihue-code-fib.png" alt="A Copihue program" width="420"> <img src="docs/media/copihue-fib-output.png" alt="Its output" width="300"></p>
+
 **A small systems programming language with its own compiler, written from scratch in C and x86-64 assembly.**
 Copihue compiles a C-family language to native Linux x86-64 ELF executables with **no libc and no runtime**.
 It can also emit **freestanding** code, with no OS, for kernels and bare-metal programs.
@@ -79,7 +81,7 @@ The full language reference is in [docs/REFERENCE.md](docs/REFERENCE.md).
 
 | Suite | What it checks |
 |---|---|
-| 127 test programs + 17 examples | compiled at `-O0` and `-O2`, run, and stdout + exit code compared to golden files in `tests/expected/` |
+| 127 test programs + 18 examples | compiled at `-O0` and `-O2`, run, and stdout + exit code compared to golden files in `tests/expected/` |
 | 12 error tests | the compiler rejects the program with the exact expected message |
 | 2 freestanding tests | `--freestanding` output has no `_start`/syscalls and assembles |
 | 1 flat-binary test | `--flat` puts `_start` at offset 0; the raw image matches a golden hexdump |
