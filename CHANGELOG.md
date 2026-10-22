@@ -16,7 +16,7 @@ First release under the new name **Copihue** (formerly Chronos).
 ### Added
 - CLI: `-o`, `-S`, `--freestanding`, `--version`, `--help`, `-v`. The compiler is quiet by default and exits non-zero on any error.
 - Diagnostics as `file:line:col: error: ...` with the source line and a caret: syntax errors, undeclared variables, unknown struct fields, bad escapes, unexpected characters, `break` outside a loop.
-- `break` and `continue`, and `for` steps written as `i++` or `i += n`.
+- `else if`, `break` and `continue`, and `for` steps written as `i++` or `i += n`.
 - Bitwise operators `& | ^ ~ << >>` with Rust-like precedence; hex, binary and `_`-separated literals; character literals; string escape sequences.
 - `u16`/`u32`/`u64` element types for arrays and pointers.
 - Freestanding mode for kernels: `inb/inw/inl`, `outb/outw/outl`, `cli`, `sti`, `hlt`, `pause`, `asm("...")`.
