@@ -251,4 +251,4 @@ Current status: **26/28 tests passing (93%)**
 
 **Author**: Ignacio Peña
 **License**: MIT
-**Repository**: https://github.com/ipenas-cl/Chronos
+**Repository**: https://github.com/ipenas-cl/copihue
