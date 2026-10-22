@@ -16,7 +16,7 @@ fn main() -> i64 {
     println("");
 
     // Initialize node_type field
-    let ptr = node;
+    let ptr: *i64 = node;
     ptr[0] = 9;  // AST_NUMBER
 
     // Initialize value field

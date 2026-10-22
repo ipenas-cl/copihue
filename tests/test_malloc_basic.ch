@@ -5,7 +5,7 @@ fn main() -> i32 {
     println("=== Test: Basic malloc ===");
 
     // 1. Allocate 40 bytes (10 i32s)
-    let ptr = malloc(40);
+    let ptr: *i64 = malloc(40);
 
     // Check if allocation succeeded
     if (ptr == 0) {

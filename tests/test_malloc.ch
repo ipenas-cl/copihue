@@ -5,7 +5,7 @@ fn main() -> i64 {
 
     // Allocate 100 bytes
     print("Allocating 100 bytes...");
-    let ptr = malloc(100);
+    let ptr: *i64 = malloc(100);
     println("");
 
     if (ptr == 0) {

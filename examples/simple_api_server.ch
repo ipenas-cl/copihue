@@ -16,6 +16,7 @@ let buffer: [i8; 4096];
 let response: [i8; 2048];
 
 let request_count = 0;
+let optval: [i32; 1];
 
 fn htons(port: i32) -> i32 {
     let high = port / 256;
@@ -30,14 +31,15 @@ fn setup_sockaddr(port: i32) -> i32 {
         i++;
     }
     sockaddr[0] = 2;  // AF_INET
-    let port_be = htons(port);
-    sockaddr[2] = port_be / 256;
-    sockaddr[3] = port_be % 256;
+    // sin_port is stored in network byte order (big-endian):
+    // high byte first, then low byte.
+    sockaddr[2] = port / 256;
+    sockaddr[3] = port % 256;
     // 0.0.0.0 (bind to all interfaces)
     return 0;
 }
 
-fn int_to_str(num: i32, buf: i32) -> i32 {
+fn int_to_str(num: i32, buf: *i8) -> i32 {
     if (num == 0) {
         buf[0] = 48;  // '0'
         buf[1] = 0;
@@ -123,8 +125,8 @@ fn build_json_response() -> i32 {
     pos++;
     response[pos] = 34;
     pos++;
-    strcpy(response + pos, "Chronos API Server v0.16");
-    pos += 25;
+    strcpy(response + pos, "Chronos API Server");
+    pos += 18;
     response[pos] = 34;
     pos++;
     
@@ -152,7 +154,7 @@ fn main() -> i32 {
     }
     
     // Set SO_REUSEADDR
-    let optval = 1;
+    optval[0] = 1;  // setsockopt takes a pointer to the option value
     syscall6(SYS_SETSOCKOPT, sockfd, SOL_SOCKET, SO_REUSEADDR, optval, 4, 0);
     
     // Bind
