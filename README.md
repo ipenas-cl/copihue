@@ -1,4 +1,4 @@
-<p align="center"><img src="docs/brand/logo.svg" alt="Copihue logo" width="140"></p>
+<p align="center"><img src="docs/brand/pixel/copihue-pixel-wordmark-dark.png" alt="Copihue" width="420"></p>
 
 <h1 align="center">Copihue</h1>
 
