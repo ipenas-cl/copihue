@@ -1,0 +1,4 @@
+fn main() -> i64 {
+    let p: *u8 = bss_start();
+    return 0;
+}

@@ -2,6 +2,15 @@
 
 Todos los cambios importantes del proyecto.
 
+## [0.18.1] - 2026-10-22
+
+### Changed (breaking)
+- The compiler command is now `copihue` (source `compiler/bootstrap-c/copihue.c`). `make install` installs `copihue`.
+
+### Added
+- `--flat ADDR`: build a raw bare-metal binary (`nasm -f bin`, `org ADDR`) that starts at `fn _start`, with no assembly entry stub. New built-ins `bss_start()` and `bss_end()` (flat mode only). This lets the AtomicOS kernel be written entirely in Copihue.
+- Tests for flat binaries and for the new error messages.
+
 ---
 
 ## [0.18.0] - 2026-10-22
@@ -9,7 +18,7 @@ Todos los cambios importantes del proyecto.
 First release under the new name **Copihue** (formerly Chronos).
 
 ### Changed (breaking)
-- Renamed the language to Copihue. The compiler is now `copihuec` (`compiler/bootstrap-c/copihuec.c`) and the source extension is `.cph`. `.ch` is still accepted with a deprecation warning.
+- Renamed the language to Copihue. The compiler command is `copihue` (`compiler/bootstrap-c/copihue.c`) and the source extension is `.cph`. `.ch` is still accepted with a deprecation warning.
 - The default output executable is `a.out` (was `chronos_program`). Use `-o` to choose a name.
 - Indexing a variable that is not an array or a pointer is now a compile error. It used to silently index the stack. Declare such parameters as pointers, e.g. `buf: *i8`.
 

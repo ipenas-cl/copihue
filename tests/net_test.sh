@@ -4,9 +4,9 @@
 set -u
 cd "$(dirname "$0")/.."
 ROOT=$PWD
-CC=$ROOT/compiler/bootstrap-c/copihuec
+CC=$ROOT/compiler/bootstrap-c/copihue
 WORK=$(mktemp -d)
-gcc -O2 -o "$CC" compiler/bootstrap-c/copihuec.c || exit 1
+gcc -O2 -o "$CC" compiler/bootstrap-c/copihue.c || exit 1
 for p in examples/simple_api_server tests/test_http_simple examples/realtime_api_monitor; do
   "$CC" -O2 -o "$WORK/$(basename $p)" "$p.cph" || { echo "FAIL compile $p"; exit 1; }
 done

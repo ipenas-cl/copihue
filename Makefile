@@ -1,5 +1,5 @@
 # Copihue (formerly Chronos) - build, test and install the compiler.
-#   make                 build ./copihuec
+#   make                 build ./copihue
 #   make test            regression suite (tests/run_tests.sh)
 #   make net-test        HTTP server/client integration test (needs curl)
 #   make install         install to $(PREFIX)/bin (default ~/.local)
@@ -7,7 +7,7 @@ PREFIX ?= $(HOME)/.local
 CC     ?= gcc
 CFLAGS ?= -O2 -Wall
 
-copihuec: compiler/bootstrap-c/copihuec.c
+copihue: compiler/bootstrap-c/copihue.c
 	$(CC) $(CFLAGS) -o $@ $<
 
 test:
@@ -16,14 +16,14 @@ test:
 net-test:
 	tests/net_test.sh
 
-install: copihuec
+install: copihue
 	install -d $(PREFIX)/bin
-	install -m 755 copihuec $(PREFIX)/bin/copihuec
+	install -m 755 copihue $(PREFIX)/bin/copihue
 
 uninstall:
-	rm -f $(PREFIX)/bin/copihuec
+	rm -f $(PREFIX)/bin/copihue
 
 clean:
-	rm -f copihuec a.out output.asm output.o
+	rm -f copihue a.out output.asm output.o
 
 .PHONY: test net-test install uninstall clean
