@@ -1,5 +1,7 @@
 # Chronos
 
+[![CI](https://github.com/ipenas-cl/Chronos/actions/workflows/ci.yml/badge.svg)](https://github.com/ipenas-cl/Chronos/actions/workflows/ci.yml)
+
 **An experimental systems programming language with its own compiler, written from scratch in C and x86-64 Assembly.**
 
 Chronos aims at a *deterministic, memory-safe* language that's easy to learn. Today it is a working
@@ -37,10 +39,10 @@ x86-64 assembly, handles a minimal declarative syntax as a first step toward sel
 |---|---|
 | Test programs in `tests/` compiled with `-O2` | **124 of 124 compile** to native executables |
 | Of those, programs that run to completion | 119 (4 crash, 1 times out; these are open bugs) |
-| `examples/` (fibonacci, primes, fizzbuzz, gcd, binary search, bubble sort, file I/O, structs, typed arrays, benchmarks) | 18 of 19 build and run with `-O2`; `structs_complete.ch` builds only at `-O0` |
+| `examples/` (fibonacci, primes, fizzbuzz, gcd, binary search, bubble sort, file I/O, structs, typed arrays, benchmarks) | 17 of 19 build and run with `-O2` and are checked in CI (`./ci_examples.sh`); `simple_api_server.ch` is a long-running server; `structs_complete.ch` hits an open codegen bug (nested struct field offsets) |
 | Assembly compiler: `hello`, `test_variables`, `test_precedence`, `test_ultimate` | Correct output |
 
-The legacy `run_tests*.sh` scripts target an earlier self-hosting experiment that now lives in `archive/`, and they are out of date.
+The legacy `run_tests*.sh` scripts target an earlier self-hosting experiment and live in `archive/`; they are out of date. Older status notes are in `docs/history/`.
 
 ## Quickstart
 
