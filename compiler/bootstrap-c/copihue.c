@@ -3455,7 +3455,7 @@ int main(int argc, char** argv) {
         remove(asm_out);
         return 1;
     }
-    if (verbose) fprintf(stderr, "  wrote %s\n", asm_out);
+    if (verbose && !g_flat_org) fprintf(stderr, "  wrote %s\n", asm_out);
     if (only_asm) return 0;
     if (g_flat_org) {
         if (run_cmd("nasm -f bin '%s' -o '%s'", asm_out, exe_out) != 0) {
