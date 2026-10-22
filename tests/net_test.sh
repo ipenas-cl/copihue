@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # Network integration test: starts examples/simple_api_server (port 8000),
-# queries it with curl and with Chronos HTTP clients, then stops it.
+# queries it with curl and with Copihue HTTP clients, then stops it.
 set -u
 cd "$(dirname "$0")/.."
 ROOT=$PWD
-CC=$ROOT/compiler/bootstrap-c/chronos_v10
+CC=$ROOT/compiler/bootstrap-c/copihuec
 WORK=$(mktemp -d)
-gcc -O2 -o "$CC" compiler/bootstrap-c/chronos_v10.c || exit 1
+gcc -O2 -o "$CC" compiler/bootstrap-c/copihuec.c || exit 1
 for p in examples/simple_api_server tests/test_http_simple examples/realtime_api_monitor; do
-  "$CC" -O2 -o "$WORK/$(basename $p)" "$p.ch" || { echo "FAIL compile $p"; exit 1; }
+  "$CC" -O2 -o "$WORK/$(basename $p)" "$p.cph" || { echo "FAIL compile $p"; exit 1; }
 done
 
 "$WORK/simple_api_server" > "$WORK/server.log" 2>&1 &
@@ -32,7 +32,7 @@ out=$(curl -s --max-time 5 http://127.0.0.1:8000/api/status)
 expect "request counter (3rd request)"    "$out" '"count":3'
 
 out=$(timeout 10 "$WORK/test_http_simple" 2>&1)
-expect "Chronos HTTP client" "$out" '"status":"ok"'
+expect "Copihue HTTP client" "$out" '"status":"ok"'
 
 out=$(timeout 30 "$WORK/realtime_api_monitor" 2>&1)
 expect "realtime_api_monitor" "$out" "ok"

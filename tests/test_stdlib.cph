@@ -1,5 +1,5 @@
 fn main() -> i32 {
-    println("Chronos v0.5 Stdlib Test");
+    println("Copihue v0.5 Stdlib Test");
     println("Testing print_int:");
     print_int(42);
     println("");

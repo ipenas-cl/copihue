@@ -109,7 +109,7 @@ fn main() -> i32 {
     println("✓ Memory reallocation (needed for growing arrays)");
     println("✓ Manual memory management (needed for compiler)");
     println("");
-    println("🚀 Ready to implement lexer in Chronos!");
+    println("🚀 Ready to implement lexer in Copihue!");
 
     return 0;
 }

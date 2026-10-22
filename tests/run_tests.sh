@@ -1,27 +1,27 @@
 #!/usr/bin/env bash
-# Chronos regression suite.
+# Copihue regression suite.
 #
 #   tests/run_tests.sh            run everything
 #   tests/run_tests.sh --update   regenerate golden files (review the diff!)
 #
-# 1. Program tests: every tests/**/*.ch and examples/*.ch is compiled at -O0
+# 1. Program tests: every tests/**/*.cph and examples/*.cph is compiled at -O0
 #    and -O2, run with a timeout, and its stdout + exit code compared with
 #    tests/expected/<path>.out. Both optimization levels must match the same
 #    golden file. Heap/stack addresses (9+ digit numbers) are masked.
-# 2. Error tests: every tests/errors/*.ch must FAIL to compile and its
+# 2. Error tests: every tests/errors/*.cph must FAIL to compile and its
 #    diagnostics must match tests/expected/errors/<name>.err.
-# 3. Freestanding tests: tests/freestanding/*.ch compile with --freestanding,
+# 3. Freestanding tests: tests/freestanding/*.cph compile with --freestanding,
 #    the output must assemble with nasm, and contain no _start or syscall.
 set -u
 cd "$(dirname "$0")/.."
 ROOT=$PWD
-CC=$ROOT/compiler/bootstrap-c/chronos_v10
+CC=$ROOT/compiler/bootstrap-c/copihuec
 UPDATE=0; [ "${1:-}" = "--update" ] && UPDATE=1
-gcc -O2 -Wall -o "$CC" compiler/bootstrap-c/chronos_v10.c || exit 1
+gcc -O2 -Wall -o "$CC" compiler/bootstrap-c/copihuec.c || exit 1
 
 # Programs that are not batch tests (servers / need a peer) or need input.
 # They are covered by tests/net_test.sh instead.
-SKIP=" examples/simple_api_server.ch examples/realtime_api_monitor.ch tests/test_http_simple.ch tests/http/test_http_client.ch tests/http/test_http_post.ch tests/http/test_suite_http.ch "
+SKIP=" examples/simple_api_server.cph examples/realtime_api_monitor.cph tests/test_http_simple.cph tests/http/test_http_client.cph tests/http/test_http_post.cph tests/http/test_suite_http.cph "
 
 WORK=$(mktemp -d); trap 'rm -rf "$WORK"' EXIT
 pass=0; fail=0; failed=()
@@ -41,9 +41,9 @@ check() {  # $1 = name, $2 = golden file, $3 = actual file
   else fail=$((fail+1)); failed+=("$1"); echo "FAIL $1"; [ -f "$2" ] && diff "$2" "$3" | head -10; fi
 }
 
-for src in $(ls tests/*.ch tests/*/*.ch examples/*.ch | grep -v -e '^tests/errors/' -e '^tests/freestanding/'); do
+for src in $(ls tests/*.cph tests/*/*.cph examples/*.cph | grep -v -e '^tests/errors/' -e '^tests/freestanding/'); do
   case "$SKIP" in *" $src "*) continue ;; esac
-  golden=tests/expected/${src%.ch}.out
+  golden=tests/expected/${src%.cph}.out
   run_program "$src" -O0 > "$WORK/o0"
   run_program "$src" -O2 > "$WORK/o2"
   if ! cmp -s "$WORK/o0" "$WORK/o2"; then
@@ -54,8 +54,8 @@ for src in $(ls tests/*.ch tests/*/*.ch examples/*.ch | grep -v -e '^tests/error
   check "$src" "$golden" "$WORK/o0"
 done
 
-for src in tests/errors/*.ch; do
-  name=$(basename "$src" .ch)
+for src in tests/errors/*.cph; do
+  name=$(basename "$src" .cph)
   flags=$(sed -n 's|^// flags: ||p' "$src" | head -1)
   if ( cd "$WORK" && "$CC" -S $flags -o out.asm "$ROOT/$src" >/dev/null 2>err.txt ); then
     fail=$((fail+1)); failed+=("$src"); echo "FAIL $src: compiled but should have failed"; continue
@@ -64,8 +64,8 @@ for src in tests/errors/*.ch; do
   check "$src" "tests/expected/errors/$name.err" "$WORK/err.norm"
 done
 
-for src in tests/freestanding/*.ch; do
-  name=$(basename "$src" .ch)
+for src in tests/freestanding/*.cph; do
+  name=$(basename "$src" .cph)
   if ! ( cd "$WORK" && "$CC" --freestanding -o fs.asm "$ROOT/$src" 2>err.txt ); then
     fail=$((fail+1)); failed+=("$src"); echo "FAIL $src:"; cat "$WORK/err.txt"; continue
   fi

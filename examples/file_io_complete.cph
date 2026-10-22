@@ -174,7 +174,7 @@ fn copy_file() -> i32 {
 }
 
 fn main() -> i32 {
-    println("=== File I/O Completo en Chronos ===");
+    println("=== File I/O Completo en Copihue ===");
     println("");
 
     // 1. Escribir archivo

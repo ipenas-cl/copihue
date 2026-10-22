@@ -1,4 +1,4 @@
-// CHRONOS JSON LIBRARY V3 - PURE CHRONOS
+// COPIHUE JSON LIBRARY V3 - PURE COPIHUE
 // JSON builder using only direct buffer writes
 // Zero C dependencies
 
@@ -230,7 +230,7 @@ fn json_error_notfound() -> i32 {
 
 fn main() -> i32 {
     println("========================================");
-    println("CHRONOS JSON BUILDER V3 - PURE CHRONOS");
+    println("COPIHUE JSON BUILDER V3 - PURE COPIHUE");
     println("========================================");
     println("");
 

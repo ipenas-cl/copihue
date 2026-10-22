@@ -263,7 +263,7 @@ fn test_post(name: i32, path: i32, body: i32, expected: i32) -> i32 {
 fn main() -> i32 {
     println("");
     println("=========================================");
-    println("CHRONOS HTTP API - COMPREHENSIVE TEST SUITE");
+    println("COPIHUE HTTP API - COMPREHENSIVE TEST SUITE");
     println("=========================================");
     println("");
     println("NOTE: Ensure server is NOT running yet!");

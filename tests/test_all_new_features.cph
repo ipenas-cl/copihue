@@ -1,5 +1,5 @@
 fn main() -> i32 {
-    println("=== TEST COMPLETO CHRONOS v0.16 ===");
+    println("=== TEST COMPLETO COPIHUE v0.16 ===");
     println("");
 
     println("1. Operadores de incremento/decremento:");

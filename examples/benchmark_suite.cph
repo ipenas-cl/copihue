@@ -1,4 +1,4 @@
-// CHRONOS BENCHMARK SUITE
+// COPIHUE BENCHMARK SUITE
 // Mide performance de diferentes operaciones
 
 let iterations = 1000000;
@@ -170,7 +170,7 @@ fn benchmark_nested_loops() -> i32 {
 fn main() -> i32 {
     println("");
     println("========================================");
-    println("  CHRONOS BENCHMARK SUITE");
+    println("  COPIHUE BENCHMARK SUITE");
     println("  Testing: CPU Performance");
     println("========================================");
     println("");

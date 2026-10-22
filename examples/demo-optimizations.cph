@@ -1,4 +1,4 @@
-// DEMO DE OPTIMIZACIONES CHRONOS v0.17
+// DEMO DE OPTIMIZACIONES COPIHUE v0.17
 // Compila con -O0, -O1, -O2 y compara los resultados
 
 fn test_constant_folding() -> i32 {
@@ -158,7 +158,7 @@ fn test_mixed_operations() -> i32 {
 
 fn main() -> i32 {
     println("========================================");
-    println("  CHRONOS v0.17 - DEMO OPTIMIZACIONES");
+    println("  COPIHUE v0.17 - DEMO OPTIMIZACIONES");
     println("========================================");
     println("");
 
@@ -199,9 +199,9 @@ fn main() -> i32 {
     println("========================================");
     println("  COMPILAR Y COMPARAR");
     println("========================================");
-    println("./chronos_v10 -O0 demo_optimizaciones.ch");
-    println("./chronos_v10 -O1 demo_optimizaciones.ch");
-    println("./chronos_v10 -O2 demo_optimizaciones.ch");
+    println("./copihue_v10 -O0 demo_optimizaciones.ch");
+    println("./copihue_v10 -O1 demo_optimizaciones.ch");
+    println("./copihue_v10 -O2 demo_optimizaciones.ch");
     println("");
     println("Los 3 niveles producen el mismo output!");
     println("========================================");

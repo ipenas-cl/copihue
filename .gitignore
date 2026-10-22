@@ -53,3 +53,10 @@ compiler/bootstrap-c/chronos_v10
 chronos_program
 output.asm
 output.o
+
+# Copihue build outputs
+a.out
+/copihuec
+compiler/bootstrap-c/copihuec
+data.txt
+data_copy.txt

@@ -103,7 +103,7 @@ fn test_endpoint(path_str: i32) -> i32 {
 }
 
 fn main() -> i32 {
-    println("CHRONOS API CLIENT - Testing endpoints");
+    println("COPIHUE API CLIENT - Testing endpoints");
     println("");
 
     test_endpoint("/status");

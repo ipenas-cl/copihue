@@ -1,5 +1,5 @@
 // Complete Struct Demonstration
-// Shows all struct features working in Chronos
+// Shows all struct features working in Copihue
 
 struct Point {
     x: i32,
@@ -22,7 +22,7 @@ fn area(r: Rectangle) -> i32 {
 }
 
 fn main() -> i32 {
-    println("=== Chronos Struct Demonstration ===");
+    println("=== Copihue Struct Demonstration ===");
     println("");
 
     // 1. Struct declaration with type
