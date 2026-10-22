@@ -49,3 +49,7 @@ chronos_self/
 # Directorios de build
 build/
 dist/
+compiler/bootstrap-c/chronos_v10
+chronos_program
+output.asm
+output.o
