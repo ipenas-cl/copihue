@@ -1,151 +1,124 @@
-# Chronos
+# Copihue
 
-[![CI](https://github.com/ipenas-cl/Chronos/actions/workflows/ci.yml/badge.svg)](https://github.com/ipenas-cl/Chronos/actions/workflows/ci.yml)
+[![CI](https://github.com/ipenas-cl/copihue/actions/workflows/ci.yml/badge.svg)](https://github.com/ipenas-cl/copihue/actions/workflows/ci.yml)
 
-**An experimental systems programming language with its own compiler, written from scratch in C and x86-64 Assembly.**
+*Formerly Chronos.*
 
-Chronos aims at a *deterministic, memory-safe* language that's easy to learn. Today it is a working
-compiler for a small, C-family language that emits **native Linux x86-64 ELF executables with no libc
-and no runtime**. Output is NASM assembly plus raw syscalls. A second compiler, written entirely in
-x86-64 assembly, handles a minimal declarative syntax as a first step toward self-hosting.
+**A small systems programming language with its own compiler, written from scratch in C and x86-64 assembly.**
+Copihue compiles a C-family language to native Linux x86-64 ELF executables with **no libc and no runtime**.
+It can also emit **freestanding** code, with no OS, for kernels and bare-metal programs.
+[AtomicOS](https://github.com/ipenas-cl/AtomicOS) uses that mode.
 
-> **Status: experimental (v0.17).** The core language below works and is tested. Memory safety and
-> determinism guarantees are **design goals, not implemented yet** (see [Roadmap](#roadmap)).
-> The long-term language vision is in [docs/VISION.md](docs/VISION.md).
+> **Status: not production-ready yet.** The goal is to become a real alternative for systems programming.
+> Today Copihue is a working, tested compiler for a small language. Memory safety and determinism are
+> design goals, not implemented guarantees (see [Roadmap](#roadmap)).
 
-## What works today
+## Install
 
-**Main compiler: `compiler/bootstrap-c/chronos_v10.c`** (about 3,000 lines of C, single file)
-
-- Functions with typed parameters and return values, recursion, `fn main() -> i32` as the entry point and process exit code
-- `let` / `let mut` variables, globals, integer types `i8 i16 i32 i64 u8 u32 u64`
-- Arithmetic, comparison and logical operators (`&&`, `||` with short-circuit), compound assignment, `++`
-- `if`/`else`, `while`, `for`
-- Fixed-size typed arrays (`let arr: [i32; 10];`), pointers (`*i32`, address-of, dereference), string indexing
-- `struct` definitions, field access, `ptr->field`, arrays of structs, structs returned from functions
-- Built-ins: `print`, `println`, `print_int`, `strlen`, `strcmp`, `strcpy`, `malloc`/`free`, file I/O (`open`, `read`, `write`, `close`), `exit`
-- Optimization levels: `-O0` none, `-O1` constant folding, `-O2` constant folding plus strength reduction
-- Code generation straight to NASM, linked with `ld` into a static ELF64 binary (no C runtime)
-
-**Assembly compiler: `compiler/asm/`** (about 3,400 lines of hand-written x86-64 GAS assembly)
-
-- Compiles the declarative `Program … Variables: … Print …` syntax to assembly
-- Lexer, parser, symbol table, a precedence-climbing expression parser (`(a + b) * c`), and int-to-string conversion, all written without any library
-- Produces working executables for hello world, typed variables and arithmetic expressions
-
-### Verified (Oct 2026, Ubuntu x86-64, gcc + nasm + binutils)
-
-| Check | Result |
-|---|---|
-| Test programs in `tests/` compiled with `-O2` | **124 of 124 compile** to native executables |
-| Of those, programs that run to completion | 119 (4 crash, 1 times out; these are open bugs) |
-| `examples/` (fibonacci, primes, fizzbuzz, gcd, binary search, bubble sort, file I/O, structs, typed arrays, benchmarks) | 17 of 19 build and run with `-O2` and are checked in CI (`./ci_examples.sh`); `simple_api_server.ch` is a long-running server; `structs_complete.ch` hits an open codegen bug (nested struct field offsets) |
-| Assembly compiler: `hello`, `test_variables`, `test_precedence`, `test_ultimate` | Correct output |
-
-The legacy `run_tests*.sh` scripts target an earlier self-hosting experiment and live in `archive/`; they are out of date. Older status notes are in `docs/history/`.
-
-## Quickstart
-
-Requirements: Linux x86-64, `gcc`, `nasm`, `binutils` (`as`, `ld`).
+Requirements: Linux x86-64, `gcc` (or any C99 compiler), `make`, `nasm`, and `ld` (binutils).
 
 ```bash
-sudo apt-get install -y gcc nasm binutils
+sudo apt-get install -y gcc make nasm binutils
+git clone https://github.com/ipenas-cl/copihue.git && cd copihue
+make                      # builds ./copihuec
+make test                 # optional: run the regression suite
+make install              # installs copihuec to ~/.local/bin (PREFIX=/usr/local to change)
+```
 
-# Build the C compiler
-gcc -O2 -o compiler/bootstrap-c/chronos_v10 compiler/bootstrap-c/chronos_v10.c
+## Hello world
 
-# Hello world
-cat > hello.ch <<'CH'
+```bash
+cat > hello.cph <<'CPH'
 fn main() -> i32 {
-    println("Hello, Chronos!");
-    let x = 6 * 7;
-    print_int(x);
+    println("Hello, Copihue!");
+    print_int(6 * 7);
     println("");
     return 0;
 }
-CH
-./compiler/bootstrap-c/chronos_v10 -O2 hello.ch   # writes output.asm and links ./chronos_program
-./chronos_program
-# Hello, Chronos!
+CPH
+copihuec hello.cph -o hello && ./hello
+# Hello, Copihue!
 # 42
 ```
 
-More examples:
-
-```bash
-./compiler/bootstrap-c/chronos_v10 -O2 examples/fibonacci.ch && ./chronos_program
-./compiler/bootstrap-c/chronos_v10 -O2 examples/binary_search.ch && ./chronos_program
+```
+copihuec [-O0|-O1|-O2] [-o out] [-S] [--freestanding] [-v] file.cph
 ```
 
-The pure-assembly compiler:
+`-S` stops after writing NASM assembly. `--freestanding` emits assembly for use without an OS (see below).
+The value returned by `main` becomes the process exit code.
+Old `.ch` files are still accepted, with a deprecation warning.
 
-```bash
-cd compiler/asm
-./build.sh                          # as + ld, no C involved
-./chronos test_ultimate.chronos     # writes output.s
-as -o out.o output.s && ld -o program out.o && ./program
-# Ultimate: (2 + 3) * 4 = 20
-```
+## What works today
 
-## Language sample
+The full language reference is in [docs/REFERENCE.md](docs/REFERENCE.md).
 
-```chronos
-struct Point {
-    x: i32,
-    y: i32
-}
+- Functions, recursion, up to 6 parameters, structs passed by value (copied) or by pointer
+- `let` locals, globals, integer types `i8 i16 i32 i64 u8 u16 u32 u64`, typed arrays, pointers, `&`, `*`, `->`
+- `struct`s, including nested structs, arrays of structs, and nested struct literals
+- `if`/`else`, `while`, `for`, `break`/`continue`
+- Arithmetic with signed division and remainder that truncate toward zero, comparisons, `&&`/`||` (short-circuit),
+  and bitwise `& | ^ ~ << >>` with Rust-like precedence. Hex `0xFF`, binary `0b1010`, `1_000_000` and `'A'` literals
+- String literals with escapes (`\n \t \r \0 \\ \" \'`)
+- Hosted built-ins (Linux syscalls): `print`, `println`, `print_int`, `strlen`, `strcmp`, `strcpy`,
+  `malloc`/`free`, `open`/`read`/`write`/`close`, `syscall6`, `exit`
+- Freestanding built-ins: `inb/inw/inl`, `outb/outw/outl`, `cli`, `sti`, `hlt`, `pause`, and inline `asm("...")`
+- Diagnostics in the form `file:line:col: error: ...`, with the source line and a caret. They cover syntax errors,
+  undeclared variables, indexing a non-array, unknown struct fields, bad escapes, and hosted-only calls in freestanding code
+- Optimizations: `-O1` constant folding; `-O2` adds strength reduction. Every test must give identical output at `-O0` and `-O2`
 
-fn gcd(a: i32, b: i32) -> i32 {
-    while (b != 0) {
-        let t = b;
-        b = a % b;
-        a = t;
-    }
-    return a;
-}
+### Tested
 
-fn main() -> i32 {
-    let arr: [i32; 10];
-    let i = 0;
-    while (i < 10) {
-        arr[i] = i * 2;
-        i++;
-    }
-    print("gcd(48, 18) = ");
-    print_int(gcd(48, 18));
-    println("");
+`make test` runs the following in CI on every push:
+
+| Suite | What it checks |
+|---|---|
+| 127 test programs + 17 examples | compiled at `-O0` and `-O2`, run, and stdout + exit code compared to golden files in `tests/expected/` |
+| 8 error tests | the compiler rejects the program with the exact expected message |
+| 2 freestanding tests | `--freestanding` output has no `_start`/syscalls and assembles |
+| `make net-test` | starts `examples/simple_api_server.cph`, queries it with `curl` and with two Copihue HTTP clients, then stops it |
+
+### Known limitations
+
+- Functions take at most 6 parameters. Struct values are copied 8 bytes per field. There is no type checking beyond what the diagnostics above cover.
+- Integer overflow wraps (x86-64 behavior). There are no bounds checks on pointer indexing.
+- The generated code is simple stack-machine style. `rbx` is used as scratch, so freestanding callers must not rely on it being preserved.
+- Linux x86-64 only.
+
+## Freestanding mode (kernels)
+
+```copihue
+fn serial_putc(c: i64) -> i64 {
+    while ((inb(0x3FD) & 0x20) == 0) { pause(); }
+    outb(0x3F8, c);
     return 0;
 }
 ```
 
-## Architecture
+`copihuec --freestanding -o kernel.asm kernel.cph` produces NASM with no `_start`, no syscalls and no runtime.
+Your own entry code `%include`s it and calls your functions using the System V argument registers.
+Hosted built-ins such as `println` are a compile error in this mode.
 
-```mermaid
-flowchart LR
-    SRC[".ch source"] --> LEX[Lexer]
-    LEX --> PAR[Recursive-descent parser<br/>precedence climbing]
-    PAR --> AST[AST + symbol table<br/>+ struct/type table]
-    AST --> OPT["Optimizer<br/>-O1 constant folding<br/>-O2 strength reduction"]
-    OPT --> CG[x86-64 codegen<br/>NASM, raw syscalls]
-    CG --> NASM[nasm -f elf64]
-    NASM --> LD[ld]
-    LD --> BIN[Static ELF64<br/>no libc]
-```
+## Repository layout
 
-## Design decisions
-
-- **No runtime, no libc.** I/O, memory and exit go straight through Linux syscalls, so the generated binaries are tiny and their behavior is fully visible in the emitted assembly.
-- **Readable assembly output.** The compiler writes NASM text instead of machine code, so every optimization can be inspected and diffed.
-- **Bootstrapping path.** A small C compiler gives fast iteration, and a parallel compiler in pure assembly proves out the minimal toolchain that a self-hosted Chronos will need.
+- `compiler/bootstrap-c/copihuec.c`: the compiler, a single C file
+- `tests/`: regression suite (`run_tests.sh`, `net_test.sh`, golden files)
+- `examples/`: example programs
+- `docs/REFERENCE.md`: language reference
+- `compiler/asm/`: an experimental second compiler in pure x86-64 assembly for a minimal declarative syntax. It is an early self-hosting experiment and still uses its old `chronos` names.
+- `archive/`, `docs/history/`, `docs/archive/`, `compiler/bootstrap-c/archive/`: historical material from the Chronos era, kept unchanged
 
 ## Roadmap
 
-- Memory safety: bounds-checked arrays, null-free references (`Option<T>`), an ownership model
-- Determinism: defined overflow semantics, no undefined behavior
-- Fix the known crashes listed above, then add a CI test harness over `tests/` and `examples/`
-- Self-hosting, and macOS/ARM64 back ends (early scripts live in `compiler/macos*`)
+Correctness and tooling come before new features. All items below are **planned**.
 
-Design notes and history: [docs/VISION.md](docs/VISION.md), [ROADMAP.md](ROADMAP.md), [CHANGELOG.md](CHANGELOG.md), [compiler/asm/README.md](compiler/asm/README.md).
+- **0.19:** type checking for assignments and calls, more than 6 parameters, `const`, warnings for unused variables
+- **0.20:** `u8`/`i32` arithmetic semantics (currently everything computes in 64 bits), struct copy assignment, defined overflow behavior
+- **Memory safety:** bounds-checked arrays, null-free references (`Option<T>`), and later an ownership model
+- **Systems features driven by [AtomicOS](https://github.com/ipenas-cl/AtomicOS):** `volatile` memory access, interrupt handler functions, packed structs and explicit layout, and function pointers (needed for an IDT, a timer interrupt, and a scheduler)
+- **Longer term:** a module system, self-hosting, and an ARM64 back end
+
+Version history: [CHANGELOG.md](CHANGELOG.md). Older design notes: [docs/VISION.md](docs/VISION.md), [ROADMAP.md](ROADMAP.md).
 
 ## License
 
