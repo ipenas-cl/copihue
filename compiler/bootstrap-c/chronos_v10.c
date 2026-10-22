@@ -1540,6 +1540,13 @@ void gen_addr_of(Codegen* cg, AstNode* n) {
                 // Regular variable - take its address
                 emit(cg, "    lea rax, [rbp%d]\n", off);
             }
+        } else {
+            // Global variable: take its static address
+            GlobalVar* gvar = global_symtab_lookup(cg->global_symtab, var->name);
+            if (gvar) {
+                if (gvar->is_pointer) emit(cg, "    mov rax, [%s]\n", gvar->name);
+                else emit(cg, "    lea rax, [%s]\n", gvar->name);
+            }
         }
     } else if (var->type == AST_INDEX) {
         // &array[index] - compute address of element
@@ -1548,6 +1555,23 @@ void gen_addr_of(Codegen* cg, AstNode* n) {
         if (!arr || !arr->name) return;
 
         Symbol* sym = symtab_lookup_symbol(cg->symtab, arr->name);
+        if (!sym) {
+            // &global_array[index]
+            GlobalVar* gvar = global_symtab_lookup(cg->global_symtab, arr->name);
+            if (gvar && gvar->is_array) {
+                int elem_size = 1;
+                if (gvar->elem_type) {
+                    if (!strcmp(gvar->elem_type, "i32") || !strcmp(gvar->elem_type, "u32")) elem_size = 4;
+                    else if (!strcmp(gvar->elem_type, "i64") || !strcmp(gvar->elem_type, "u64")) elem_size = 8;
+                    else if (!strcmp(gvar->elem_type, "i16")) elem_size = 2;
+                }
+                gen_expr(cg, var->children[1]);  // Index expression
+                if (elem_size > 1) emit(cg, "    imul rax, %d\n", elem_size);
+                emit(cg, "    lea rbx, [%s]\n", gvar->name);
+                emit(cg, "    add rax, rbx\n");
+            }
+            return;
+        }
         if (sym) {
             gen_expr(cg, var->children[1]);  // Index expression
 
@@ -2975,8 +2999,16 @@ int main(int argc, char** argv) {
     codegen(ast, "output.asm", strtab, types);
 
     printf("✅ Code generated\n");
-    system("nasm -f elf64 output.asm -o output.o 2>&1 | head -5");
-    system("ld output.o -o chronos_program 2>&1 | head -5");
+    remove("output.o");
+    remove("chronos_program");
+    if (system("nasm -f elf64 output.asm -o output.o") != 0) {
+        fprintf(stderr, "❌ Assembly failed (nasm), see errors above\n");
+        return 1;
+    }
+    if (system("ld output.o -o chronos_program") != 0) {
+        fprintf(stderr, "❌ Link failed (ld), see errors above\n");
+        return 1;
+    }
     printf("✅ Compilation complete: ./chronos_program\n");
 
     return 0;
