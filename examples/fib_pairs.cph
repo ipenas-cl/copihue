@@ -1,0 +1,30 @@
+// fib.cph: iterative Fibonacci with a loop, else-if and a struct
+struct Pair {
+    a: i64,
+    b: i64,
+}
+
+fn step(p: *Pair) -> i64 {
+    let t: i64 = p->a + p->b;
+    p->a = p->b;
+    p->b = t;
+    return t;
+}
+
+fn main() -> i32 {
+    let p: Pair = Pair { a: 0, b: 1 };
+    for (let i: i64 = 0; i < 10; i++) {
+        let v: i64 = step(&p);
+        if (v % 5 == 0) {
+            print_int(v);
+            println(" (multiple of 5)");
+        } else if (v % 2 == 0) {
+            print_int(v);
+            println(" even");
+        } else {
+            print_int(v);
+            println("");
+        }
+    }
+    return 0;
+}
