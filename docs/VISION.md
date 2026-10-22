@@ -239,7 +239,7 @@ fn main() {
 - **[BUSINESS_LOGIC_SPEC.md](docs/BUSINESS_LOGIC_SPEC.md)** ⭐⭐⭐ **BUSINESS LAYER** - Logic, data, integrations (NEW!)
 - **[PROMPT_BASED_LANGUAGE.md](docs/PROMPT_BASED_LANGUAGE.md)** ⭐⭐ **APPROACH** - Template/prompt-based design
 - **[FIRST_PRINCIPLES.md](docs/FIRST_PRINCIPLES.md)** ⭐ **PHILOSOPHY** - Rethinking from first principles
-- **[ROADMAP.md](ROADMAP.md)** - Implementation roadmap
+- **[ROADMAP.md](../ROADMAP.md)** - Implementation roadmap
 
 ### Design Exploration
 - **[SYNTAX_EXPLORATION.md](docs/SYNTAX_EXPLORATION.md)** - Traditional syntax alternatives
