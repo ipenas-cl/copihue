@@ -6,7 +6,7 @@ let port_num = 9000;
 fn demo_main() -> i32 {
     println("");
     println("========================================");
-    println("  CHRONOS v0.16");
+    println("  COPIHUE v0.16");
     println("  REALTIME DATA PROCESSING DEMO");
     println("========================================");
     println("");

@@ -17,7 +17,7 @@ fn main() -> i32 {
 
     // 1. Calculate struct sizes
     // Point has 2 i32 fields = 2 * 8 bytes = 16 bytes
-    // (Note: Chronos uses 8-byte slots for all fields currently)
+    // (Note: Copihue uses 8-byte slots for all fields currently)
     println("1. Allocating Point struct:");
     let point_size = 16;  // 2 fields * 8 bytes
     let p = malloc(point_size);

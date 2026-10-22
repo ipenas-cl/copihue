@@ -125,7 +125,7 @@ fn build_json_response() -> i32 {
     pos++;
     response[pos] = 34;
     pos++;
-    strcpy(response + pos, "Chronos API Server");
+    strcpy(response + pos, "Copihue API Server");
     pos += 18;
     response[pos] = 34;
     pos++;
@@ -140,7 +140,7 @@ fn build_json_response() -> i32 {
 
 fn main() -> i32 {
     println("========================================");
-    println("  CHRONOS API SERVER");
+    println("  COPIHUE API SERVER");
     println("  Listening on http://127.0.0.1:8000");
     println("  Endpoint: /api/status");
     println("========================================");

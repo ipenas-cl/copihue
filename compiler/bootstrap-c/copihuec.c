@@ -13,16 +13,20 @@
 #include <math.h>
 
 // ==== NAMING (single place to change when the language is renamed) ====
-#define LANG_NAME     "Chronos"
+#define LANG_NAME     "Copihue"
 #define LANG_VERSION  "0.18.0"
-#define COMPILER_BIN  "chronos"
-#define SRC_EXT       ".ch"
+#define COMPILER_BIN  "copihuec"
+#define SRC_EXT       ".cph"
+#define OLD_SRC_EXT   ".ch"   /* pre-rename (Chronos) extension, still accepted */
 
 // ==== DIAGNOSTICS ====
 const char* g_src_file = "<input>";
 const char* g_src_text = NULL;
 int g_cur_line = 0, g_cur_col = 0;   // position of the last consumed token
 int g_error_count = 0;
+static int g_no_semi = 0;  // >0 while parsing a for(...) increment (no ';')
+#define MAX_LOOP_DEPTH 64
+static int g_loop_break[MAX_LOOP_DEPTH], g_loop_cont[MAX_LOOP_DEPTH], g_loop_depth = 0;
 int g_freestanding = 0;              // --freestanding: no OS, no syscalls, no _start
 
 static void print_source_line(int line, int col) {
@@ -120,7 +124,8 @@ typedef enum {
     AST_BINOP, AST_COMPARE, AST_STRING, AST_ASSIGN,
     AST_ARRAY_LITERAL, AST_INDEX, AST_STRUCT_DEF, AST_STRUCT_LITERAL, AST_FIELD_ACCESS,
     AST_UNARY, AST_DEREF, AST_ADDR_OF, AST_GLOBAL_VAR, AST_ARRAY_ASSIGN, AST_FIELD_ASSIGN,
-    AST_LOGICAL  // && and || operators with short-circuit evaluation
+    AST_LOGICAL,  // && and || operators with short-circuit evaluation
+    AST_BREAK, AST_CONTINUE
 } AstType;
 
 typedef struct AstNode {
@@ -1113,6 +1118,8 @@ AstNode* parse_expr(Parser* p) {
 
 AstNode* parse_block(Parser* p);
 
+static void end_simple_stmt(Parser* p) { if (!g_no_semi) expect(p, T_SEMI); }
+
 AstNode* parse_stmt(Parser* p) {
     if (match_tok(p, T_RET)) {
         AstNode* ret = ast_new(AST_RETURN);
@@ -1176,8 +1183,10 @@ AstNode* parse_stmt(Parser* p) {
         AstNode* cond = parse_expr(p);
         expect(p, T_SEMI);
 
-        // Parse increment (i = i + 1)
-        AstNode* inc = parse_expr(p);
+        // Parse increment: any simple statement without ';' (i++, i += 2, i = i + 1)
+        g_no_semi++;
+        AstNode* inc = parse_stmt(p);
+        g_no_semi--;
         expect(p, T_RPAREN);
 
         // Parse body
@@ -1190,21 +1199,25 @@ AstNode* parse_stmt(Parser* p) {
         AstNode* whilenode = ast_new(AST_WHILE);
         ast_add(whilenode, cond);
 
-        // Create new body block with original body + increment
-        AstNode* while_body = ast_new(AST_BLOCK);
-        // Copy all statements from body
-        for (int i = 0; i < body->child_count; i++) {
-            ast_add(while_body, body->children[i]);
-        }
-        // Add increment as expression statement
-        AstNode* inc_stmt = ast_new(AST_BLOCK);  // Wrap in statement node
-        ast_add(inc_stmt, inc);
-        ast_add(while_body, inc_stmt);
-
-        ast_add(whilenode, while_body);
+        // children: cond, body, increment (run at the 'continue' point)
+        ast_add(whilenode, body);
+        AstNode* inc_block = ast_new(AST_BLOCK);
+        ast_add(inc_block, inc);
+        ast_add(whilenode, inc_block);
         ast_add(block, whilenode);
 
         return block;
+    }
+    if (check_tok(p, T_IDENT)) {
+        Tok t = peek_tok(p);
+        int is_break = (t.len == 5 && !memcmp(t.s, "break", 5));
+        int is_cont = (t.len == 8 && !memcmp(t.s, "continue", 8));
+        if (is_break || is_cont) {
+            advance_tok(p);
+            AstNode* jn = ast_new(is_break ? AST_BREAK : AST_CONTINUE);
+            end_simple_stmt(p);
+            return jn;
+        }
     }
     AstNode* expr = parse_expr(p);
 
@@ -1224,7 +1237,7 @@ AstNode* parse_stmt(Parser* p) {
             one->value = strdup("1");
             ast_add(add, one);
             ast_add(assign, add);
-            expect(p, T_SEMI);
+            end_simple_stmt(p);
             return assign;
         }
         if (check_tok(p, T_MINUSMINUS)) {
@@ -1241,7 +1254,7 @@ AstNode* parse_stmt(Parser* p) {
             one->value = strdup("1");
             ast_add(sub, one);
             ast_add(assign, sub);
-            expect(p, T_SEMI);
+            end_simple_stmt(p);
             return assign;
         }
         // Check for compound assignment operators: +=, -=, *=, /=, %=
@@ -1267,7 +1280,7 @@ AstNode* parse_stmt(Parser* p) {
             ast_add(binop, ident);
             ast_add(binop, parse_expr(p));  // Right-hand side
             ast_add(assign, binop);
-            expect(p, T_SEMI);
+            end_simple_stmt(p);
             return assign;
         }
     }
@@ -1282,7 +1295,7 @@ AstNode* parse_stmt(Parser* p) {
         ast_add(array_assign, expr->children[0]);  // array
         ast_add(array_assign, expr->children[1]);  // index
         ast_add(array_assign, parse_expr(p));      // value
-        expect(p, T_SEMI);
+        end_simple_stmt(p);
         return array_assign;
     }
 
@@ -1296,11 +1309,11 @@ AstNode* parse_stmt(Parser* p) {
         field_assign->name = strdup(expr->name);   // Field name
         ast_add(field_assign, expr->children[0]);  // Struct object
         ast_add(field_assign, parse_expr(p));      // Value expression
-        expect(p, T_SEMI);
+        end_simple_stmt(p);
         return field_assign;
     }
 
-    expect(p, T_SEMI);
+    end_simple_stmt(p);
     return expr;
 }
 
@@ -1729,7 +1742,7 @@ void gen_builtin_call(Codegen* cg, AstNode* n) {
         }
     } else if (!strcmp(n->name, "syscall") || !strcmp(n->name, "syscall6")) {
         // Generic syscall: syscall6(num, arg1, arg2, arg3, arg4, arg5, arg6)
-        // This allows Chronos code to make ANY syscall directly
+        // This allows Copihue code to make ANY syscall directly
         // rax=num, rdi=arg1, rsi=arg2, rdx=arg3, r10=arg4, r8=arg5, r9=arg6
 
         if (n->child_count >= 1) {
@@ -2896,12 +2909,28 @@ void gen_stmt(Codegen* cg, AstNode* n) {
     } else if (n->type == AST_WHILE) {
         int start_lab = new_label(cg);
         int end_lab = new_label(cg);
+        int cont_lab = new_label(cg);
         emit(cg, ".L%d:\n", start_lab);
         gen_expr(cg, n->children[0]);
         emit(cg, "    test rax, rax\n    jz .L%d\n", end_lab);
+        if (g_loop_depth >= MAX_LOOP_DEPTH) { diag_error(n->line, n->col, "loops nested too deeply"); return; }
+        g_loop_break[g_loop_depth] = end_lab;
+        g_loop_cont[g_loop_depth] = cont_lab;
+        g_loop_depth++;
         for (int i = 0; i < n->children[1]->child_count; i++)
             gen_stmt(cg, n->children[1]->children[i]);
+        g_loop_depth--;
+        emit(cg, ".L%d:\n", cont_lab);
+        if (n->child_count > 2)  // for-loop increment
+            for (int i = 0; i < n->children[2]->child_count; i++)
+                gen_stmt(cg, n->children[2]->children[i]);
         emit(cg, "    jmp .L%d\n.L%d:\n", start_lab, end_lab);
+    } else if (n->type == AST_BREAK || n->type == AST_CONTINUE) {
+        if (g_loop_depth == 0) {
+            diag_error(n->line, n->col, "'%s' outside of a loop", n->type == AST_BREAK ? "break" : "continue");
+            return;
+        }
+        emit(cg, "    jmp .L%d\n", n->type == AST_BREAK ? g_loop_break[g_loop_depth - 1] : g_loop_cont[g_loop_depth - 1]);
     } else if (n->type == AST_CALL || n->type == AST_ASSIGN || n->type == AST_ARRAY_ASSIGN || n->type == AST_FIELD_ASSIGN) {
         gen_expr(cg, n);
     }
@@ -3288,7 +3317,7 @@ static void usage(FILE* o) {
         "\n"
         "Options:\n"
         "  -O0 | -O1 | -O2     optimization level (default -O0)\n"
-        "  -o <file>           output executable (default ./chronos_program),\n"
+        "  -o <file>           output executable (default ./a.out),\n"
         "                      or assembly file with -S / --freestanding\n"
         "  -S                  only generate NASM assembly, do not assemble or link\n"
         "  --freestanding      no OS: no _start, no syscalls, no hosted builtins;\n"
@@ -3328,6 +3357,11 @@ int main(int argc, char** argv) {
         else { fprintf(stderr, COMPILER_BIN ": error: more than one input file\n"); return 2; }
     }
     if (!input) { usage(stderr); return 2; }
+    {
+        size_t il = strlen(input), ol = strlen(OLD_SRC_EXT);
+        if (il > ol && !strcmp(input + il - ol, OLD_SRC_EXT))
+            fprintf(stderr, "%s: warning: the '" OLD_SRC_EXT "' extension is deprecated (the language was renamed from Chronos); use '" SRC_EXT "'\n", input);
+    }
 
     FILE* f = fopen(input, "r");
     if (!f) { fprintf(stderr, COMPILER_BIN ": error: cannot open '%s'\n", input); return 1; }
@@ -3342,7 +3376,7 @@ int main(int argc, char** argv) {
     g_src_text = src;
 
     const char* asm_out = only_asm ? (out ? out : "output.asm") : "output.asm";
-    const char* exe_out = out ? out : "chronos_program";
+    const char* exe_out = out ? out : "a.out";
 
     if (verbose) fprintf(stderr, LANG_NAME " " LANG_VERSION ": compiling %s (-O%d%s)\n",
                          input, optimization_level, g_freestanding ? ", freestanding" : "");

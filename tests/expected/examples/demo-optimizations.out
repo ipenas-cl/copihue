@@ -1,5 +1,5 @@
 ========================================
-  CHRONOS v0.17 - DEMO OPTIMIZACIONES
+  COPIHUE v0.17 - DEMO OPTIMIZACIONES
 ========================================
 
 === Test 1: Constant Folding ===
@@ -43,9 +43,9 @@ TOTAL: 76107
 ========================================
   COMPILAR Y COMPARAR
 ========================================
-./chronos_v10 -O0 demo_optimizaciones.ch
-./chronos_v10 -O1 demo_optimizaciones.ch
-./chronos_v10 -O2 demo_optimizaciones.ch
+./copihue_v10 -O0 demo_optimizaciones.ch
+./copihue_v10 -O1 demo_optimizaciones.ch
+./copihue_v10 -O2 demo_optimizaciones.ch
 
 Los 3 niveles producen el mismo output!
 ========================================

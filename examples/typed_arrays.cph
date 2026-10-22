@@ -163,7 +163,7 @@ fn demo_multi_dimensional() {
 }
 
 fn main() -> i32 {
-    println("=== Arrays Locales Tipados en Chronos ===");
+    println("=== Arrays Locales Tipados en Copihue ===");
     println("");
 
     demo_i8_array();

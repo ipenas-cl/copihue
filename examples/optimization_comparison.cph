@@ -2,9 +2,9 @@
 // Demuestra la diferencia entre -O0, -O1 y -O2
 //
 // Compilar con:
-//   ./compiler/bootstrap-c/chronos_v10 -O0 optimization_comparison.ch
-//   ./compiler/bootstrap-c/chronos_v10 -O1 optimization_comparison.ch
-//   ./compiler/bootstrap-c/chronos_v10 -O2 optimization_comparison.ch
+//   ./compiler/bootstrap-c/copihue_v10 -O0 optimization_comparison.ch
+//   ./compiler/bootstrap-c/copihue_v10 -O1 optimization_comparison.ch
+//   ./compiler/bootstrap-c/copihue_v10 -O2 optimization_comparison.ch
 //
 // Luego comparar output.asm para ver las diferencias
 

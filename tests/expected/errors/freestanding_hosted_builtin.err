@@ -1,4 +1,4 @@
-tests/errors/freestanding_hosted_builtin.ch:3:5: error: 'println' needs the hosted runtime (Linux syscalls) and is not available with --freestanding
+tests/errors/freestanding_hosted_builtin.cph:3:5: error: 'println' needs the hosted runtime (Linux syscalls) and is not available with --freestanding
       3 |     println("no OS here");
         |     ^
 1 error, compilation failed

@@ -165,7 +165,7 @@ fn test_post(path_str: i32, body_str: i32) -> i32 {
 fn main() -> i32 {
     println("");
     println("========================================");
-    println("CHRONOS HTTP API - POST TESTS");
+    println("COPIHUE HTTP API - POST TESTS");
     println("========================================");
     println("");
     println("NOTE: Start server with: ./http_api_v2 &");

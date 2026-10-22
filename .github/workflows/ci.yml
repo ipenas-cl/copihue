@@ -6,13 +6,27 @@ on:
 permissions:
   contents: read
 jobs:
-  examples:
+  test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: sudo apt-get update && sudo apt-get install -y nasm
-      - name: Build compiler, compile and run examples
-        run: ./ci_examples.sh
+      - run: sudo apt-get update && sudo apt-get install -y nasm curl
+      - name: Build the compiler (warnings are errors)
+        run: make CFLAGS="-O2 -Wall -Werror"
+      - name: Regression suite (all tests and examples at -O0 and -O2, error messages, freestanding)
+        run: make test
+      - name: Network test (simple_api_server + curl + Copihue HTTP clients)
+        run: make net-test
+      - name: Install instructions work
+        run: |
+          make install PREFIX=$HOME/.local
+          cat > /tmp/hello.cph <<'CPH'
+          fn main() -> i32 {
+              println("Hello, Copihue!");
+              return 0;
+          }
+          CPH
+          cd /tmp && $HOME/.local/bin/copihuec hello.cph -o hello && ./hello | grep -q "Hello, Copihue!"
       - name: Pure-assembly compiler smoke test
         run: |
           cd compiler/asm && ./build.sh

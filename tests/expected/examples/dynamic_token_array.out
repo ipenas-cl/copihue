@@ -36,5 +36,5 @@ This demonstrates:
 ✓ Memory reallocation (needed for growing arrays)
 ✓ Manual memory management (needed for compiler)
 
-🚀 Ready to implement lexer in Chronos!
+🚀 Ready to implement lexer in Copihue!
 exit=0

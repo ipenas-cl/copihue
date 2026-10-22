@@ -1,4 +1,4 @@
-// CHRONOS REALTIME API MONITOR
+// COPIHUE REALTIME API MONITOR
 // Fetches data from API, parses JSON, displays in terminal
 
 let AF_INET = 2;
@@ -259,7 +259,7 @@ fn fetch_and_display() -> i32 {
 
 fn main() -> i32 {
     println("");
-    print_header("CHRONOS REALTIME API MONITOR");
+    print_header("COPIHUE REALTIME API MONITOR");
     println("");
     println("Monitoring API endpoint...");
     println("Press Ctrl+C to stop");

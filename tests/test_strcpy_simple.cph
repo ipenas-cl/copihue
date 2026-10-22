@@ -12,7 +12,7 @@ fn main() -> i32 {
     println("");
 
     println("strlen works:");
-    let len = strlen("Chronos v0.10");
+    let len = strlen("Copihue v0.10");
     print_int(len);
     println("");
 

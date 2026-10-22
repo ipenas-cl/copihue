@@ -1,4 +1,4 @@
-// CHRONOS TCP/IP LIBRARY - PURE CHRONOS
+// COPIHUE TCP/IP LIBRARY - PURE COPIHUE
 // Network programming using syscalls directly
 // Zero C dependencies for networking
 
@@ -74,7 +74,7 @@ fn setup_sockaddr(port: i32) -> i32 {
 }
 
 // ============================================
-// SOCKET API - PURE CHRONOS
+// SOCKET API - PURE COPIHUE
 // ============================================
 
 fn socket_create() -> i32 {
@@ -120,7 +120,7 @@ fn socket_recv(sockfd: i32, buffer: i32, length: i32) -> i32 {
 
 fn tcp_server(port: i32) -> i32 {
     println("========================================");
-    println("CHRONOS TCP SERVER - PURE CHRONOS");
+    println("COPIHUE TCP SERVER - PURE COPIHUE");
     println("========================================");
     println("");
 
@@ -189,7 +189,7 @@ fn tcp_server(port: i32) -> i32 {
 
     // 6. Send response
     println("[6] Sending response...");
-    let response = "Hello from Chronos TCP server!\n";
+    let response = "Hello from Copihue TCP server!\n";
     let sent = socket_send(clientfd, response, 32);
     println("[OK] Sent ");
     print_int(sent);
@@ -213,7 +213,7 @@ fn tcp_server(port: i32) -> i32 {
 
 fn tcp_client(port: i32) -> i32 {
     println("========================================");
-    println("CHRONOS TCP CLIENT - PURE CHRONOS");
+    println("COPIHUE TCP CLIENT - PURE COPIHUE");
     println("========================================");
     println("");
 
@@ -243,7 +243,7 @@ fn tcp_client(port: i32) -> i32 {
 
     // 3. Send data
     println("[3] Sending message...");
-    let message = "Hello from Chronos TCP client!\n";
+    let message = "Hello from Copihue TCP client!\n";
     let sent = socket_send(sockfd, message, 32);
     println("[OK] Sent ");
     print_int(sent);
