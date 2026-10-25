@@ -14,7 +14,7 @@
 
 // ==== NAMING (single place to change when the language is renamed) ====
 #define LANG_NAME     "Copihue"
-#define LANG_VERSION  "0.21.0"
+#define LANG_VERSION  "0.22.0"
 #define COMPILER_BIN  "copihue"
 #define SRC_EXT       ".lap"   /* Lapageria rosea, the copihue */
 #define OLD_SRC_EXT   ".cph"   /* v0.18.x extension, still accepted with a warning */
@@ -31,6 +31,7 @@ static int g_no_eq = 0;    // deref operand must not swallow '=' (*p = v)
 static int g_loop_break[MAX_LOOP_DEPTH], g_loop_cont[MAX_LOOP_DEPTH], g_loop_depth = 0;
 int g_freestanding = 0;              // --freestanding: no OS, no syscalls, no _start
 const char* g_flat_org = NULL;       // --flat ADDR: freestanding flat binary loaded at ADDR, entry _start
+int g_boot = 0;                      // --boot: flat sector at 0x7C00, padded to 512, signature 0xAA55
 
 static void print_source_line(int line, int col) {
     if (!g_src_text || line <= 0) return;
@@ -132,7 +133,8 @@ typedef enum {
     AST_ARRAY_LITERAL, AST_INDEX, AST_STRUCT_DEF, AST_STRUCT_LITERAL, AST_FIELD_ACCESS,
     AST_UNARY, AST_DEREF, AST_ADDR_OF, AST_GLOBAL_VAR, AST_ARRAY_ASSIGN, AST_FIELD_ASSIGN,
     AST_LOGICAL,  // && and || operators with short-circuit evaluation
-    AST_BREAK, AST_CONTINUE
+    AST_BREAK, AST_CONTINUE,
+    AST_DATA, AST_DATA_ITEM
 } AstType;
 
 typedef struct AstNode {
@@ -147,7 +149,8 @@ typedef struct AstNode {
     char* struct_type;
     int is_pointer;  // For type tracking. Bit 0 = pointer, bit 1 = mut, bit 2 = volatile pointee
     int is_forward_decl;  // For function forward declarations
-    int flags;            // AF_PACKED, AF_VOLATILE, AF_INTERRUPT, AF_SYSCALL
+    int flags;            // AF_PACKED, AF_VOLATILE, AF_INTERRUPT, AF_SYSCALL, AF_NAKED
+    int bits;             // 0 = default 64 (no directive); else 16, 32, or 64
     int line, col;        // Source position (for diagnostics)
 } AstNode;
 
@@ -155,6 +158,7 @@ typedef struct AstNode {
 #define AF_VOLATILE   2
 #define AF_INTERRUPT  4
 #define AF_SYSCALL    8
+#define AF_NAKED      16
 
 // Symbol table
 typedef struct {
@@ -1604,6 +1608,174 @@ AstNode* parse_func(Parser* p) {
     return func;
 }
 
+static char* append_byte(char* buf, int* n, int cap, unsigned c, int* first) {
+    char num[16];
+    int k = snprintf(num, sizeof(num), "%s%u", *first ? "" : ", ", c);
+    if (*n + k >= cap) return buf;
+    memcpy(buf + *n, num, k);
+    *n += k;
+    buf[*n] = '\0';
+    *first = 0;
+    return buf;
+}
+
+// db/dw/dd/dq operands. A string expands to its bytes. Numbers pass through to NASM.
+static char* parse_data_ops(Parser* p) {
+    char buf[4096];
+    int n = 0;
+    int first = 1;
+    buf[0] = '\0';
+    if (check_tok(p, T_SEMI) || check_tok(p, T_RBRACE) || check_tok(p, T_EOF)) {
+        diag_error(peek_tok(p).line, peek_tok(p).col, "data directive needs a value");
+        return strdup("0");
+    }
+    while (!check_tok(p, T_SEMI) && !check_tok(p, T_RBRACE) && !check_tok(p, T_EOF)) {
+        if (check_tok(p, T_STR)) {
+            Tok s = advance_tok(p);
+            const char* v = s.s;
+            if (s.len < 2 || v[0] != '"') {
+                diag_error(s.line, s.col, "malformed string in data block");
+            } else {
+                for (int i = 1; i < s.len - 1; i++) {
+                    unsigned char c = (unsigned char)v[i];
+                    if (c == '\\' && i + 1 < s.len - 1) {
+                        char e = v[++i];
+                        if (e == 'n') c = '\n';
+                        else if (e == 't') c = '\t';
+                        else if (e == 'r') c = '\r';
+                        else if (e == '0') c = 0;
+                        else c = (unsigned char)e;
+                    }
+                    append_byte(buf, &n, (int)sizeof(buf), c, &first);
+                }
+            }
+        } else if (check_tok(p, T_NUM)) {
+            Tok num = advance_tok(p);
+            char piece[80];
+            int k = snprintf(piece, sizeof(piece), "%s%.*s", first ? "" : ", ", num.len, num.s);
+            if (n + k < (int)sizeof(buf)) {
+                memcpy(buf + n, piece, k);
+                n += k;
+                buf[n] = '\0';
+            }
+            first = 0;
+        } else if (check_tok(p, T_IDENT)) {
+            // A label used as an address (dd gdt).
+            Tok id = advance_tok(p);
+            char piece[80];
+            int k = snprintf(piece, sizeof(piece), "%s%.*s", first ? "" : ", ", id.len, id.s);
+            if (n + k < (int)sizeof(buf)) {
+                memcpy(buf + n, piece, k);
+                n += k;
+                buf[n] = '\0';
+            }
+            first = 0;
+        } else {
+            Tok bad = peek_tok(p);
+            diag_error(bad.line, bad.col, "expected a number, a string, or a label in a data block");
+            break;
+        }
+        if (check_tok(p, T_COMMA)) advance_tok(p);
+        else break;
+    }
+    return strdup(buf[0] ? buf : "0");
+}
+
+static AstNode* parse_data(Parser* p) {
+    advance_tok(p); // data
+    Tok name = advance_tok(p);
+    AstNode* node = ast_new(AST_DATA);
+    node->name = strndup(name.s, name.len);
+    expect(p, T_LBRACE);
+    while (!check_tok(p, T_RBRACE) && !check_tok(p, T_EOF)) {
+        if (peek_word(p, "align")) {
+            advance_tok(p);
+            Tok num = advance_tok(p);
+            if (num.t != T_NUM) diag_error(num.line, num.col, "align needs an integer");
+            AstNode* it = ast_new(AST_DATA_ITEM);
+            it->name = strdup("align");
+            it->value = strndup(num.s, num.len);
+            ast_add(node, it);
+            expect(p, T_SEMI);
+            continue;
+        }
+        if (peek_word(p, "times")) {
+            advance_tok(p);
+            Tok num = advance_tok(p);
+            if (num.t != T_NUM) diag_error(num.line, num.col, "times needs an integer count");
+            Tok dir = advance_tok(p);
+            int ok = dir.t == T_IDENT && (dir.len == 2 || dir.len == 2) &&
+                     (!memcmp(dir.s, "db", 2) || !memcmp(dir.s, "dw", 2) ||
+                      !memcmp(dir.s, "dd", 2) || !memcmp(dir.s, "dq", 2));
+            if (!ok) diag_error(dir.line, dir.col, "times needs db, dw, dd, or dq");
+            char* ops = parse_data_ops(p);
+            AstNode* it = ast_new(AST_DATA_ITEM);
+            it->name = strdup("times");
+            char line[4200];
+            snprintf(line, sizeof(line), "%.*s %.*s %s", num.len, num.s, dir.len, dir.s, ops);
+            it->value = strdup(line);
+            free(ops);
+            ast_add(node, it);
+            expect(p, T_SEMI);
+            continue;
+        }
+        if (check_tok(p, T_IDENT) && peek_tok_at(p, 1, T_COLON)) {
+            Tok lab = advance_tok(p);
+            advance_tok(p);
+            AstNode* it = ast_new(AST_DATA_ITEM);
+            it->name = strdup("label");
+            it->value = strndup(lab.s, lab.len);
+            ast_add(node, it);
+            continue;
+        }
+        if (peek_word(p, "db") || peek_word(p, "dw") || peek_word(p, "dd") || peek_word(p, "dq")) {
+            Tok dir = advance_tok(p);
+            char* ops = parse_data_ops(p);
+            AstNode* it = ast_new(AST_DATA_ITEM);
+            it->name = strndup(dir.s, dir.len);
+            it->value = ops;
+            ast_add(node, it);
+            expect(p, T_SEMI);
+            continue;
+        }
+        Tok bad = peek_tok(p);
+        diag_error(bad.line, bad.col, "expected db, dw, dd, dq, times, align, or a label");
+        break;
+    }
+    expect(p, T_RBRACE);
+    return node;
+}
+
+// `bits 16`, `bits 32`, `bits 64`, and `naked`, in either order, in front of fn.
+static AstNode* parse_bits_naked_fn(Parser* p) {
+    int bits = 0, naked = 0, saw_bits = 0;
+    while (peek_word(p, "bits") || peek_word(p, "naked")) {
+        if (peek_word(p, "bits")) {
+            Tok b = advance_tok(p);
+            Tok num = advance_tok(p);
+            int v = (num.t == T_NUM) ? atoi(num.s) : 0;
+            if (v != 16 && v != 32 && v != 64)
+                diag_error(b.line, b.col, "bits must be 16, 32, or 64");
+            if (saw_bits) diag_error(b.line, b.col, "bits was already set on this function");
+            bits = v;
+            saw_bits = 1;
+        } else {
+            Tok nk = advance_tok(p);
+            if (naked) diag_error(nk.line, nk.col, "naked was already set on this function");
+            naked = 1;
+        }
+    }
+    if (!check_tok(p, T_FN)) {
+        Tok bad = peek_tok(p);
+        diag_error(bad.line, bad.col, "expected 'fn' after bits or naked");
+        return ast_new(AST_FUNCTION);
+    }
+    AstNode* fn = parse_func(p);
+    if (naked) fn->flags |= AF_NAKED;
+    fn->bits = bits;
+    return fn;
+}
+
 AstNode* parse(Parser* p) {
     AstNode* prog = ast_new(AST_PROGRAM);
     while (!check_tok(p, T_EOF)) {
@@ -1623,6 +1795,10 @@ AstNode* parse(Parser* p) {
             AstNode* fn = parse_func(p);
             fn->flags |= AF_SYSCALL;
             ast_add(prog, fn);
+        } else if (peek_word(p, "data") && peek_tok_at(p, 1, T_IDENT)) {
+            ast_add(prog, parse_data(p));
+        } else if (peek_word(p, "bits") || peek_word(p, "naked")) {
+            ast_add(prog, parse_bits_naked_fn(p));
         } else if (check_tok(p, T_STRUCT)) {
             ast_add(prog, parse_struct_def(p));
         } else if (check_tok(p, T_LET)) {
@@ -1932,6 +2108,31 @@ static int gen_core_builtin(Codegen* cg, AstNode* n) {
         if (!g_flat_org) { diag_error(n->line, n->col, "%s() is only available with --flat", f); return 1; }
         if (n->child_count != 0) { diag_error(n->line, n->col, "%s() takes no arguments", f); return 1; }
         emit(cg, "    mov rax, __%s\n", f);
+        return 1;
+    }
+    if (!strcmp(f, "ljmp")) {
+        if (!g_freestanding) {
+            diag_error(n->line, n->col, "ljmp() is only available with --freestanding, --flat, or --boot");
+            return 1;
+        }
+        if (n->child_count != 2 || !n->children[0] || n->children[0]->type != AST_NUMBER ||
+            !n->children[1] || n->children[1]->type != AST_IDENT) {
+            diag_error(n->line, n->col, "ljmp(selector, label) takes an integer selector and a label name");
+            return 1;
+        }
+        emit(cg, "    jmp %s:%s\n", n->children[0]->value, n->children[1]->name);
+        return 1;
+    }
+    if (!strcmp(f, "int")) {
+        if (!g_freestanding) {
+            diag_error(n->line, n->col, "int() is only available with --freestanding, --flat, or --boot");
+            return 1;
+        }
+        if (n->child_count != 1 || !n->children[0] || n->children[0]->type != AST_NUMBER) {
+            diag_error(n->line, n->col, "int(n) takes one integer literal");
+            return 1;
+        }
+        emit(cg, "    int %s\n", n->children[0]->value);
         return 1;
     }
     if (!strcmp(f, "asm")) {
@@ -3718,6 +3919,8 @@ void gen_stmt(Codegen* cg, AstNode* n) {
         else emit(cg, "    xor rax, rax\n");
         if (g_fn_flags & (AF_INTERRUPT | AF_SYSCALL))
             emit(cg, "    jmp .Lret_%s\n", g_fn_name);
+        else if (g_fn_flags & AF_NAKED)
+            emit(cg, "    ret\n");
         else
             emit(cg, "    leave\n    ret\n");
     } else if (n->type == AST_LET) {
@@ -3938,9 +4141,24 @@ void gen_func(Codegen* cg, AstNode* n) {
     int param_count = n->child_count - 1;
     int is_int = (n->flags & AF_INTERRUPT) != 0;
     int is_sys = (n->flags & AF_SYSCALL) != 0;
+    int naked = (n->flags & AF_NAKED) != 0;
+    int bits = n->bits;
     int has_err = is_int && param_count == 1;
     if (is_int && is_sys) {
         diag_error(n->line, n->col, "a function cannot be both interrupt and syscall");
+    }
+    if (naked && (is_int || is_sys)) {
+        diag_error(n->line, n->col, "a naked function cannot be interrupt or syscall");
+    }
+    if ((is_int || is_sys) && bits && bits != 64) {
+        diag_error(n->line, n->col, "interrupt and syscall functions are 64-bit");
+    }
+    if ((bits == 16 || bits == 32) && !naked) {
+        diag_error(n->line, n->col,
+                   "bits %d functions must be naked; the frame prologue uses 64-bit registers", bits);
+    }
+    if (naked && param_count > 0) {
+        diag_error(n->line, n->col, "a naked function takes no parameters");
     }
     if (is_int && param_count > 1) {
         diag_error(n->line, n->col,
@@ -3960,8 +4178,11 @@ void gen_func(Codegen* cg, AstNode* n) {
     g_fn_flags = n->flags;
     snprintf(g_fn_name, sizeof(g_fn_name), "%s", n->name);
 
-    emit(cg, "\n%s:\n", n->name);
-    if (is_int) {
+    if (bits) emit(cg, "\nbits %d\n%s:\n", bits, n->name);
+    else emit(cg, "\n%s:\n", n->name);
+    if (naked) {
+        // No frame. The body is the machine code, in the selected bits mode.
+    } else if (is_int) {
         // CPU already pushed SS, RSP, RFLAGS, CS, RIP, and maybe an error code.
         // Save every GPR: the interrupted context is not a normal caller.
         static const char* saved[] = {
@@ -4048,14 +4269,21 @@ void gen_func(Codegen* cg, AstNode* n) {
         emit(cg, "    pop rcx\n");
         emit(cg, "    pop rsp\n");
         emit(cg, "    o64 sysret\n");
+    } else if (naked) {
+        if (cg->symtab->stack_size > 0)
+            diag_error(n->line, n->col, "a naked function cannot have local variables");
+        emit(cg, "    ret\n");
     } else {
         emit(cg, "    xor rax, rax\n    leave\n    ret\n");
     }
 
     // All locals (including nested-scope ones) are now known.
-    int stack_size = cg->symtab->stack_size + 64;
-    stack_size = ((stack_size + 15) / 16) * 16;   // keep rsp 16-byte aligned
-    emit(cg, "__frame_%s equ %d\n", n->name, stack_size);
+    if (!naked) {
+        int stack_size = cg->symtab->stack_size + 64;
+        stack_size = ((stack_size + 15) / 16) * 16;   // keep rsp 16-byte aligned
+        emit(cg, "__frame_%s equ %d\n", n->name, stack_size);
+    }
+    if (bits && bits != 64) emit(cg, "bits 64\n");
 
     g_fn_flags = 0;
     g_fn_name[0] = '\0';
@@ -4309,7 +4537,12 @@ void codegen(AstNode* ast, const char* file, StringTable* strtab, TypeTable* typ
         for (int i = 0; i < ast->child_count; i++)
             if (ast->children[i]->type == AST_FUNCTION && !ast->children[i]->is_forward_decl &&
                 !strcmp(ast->children[i]->name, "_start")) flat_entry = ast->children[i];
-        if (!flat_entry) diag_error(1, 1, "--flat needs a function named _start (the entry point)");
+        if (!flat_entry) diag_error(1, 1, g_boot
+            ? "--boot needs a function named _start (the entry point)"
+            : "--flat needs a function named _start (the entry point)");
+        else if (g_boot && (flat_entry->bits != 16 || !(flat_entry->flags & AF_NAKED)))
+            diag_error(flat_entry->line, flat_entry->col,
+                       "--boot _start must be 'bits 16 naked fn' (real mode, no 64-bit frame)");
         else gen_func(&cg, flat_entry);
     }
     for (int i = 0; i < ast->child_count; i++) {
@@ -4318,12 +4551,34 @@ void codegen(AstNode* ast, const char* file, StringTable* strtab, TypeTable* typ
             if (!ast->children[i]->is_forward_decl && ast->children[i] != flat_entry) {
                 gen_func(&cg, ast->children[i]);
             }
+        } else if (ast->children[i]->type == AST_DATA) {
+            AstNode* d = ast->children[i];
+            emit(&cg, "\n%s:\n", d->name);
+            for (int j = 0; j < d->child_count; j++) {
+                AstNode* it = d->children[j];
+                if (!it || !it->name) continue;
+                if (!strcmp(it->name, "label")) emit(&cg, "%s:\n", it->value);
+                else if (!strcmp(it->name, "align")) emit(&cg, "align %s, db 0\n", it->value);
+                else if (!strcmp(it->name, "times")) emit(&cg, "times %s\n", it->value);
+                else emit(&cg, "    %s %s\n", it->name, it->value ? it->value : "0");
+            }
         }
     }
+    if (g_boot) emit(&cg, "\ntimes 510-($-$$) db 0\ndw 0xAA55\n");
 
     cg.out = fopen(file, "w");
     fprintf(cg.out, "; Generated by " LANG_NAME " " LANG_VERSION "%s\n\n",
             g_freestanding ? " (freestanding)" : "");
+    if (g_boot) {
+        // Real mode starts at the first byte. Do not emit `bits 64` or a
+        // .data/.bss section in front of _start: that would move the entry
+        // off byte 0, or assemble the prologue in the wrong mode.
+        fprintf(cg.out, "org 0x7C00\n%s", cg.code_buf);
+        fclose(cg.out);
+        free(cg.code_buf);
+        free(global_symtab.vars);
+        return;
+    }
     if (g_flat_org) fprintf(cg.out, "bits 64\norg %s\n\n", g_flat_org);
     fprintf(cg.out, "section .data\n");
     if (cg.need_syscall_data) {
@@ -4436,6 +4691,8 @@ static void usage(FILE* o) {
         "                      emits assembly to be included by your own entry code (implies -S)\n"
         "  --flat <addr>       freestanding flat binary (nasm -f bin) loaded at <addr>;\n"
         "                      execution starts at fn _start, bss_start()/bss_end() give .bss bounds\n"
+        "  --boot              boot sector: --flat 0x7C00, pad to 512 bytes, signature 0xAA55;\n"
+        "                      _start must be 'bits 16 naked fn'\n"
         "  -v, --verbose       print compilation steps\n"
         "  --version           print version and exit\n"
         "  -h, --help          show this help\n");
@@ -4461,7 +4718,12 @@ int main(int argc, char** argv) {
         else if (!strcmp(a, "--freestanding")) { g_freestanding = 1; only_asm = 1; }
         else if (!strcmp(a, "--flat")) {
             if (i + 1 >= argc) { fprintf(stderr, COMPILER_BIN ": error: --flat needs a load address\n"); return 2; }
+            if (g_boot) { fprintf(stderr, COMPILER_BIN ": error: --flat and --boot cannot be combined\n"); return 2; }
             g_flat_org = argv[++i]; g_freestanding = 1;
+        }
+        else if (!strcmp(a, "--boot")) {
+            if (g_flat_org) { fprintf(stderr, COMPILER_BIN ": error: --flat and --boot cannot be combined\n"); return 2; }
+            g_boot = 1; g_freestanding = 1; g_flat_org = "0x7C00";
         }
         else if (!strcmp(a, "-v") || !strcmp(a, "--verbose")) verbose = 1;
         else if (!strcmp(a, "--version")) { printf(LANG_NAME " " LANG_VERSION "\n"); return 0; }

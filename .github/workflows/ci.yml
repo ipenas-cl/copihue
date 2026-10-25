@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: sudo apt-get update && sudo apt-get install -y nasm curl
+      - run: sudo apt-get update && sudo apt-get install -y nasm curl qemu-system-x86
       - name: Build the compiler (warnings are errors)
         run: make CFLAGS="-O2 -Wall -Werror"
       - name: Regression suite (all tests and examples at -O0 and -O2, error messages, freestanding)

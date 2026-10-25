@@ -1,0 +1,4 @@
+tests/errors/naked_local.lap:2:10: error: a naked function cannot have local variables
+      2 | naked fn k() -> i64 {
+        |          ^
+1 error, compilation failed
