@@ -1,0 +1,78 @@
+// Equivalence of -O0 and -O2 when scalar locals live in r12-r15.
+// Covers a call between uses, recursion, an address-taken local (must stay
+// in memory), sibling shadowing, malloc, a volatile global, div/mod, and shifts.
+
+fn leaf(x: i64) -> i64 {
+    return (x + 3) * 5 - 1;
+}
+
+fn keep(a: i64, b: i64) -> i64 {
+    let c = a + b;
+    let d = leaf(c);
+    return c + d + a;
+}
+
+fn rec(n: i64) -> i64 {
+    if (n < 2) { return n; }
+    return rec(n - 1) + rec(n - 2);
+}
+
+fn touch(p: *i64) -> i64 {
+    p[0] = p[0] + 7;
+    return p[0];
+}
+
+let volatile g: i64 = 0;
+
+fn bump() -> i64 {
+    g = g + 1;
+    return g;
+}
+
+fn main() -> i32 {
+    let s = 0;
+    let i = 0;
+    let n = 20;
+    let extra = 1;
+    while (i < n) {
+        s = (s + i * 3 + 1) & 2147483647;
+        i = i + 1;
+    }
+    print_int(s + extra); println("");
+
+    print_int(keep(4, 6)); println("");
+    print_int(rec(10)); println("");
+
+    let v = 10;
+    print_int(touch(&v)); println("");
+    print_int(v); println("");
+
+    {
+        let b = 1;
+        s = s + b;
+    }
+    {
+        let b = 2;
+        s = s + b;
+    }
+    print_int(s); println("");
+
+    let q = 100;
+    let p = malloc(8);
+    q = q + 5;
+    free(p);
+    print_int(q); println("");
+
+    let t = 0;
+    while (t < 4) {
+        bump();
+        t = t + g;
+    }
+    print_int(t); println("");
+
+    print_int(20 / 3); println("");
+    print_int(20 % 3); println("");
+    print_int((6 << 2) + (40 >> 2)); println("");
+    print_int(!0 + !5); println("");
+    return 0;
+}
