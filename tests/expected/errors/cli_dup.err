@@ -1,0 +1,4 @@
+tests/errors/parts/cli_dup_b.lap:1:4: error: function 'shared' is already defined at tests/errors/parts/cli_dup_a.lap:1:4
+      1 | fn shared() -> i64 {
+        |    ^
+1 error, compilation failed

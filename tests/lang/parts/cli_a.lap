@@ -1,0 +1,5 @@
+fn add2(n: i64) -> i64 {
+    return n + 2;
+}
+
+let base: i64 = 40;

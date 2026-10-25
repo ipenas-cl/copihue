@@ -189,6 +189,34 @@ if [ -f tests/usermode/boot.lap ] && [ -f tests/usermode/kernel.lap ]; then
   fi
 fi
 
+# Several files on one command line share one namespace. The hosted loop
+# compiles a single path, so this block is separate. Helpers live under
+# parts/ and are not matched by tests/*/*.lap.
+cli_run() {
+  local opt=$1
+  ( cd "$WORK" && rm -f cli_prog && "$CC" "$opt" -o cli_prog \
+      "$ROOT/tests/lang/parts/cli_a.lap" "$ROOT/tests/lang/parts/cli_main.lap" \
+      >/dev/null 2>err.txt ) || { echo "COMPILE ERROR"; sed "s|$ROOT/||g" "$WORK/err.txt"; return; }
+  ( cd "$WORK" && ./cli_prog </dev/null; echo "exit=$?" ) | mask
+}
+cli_run -O0 > "$WORK/cli0"
+cli_run -O2 > "$WORK/cli2"
+if ! cmp -s "$WORK/cli0" "$WORK/cli2"; then
+  fail=$((fail+1)); failed+=("cli multi-file (-O0 vs -O2)"); echo "FAIL cli multi-file: -O0 and -O2 differ"
+elif grep -q "^COMPILE ERROR" "$WORK/cli0"; then
+  fail=$((fail+1)); failed+=("cli multi-file"); echo "FAIL cli multi-file:"; cat "$WORK/cli0"
+else
+  check "cli multi-file" "tests/expected/tests/lang/cli_multi.out" "$WORK/cli0"
+fi
+if ( cd "$WORK" && "$CC" -S -o out.asm \
+    "$ROOT/tests/errors/parts/cli_dup_a.lap" "$ROOT/tests/errors/parts/cli_dup_b.lap" \
+    >/dev/null 2>err.txt ); then
+  fail=$((fail+1)); failed+=("cli duplicate"); echo "FAIL cli duplicate: compiled but should have failed"
+else
+  sed "s|$ROOT/||g" "$WORK/err.txt" > "$WORK/err.norm"
+  check "cli duplicate" "tests/expected/errors/cli_dup.err" "$WORK/err.norm"
+fi
+
 rm -f "$CC"
 echo
 echo "passed: $pass  failed: $fail"

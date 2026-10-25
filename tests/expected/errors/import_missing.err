@@ -1,0 +1,4 @@
+tests/errors/import_missing.lap:1:8: error: cannot open import 'tests/errors/parts/no_such_file.lap'
+      1 | import "parts/no_such_file.lap";
+        |        ^
+1 error, compilation failed
