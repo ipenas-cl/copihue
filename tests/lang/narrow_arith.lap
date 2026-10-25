@@ -1,0 +1,71 @@
+// Narrow arithmetic wraps at the type, and a compare uses that value.
+// `volatile` is part of the pointer type. Adding it is allowed.
+// Dropping it needs `as`. -O0 and -O2 print the same lines.
+
+fn main() -> i32 {
+    let x: u8 = 200;
+    let s: i32 = 2147483647;
+    let u: u32 = 4294967295;
+    let sh: u8 = 128;
+    let ish: i8 = -128;
+    let hi: u32 = 2147483648;
+    let d: u32 = 4294967295;
+    let di: i32 = -5;
+    let uz: u8 = 0;
+    let one: i8 = 1;
+    let w: u16 = 65535;
+    let h: i16 = -32768;
+    let buf: [u8; 2];
+    let raw: *u8;
+    let vol: *volatile u8;
+    let back: *u8;
+    let bi: *volatile i8;
+    let bu: *volatile u8;
+
+    print_int(x + 100);
+    println("");
+    if (x + 100 < 50) { println("wrap8"); }
+
+    print_int(s + 1);
+    println("");
+    if (s + 1 < 0) { println("wrap32"); }
+
+    if (u < 1) { println("badu"); } else { println("u32ok"); }
+    print_int(u + 1);
+    println("");
+    if (u + 1 == 0) { println("u32z"); }
+
+    print_int(sh >> 1);
+    println("");
+    print_int(ish >> 1);
+    println("");
+    print_int(x + 300);
+    println("");
+    print_int(d / 2);
+    println("");
+    print_int(di / 2);
+    println("");
+    print_int(hi >> 1);
+    println("");
+    print_int(~uz);
+    println("");
+    print_int(-one);
+    println("");
+    print_int(w + 1);
+    println("");
+    print_int(h - 1);
+    println("");
+    if (h < 0) { println("neg16"); }
+
+    buf[0] = 65;
+    raw = buf;
+    vol = raw;
+    back = vol as *u8;
+    print_int(back[0]);
+    println("");
+    bi = raw as *volatile i8;
+    bu = bi;
+    print_int(bu[0]);
+    println("");
+    return 0;
+}

@@ -206,11 +206,11 @@ Los cinco programas nuevos ejecutan el bucle: el decimal de la salida no está e
 
 El hosted de 64 bits genera el mismo código que el binario medido (imprimía 0.29.2), salvo la línea de versión. `bits 16` y `bits 32` son el arreglo de `ebx` de 0.29.2.
 
-## 0.29.3 → 0.29.5
+## 0.29.3 → 0.30.1
 
-`main` tomó 0.29.4 para restaurar `ebx` en la aritmética de `bits 16` y `bits 32`. Esta ronda es 0.29.5 y no toca ese camino. La ventana de esta página es 2026-10-25 23:19:30 UTC — 2026-10-25 23:20:17 UTC. La referencia es la ventana 22:33:23–22:34:10 UTC (el binario imprimía 0.29.2; el `-O2` hosted de 0.29.3 coincide con él salvo la versión). Mediana de Copihue en milisegundos (mínimo–máximo). El cociente es la referencia / esta medición.
+`main` tomó 0.29.4 para restaurar `ebx` en la aritmética de `bits 16` y `bits 32`, y 0.30.0 para la aritmética al ancho del tipo. Esta ronda es 0.30.1 y no toca esos caminos. La ventana de abajo es 2026-10-25 23:19:30 UTC — 2026-10-25 23:20:17 UTC. El binario de esa ventana imprimía 0.29.5, antes de que 0.30.0 entrara en `main`. El `-O2` hosted de `fib`, `sieve`, `matmul`, `arith`, `chain`, `fold`, `array`, `sort`, `hash`, `array_global`, `fill`, `list` y `parse` coincide con ese binario salvo la línea de versión, y con 0.30.0 salvo la versión (`copy`, `fill` y `list` además llevan la reescritura). `copy` no coincide con 0.29.5: el segundo bucle, `src[i] = (src[i] + 1) & 255`, gana dos `movzx rax, al` porque 0.30.0 trunca la suma `u8` y la máscara `u8`. `rep movsb` es el mismo. La fila de `copy` de esa ventana no describe el binario que se publica. La referencia es la ventana 22:33:23–22:34:10 UTC (el binario imprimía 0.29.2; el `-O2` hosted de 0.29.3 coincide con él salvo la versión). Mediana de Copihue en milisegundos (mínimo–máximo). El cociente es la referencia / esta medición.
 
-| Programa | 22:33 (0.29.3) | 0.29.5 | referencia / 0.29.5 |
+| Programa | 22:33 (0.29.3) | 23:19 (imprimía 0.29.5) | referencia / 23:19 |
 |---|---:|---:|---:|
 | `copy` | 47.8 (47.5–49.0) | 37.7 (37.5–38.4) | 1.27 |
 | `fill` | 32.4 (32.1–32.7) | 17.2 (16.8–17.7) | 1.88 |

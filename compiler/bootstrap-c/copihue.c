@@ -16,7 +16,7 @@
 
 // ==== NAMING (single place to change when the language is renamed) ====
 #define LANG_NAME     "Copihue"
-#define LANG_VERSION  "0.29.5"
+#define LANG_VERSION  "0.30.1"
 #define COMPILER_BIN  "copihue"
 #define SRC_EXT       ".lap"   /* Lapageria rosea, the copihue */
 #define OLD_SRC_EXT   ".cph"   /* v0.18.x extension, still accepted with a warning */
@@ -291,7 +291,9 @@ static int g_fn_bits = 0;   // 0 or 64: rax. 16 or 32: eax (legacy mode)
 // bits 16/32: ebx is the ALU scratch and also a naked lvalue (the INT 15h
 // continuation token). Every binary operator and every comparison used as a
 // value push/pops ebx, not only an if/while. A shift also push/pops ecx
-// (`shl`/`sar` need cl). 64-bit rbx stays scratch.
+// (`shl`/`shr`/`sar` need cl). 64-bit rbx stays scratch.
+// bits 16/32 unsigned 32-bit compare. 0 everywhere else, so setl/jl stay.
+static int g_cmp_unsigned = 0;
 static char g_fn_name[128];
 static AstNode* g_cur_fn = NULL;   // Function whose body is being generated
 // A naked local is a labeled slot in the image. A stack frame at the first
@@ -682,11 +684,18 @@ static int g_strength_busy;
 static AstNode* g_enclosing_while;
 static AstNode* g_enclosing_prev;
 
+// Argument registers (rdi, rsi, r8, r9) must map to their own low names.
+// Falling back to eax/ax/al reads a different register: lea rdi, [r12-1]
+// followed by movsxd rdi, eax keeps the old eax and the call never shrinks.
 static const char* reg_dword(const char* reg) {
     if (!strcmp(reg, "rax")) return "eax";
     if (!strcmp(reg, "rbx")) return "ebx";
     if (!strcmp(reg, "rcx")) return "ecx";
     if (!strcmp(reg, "rdx")) return "edx";
+    if (!strcmp(reg, "rsi")) return "esi";
+    if (!strcmp(reg, "rdi")) return "edi";
+    if (!strcmp(reg, "r8")) return "r8d";
+    if (!strcmp(reg, "r9")) return "r9d";
     if (!strcmp(reg, "r10")) return "r10d";
     if (!strcmp(reg, "r11")) return "r11d";
     if (!strcmp(reg, "r12")) return "r12d";
@@ -694,6 +703,24 @@ static const char* reg_dword(const char* reg) {
     if (!strcmp(reg, "r14")) return "r14d";
     if (!strcmp(reg, "r15")) return "r15d";
     return "eax";
+}
+
+static const char* reg_word(const char* reg) {
+    if (!strcmp(reg, "rax")) return "ax";
+    if (!strcmp(reg, "rbx")) return "bx";
+    if (!strcmp(reg, "rcx")) return "cx";
+    if (!strcmp(reg, "rdx")) return "dx";
+    if (!strcmp(reg, "rsi")) return "si";
+    if (!strcmp(reg, "rdi")) return "di";
+    if (!strcmp(reg, "r8")) return "r8w";
+    if (!strcmp(reg, "r9")) return "r9w";
+    if (!strcmp(reg, "r10")) return "r10w";
+    if (!strcmp(reg, "r11")) return "r11w";
+    if (!strcmp(reg, "r12")) return "r12w";
+    if (!strcmp(reg, "r13")) return "r13w";
+    if (!strcmp(reg, "r14")) return "r14w";
+    if (!strcmp(reg, "r15")) return "r15w";
+    return "ax";
 }
 
 static void emit_scaled_load(Codegen* cg, const char* mem, int elem, int is_struct, const char* dest) {
@@ -2915,10 +2942,12 @@ static AstNode* find_func(Codegen* cg, const char* name) {
 
 // ==== TYPES (0.24.0) ====
 // Assignments, call arguments, and `return` distinguish integers from pointers.
-// `*mut` and `*volatile` on the same pointee are the same type. An integer
-// literal may initialize a pointer (a physical address or null). Pointer
-// arithmetic and malloc() yield an address, which converts to an integer and,
-// for malloc, to any pointer. `as` is the explicit conversion.
+// `mut` is not part of the type. `volatile` is: `*volatile T` is not `*T`.
+// Adding volatile is allowed; dropping it is an error. An integer literal may
+// initialize a pointer (a physical address or null). Pointer arithmetic and
+// malloc() yield an address, which converts to an integer and, for malloc, to
+// any pointer. `as` is the explicit conversion. A narrow integer operator
+// truncates to that width; i64 and u64 stay 64-bit.
 
 static char* array_elem_type_name(Codegen* cg, AstNode* arr);
 static char* obj_record_type(Codegen* cg, AstNode* obj);
@@ -2968,16 +2997,34 @@ static void canon_type(const char* in, char* out, int n) {
     if (!in) { if (n > 0) out[0] = 0; return; }
     for (int i = 0; in[i] && o + 1 < n; ) {
         if (in[i] == '*') {
+            int vol = 0;
             out[o++] = '*';
             i++;
             for (;;) {
-                if (!strncmp(in + i, "volatile ", 9)) i += 9;
+                if (!strncmp(in + i, "volatile ", 9)) { vol = 1; i += 9; }
                 else if (!strncmp(in + i, "mut ", 4)) i += 4;
                 else break;
+            }
+            // `*volatile mut T` and `*mut volatile T` are `*volatile T`.
+            if (vol && o + 9 < n) {
+                memcpy(out + o, "volatile ", 9);
+                o += 9;
             }
         } else out[o++] = in[i++];
     }
     out[o] = 0;
+}
+
+// Pointee spelling, skipping `volatile` and `mut` that belong to this star.
+static const char* after_star(const char* disp) {
+    if (!disp || disp[0] != '*') return disp ? disp : "";
+    disp++;
+    for (;;) {
+        if (!strncmp(disp, "volatile ", 9)) disp += 9;
+        else if (!strncmp(disp, "mut ", 4)) disp += 4;
+        else break;
+    }
+    return disp;
 }
 
 static VTy ty_unk(void) {
@@ -3042,6 +3089,17 @@ static VTy ty_from_spelled(Codegen* cg, const char* spelled) {
     return t;
 }
 
+static VTy with_volatile_ptr(VTy p) {
+    char raw[220];
+    VTy n;
+    if (p.kind != VK_PTR || p.disp[0] != '*' || !strncmp(p.disp + 1, "volatile ", 9))
+        return p;
+    snprintf(raw, sizeof raw, "*volatile %s", p.disp + 1);
+    n = ty_from_spelled(NULL, raw);
+    n.addr_int = p.addr_int;
+    return n;
+}
+
 // full=1: function return stores the complete spelling (`*u8`, `i64`, `[u8; 4]`).
 // full=0: a declaration stores the pointee in `base` and the pointer bits apart,
 // so `**u8` is base `*u8` with the pointer bit set.
@@ -3075,6 +3133,7 @@ static VTy sym_vty(Codegen* cg, Symbol* s) {
             p = ty_from_spelled(cg, raw);
         }
         p.addr_int = s->as_int;
+        if (s->volatile_pointee) p = with_volatile_ptr(p);
         return p;
     }
     if (s->type_name) return ty_from_spelled(cg, s->type_name);
@@ -3092,7 +3151,11 @@ static VTy global_vty(Codegen* cg, GlobalVar* g) {
         char raw[200];
         const char* base = g->pointee_type ? g->pointee_type : g->type_name;
         snprintf(raw, sizeof raw, "*%s", base ? base : "");
-        return ty_from_spelled(cg, raw);
+        {
+            VTy p = ty_from_spelled(cg, raw);
+            if (g->volatile_pointee) p = with_volatile_ptr(p);
+            return p;
+        }
     }
     if (g->type_name) return ty_from_spelled(cg, g->type_name);
     return ty_unk();
@@ -3140,7 +3203,7 @@ static VTy ty_indexed(Codegen* cg, AstNode* base) {
         if (et) return ty_from_spelled(cg, et);
     }
     VTy b = expr_ty(cg, base);
-    if (b.kind == VK_PTR && b.disp[0] == '*') return ty_from_spelled(cg, b.disp + 1);
+    if (b.kind == VK_PTR && b.disp[0] == '*') return ty_from_spelled(cg, after_star(b.disp));
     return ty_unk();
 }
 
@@ -3220,11 +3283,47 @@ static int builtin_ret_ty(const char* f, VTy* out) {
     return 0;
 }
 
+static VTy ty_named_int(int bits, int sg) {
+    const char* name = "i64";
+    if (bits <= 8) name = sg ? "i8" : "u8";
+    else if (bits <= 16) name = sg ? "i16" : "u16";
+    else if (bits <= 32) name = sg ? "i32" : "u32";
+    return ty_from_spelled(NULL, name);
+}
+
+// Width is the wider typed operand. Signed only when both are signed.
+// A bare literal adopts the other side when it fits; if it does not, or both
+// sides are literals, the operation stays i64 (folding and literal errors).
+// A shift uses the left operand only. 64-bit results stay i64.
+static VTy ty_int_result(VTy L, VTy R, int shift) {
+    int bits, sg;
+    if (shift) {
+        if (L.kind == VK_INT && !L.lit && L.bits < 64) return ty_named_int(L.bits, L.sg);
+        return ty_i64();
+    }
+    if (L.kind != VK_INT || R.kind != VK_INT) return ty_i64();
+    if (L.lit && !R.lit && lit_fits(R.bits, R.sg, L.litv)) {
+        L.bits = R.bits;
+        L.sg = R.sg;
+        L.lit = 0;
+    } else if (R.lit && !L.lit && lit_fits(L.bits, L.sg, R.litv)) {
+        R.bits = L.bits;
+        R.sg = L.sg;
+        R.lit = 0;
+    }
+    if (L.lit || R.lit) return ty_i64();
+    bits = L.bits > R.bits ? L.bits : R.bits;
+    sg = (L.sg && R.sg) ? 1 : 0;
+    if (bits >= 64) return ty_i64();
+    return ty_named_int(bits, sg);
+}
+
 static VTy ty_binop(Codegen* cg, AstNode* n) {
     VTy L = (n->child_count > 0) ? expr_ty(cg, n->children[0]) : ty_unk();
     VTy R = (n->child_count > 1) ? expr_ty(cg, n->children[1]) : ty_unk();
     int plus = n->op && n->op[0] == '+' && !n->op[1];
     int minus = n->op && n->op[0] == '-' && !n->op[1];
+    int shift = n->op && (!strcmp(n->op, "<<") || !strcmp(n->op, ">>"));
     if ((plus || minus) && (L.kind == VK_PTR || L.kind == VK_ADDR) && R.kind == VK_INT) {
         if (L.kind == VK_ADDR) return ty_addr();
         L.addr_int = 1;
@@ -3237,7 +3336,7 @@ static VTy ty_binop(Codegen* cg, AstNode* n) {
     }
     if (minus && (L.kind == VK_PTR || L.kind == VK_ADDR) && (R.kind == VK_PTR || R.kind == VK_ADDR))
         return ty_i64();
-    return ty_i64();
+    return ty_int_result(L, R, shift);
 }
 
 static VTy expr_ty(Codegen* cg, AstNode* n) {
@@ -3262,15 +3361,16 @@ static VTy expr_ty(Codegen* cg, AstNode* n) {
     if (n->type == AST_ADDR_OF) return ty_addr_of(cg, n);
     if (n->type == AST_DEREF && n->child_count > 0) {
         VTy p = expr_ty(cg, n->children[0]);
-        if (p.kind == VK_PTR && p.disp[0] == '*') return ty_from_spelled(cg, p.disp + 1);
+        if (p.kind == VK_PTR && p.disp[0] == '*') return ty_from_spelled(cg, after_star(p.disp));
         return ty_unk();
     }
     if (n->type == AST_INDEX && n->child_count > 0) return ty_indexed(cg, n->children[0]);
     if (n->type == AST_FIELD_ACCESS) return ty_field(cg, n);
     if (n->type == AST_UNARY && n->child_count > 0) {
-        if (n->op && n->op[0] == '-') {
+        if (n->op && (n->op[0] == '-' || n->op[0] == '~') && !n->op[1]) {
             VTy c = expr_ty(cg, n->children[0]);
-            if (c.kind == VK_INT && c.lit) return ty_lit(-c.litv);
+            if (n->op[0] == '-' && c.kind == VK_INT && c.lit) return ty_lit(-c.litv);
+            if (c.kind == VK_INT && !c.lit && c.bits < 64) return ty_named_int(c.bits, c.sg);
         }
         return ty_i64();
     }
@@ -3328,14 +3428,47 @@ static void check_types(AstNode* at, const char* ctx, VTy dst, VTy src) {
     }
 }
 
-// *i8 and *u8 are the same byte pointer. Signedness is not a distinct pointee
-// for an 8-bit element; *u8 versus *Point, or *i32 versus *i64, still disagree.
-static int ptr_compat(const char* a, const char* b) {
+static void ptr_split(const char* t, int* vol, const char** pointee) {
+    *vol = 0;
+    *pointee = t ? t : "";
+    if (!t || t[0] != '*') return;
+    t++;
+    if (!strncmp(t, "volatile ", 9)) { *vol = 1; t += 9; }
+    *pointee = t;
+}
+
+static int pointee_eq(const char* a, const char* b) {
     if (!a || !b) return 0;
     if (!strcmp(a, b)) return 1;
-    if ((!strcmp(a, "*i8") && !strcmp(b, "*u8")) || (!strcmp(a, "*u8") && !strcmp(b, "*i8")))
+    if ((!strcmp(a, "i8") && !strcmp(b, "u8")) || (!strcmp(a, "u8") && !strcmp(b, "i8")))
         return 1;
     return 0;
+}
+
+// *i8 and *u8 are the same byte pointer, including when both are volatile.
+// Dropping volatile is an error. Adding it (`*u8` into `*volatile u8`) is
+// allowed, so an array still initializes a volatile pointer.
+static int ptr_compat(const char* dst, const char* src) {
+    int dv = 0, sv = 0;
+    const char* dp = "";
+    const char* sp = "";
+    if (!dst || !src) return 0;
+    ptr_split(dst, &dv, &dp);
+    ptr_split(src, &sv, &sp);
+    if (!pointee_eq(dp, sp)) return 0;
+    if (sv && !dv) return 0;
+    return 1;
+}
+
+// Unsigned 32-bit compare in bits 16/32. A zero-extended u8/u16 still
+// compares correctly with signed jl, because bit 31 is clear. u32 does not.
+static int cmp_legacy_unsigned(Codegen* cg, AstNode* n) {
+    VTy L, R, t;
+    if (!legacy_bits() || !n || n->child_count < 2) return 0;
+    L = expr_ty(cg, n->children[0]);
+    R = expr_ty(cg, n->children[1]);
+    t = ty_int_result(L, R, 0);
+    return t.kind == VK_INT && !t.lit && !t.sg && t.bits >= 32 && t.bits < 64;
 }
 
 static void check_arg(Codegen* cg, AstNode* arg, int idx, const char* fname, VTy dst) {
@@ -3435,6 +3568,18 @@ static void emit_width_trunc(Codegen* cg, int bits, int sg) {
     }
 }
 
+static void emit_reg_trunc(Codegen* cg, const char* reg, int bits, int sg);
+
+static void trunc_rax_node(Codegen* cg, AstNode* n) {
+    VTy t;
+    if (!n) return;
+    if (n->type == AST_BINOP) t = ty_binop(cg, n);
+    else if (n->type == AST_UNARY && n->op && (n->op[0] == '-' || n->op[0] == '~') && !n->op[1])
+        t = expr_ty(cg, n);
+    else return;
+    if (t.kind == VK_INT && !t.lit && t.bits < 64) emit_width_trunc(cg, t.bits, t.sg);
+}
+
 static int is_numeral(AstNode* n, long long* v) {
     if (!n) return 0;
     if (n->type == AST_NUMBER && n->value) { *v = atoll(n->value); return 1; }
@@ -3449,8 +3594,17 @@ static int is_numeral(AstNode* n, long long* v) {
 static void emit_store_trunc(Codegen* cg, const char* tname, AstNode* rhs) {
     int bits = 64, sg = 1;
     long long v = 0;
+    VTy s;
     if (!int_name(tname, &bits, &sg) || bits >= 64) return;
     if (is_numeral(rhs, &v) && lit_fits(bits, sg, v)) return;
+    // The operator already truncated to this type. A second mask would be a
+    // new instruction in front of the same store.
+    if (rhs && (rhs->type == AST_BINOP ||
+                (rhs->type == AST_UNARY && rhs->op &&
+                 (rhs->op[0] == '-' || rhs->op[0] == '~') && !rhs->op[1]))) {
+        s = expr_ty(cg, rhs);
+        if (s.kind == VK_INT && !s.lit && s.bits == bits && s.sg == sg) return;
+    }
     emit_width_trunc(cg, bits, sg);
 }
 
@@ -5572,6 +5726,11 @@ static void emit_rbx(Codegen* cg, AstNode* n) {
         emit_rbx(cg, n->children[0]);
         emit_leaf_reg(cg, n->children[1], "rcx");
         emit_rbx_binop(cg, n->op);
+        {
+            VTy t = ty_binop(cg, n);
+            if (t.kind == VK_INT && !t.lit && t.bits < 64)
+                emit_reg_trunc(cg, "rbx", t.bits, t.sg);
+        }
         return;
     }
     if (n->type == AST_UNARY) {
@@ -5579,19 +5738,27 @@ static void emit_rbx(Codegen* cg, AstNode* n) {
         if (n->op[0] == '-') emit(cg, "    neg rbx\n");
         else if (n->op[0] == '~') emit(cg, "    not rbx\n");
         else emit(cg, "    test rbx, rbx\n    setz bl\n    movzx rbx, bl\n");
+        if ((n->op[0] == '-' || n->op[0] == '~') && !n->op[1]) {
+            VTy t = expr_ty(cg, n);
+            if (t.kind == VK_INT && !t.lit && t.bits < 64)
+                emit_reg_trunc(cg, "rbx", t.bits, t.sg);
+        }
         return;
     }
     emit_leaf_reg(cg, n, "rbx");
 }
 
-// eax/ebx form for bits 16 and bits 32. edx is not touched, so an rdmsr
-// high half survives `rdmsr(m) | imm`. The caller push/pops ebx around this.
-static void emit_binop_legacy(Codegen* cg, const char* op) {
+// eax/ebx form for bits 16 and bits 32. edx is not touched by + - & | ^ *,
+// so an rdmsr high half survives `rdmsr(m) | imm`. The caller push/pops ebx.
+// u32 / and % zero edx for `div`. u32 >> is logical.
+static void emit_binop_legacy(Codegen* cg, const char* op, int u32) {
     // A shift count lives in cl. ecx is also a named register (the E820
-    // buffer size), so put it back after shl/sar, in a condition and outside.
+    // buffer size), so put it back after shl/shr/sar, in a condition and outside.
     if (!strcmp(op, "<<") || !strcmp(op, ">>")) {
+        const char* ins = "shl";
+        if (op[0] == '>') ins = u32 ? "shr" : "sar";
         emit(cg, "    push ecx\n");
-        emit(cg, "    mov ecx, ebx\n    %s eax, cl\n", op[0] == '<' ? "shl" : "sar");
+        emit(cg, "    mov ecx, ebx\n    %s eax, cl\n", ins);
         emit(cg, "    pop ecx\n");
     } else if (op[0] == '&') emit(cg, "    and eax, ebx\n");
     else if (op[0] == '|') emit(cg, "    or eax, ebx\n");
@@ -5606,7 +5773,8 @@ static void emit_binop_legacy(Codegen* cg, const char* op) {
         emit(cg, "    xor eax, eax\n");
         emit(cg, "    jmp .L%d_end\n", skip_label);
         emit(cg, ".L%d:\n", skip_label);
-        emit(cg, "    cdq\n    idiv ebx\n");
+        if (u32) emit(cg, "    xor edx, edx\n    div ebx\n");
+        else emit(cg, "    cdq\n    idiv ebx\n");
         if (op[0] == '%') emit(cg, "    mov eax, edx\n");
         emit(cg, ".L%d_end:\n", skip_label);
     }
@@ -5704,6 +5872,10 @@ static const char* reg_low(const char* reg) {
     if (!strcmp(reg, "rbx")) return "bl";
     if (!strcmp(reg, "rcx")) return "cl";
     if (!strcmp(reg, "rdx")) return "dl";
+    if (!strcmp(reg, "rsi")) return "sil";
+    if (!strcmp(reg, "rdi")) return "dil";
+    if (!strcmp(reg, "r8")) return "r8b";
+    if (!strcmp(reg, "r9")) return "r9b";
     if (!strcmp(reg, "r10")) return "r10b";
     if (!strcmp(reg, "r11")) return "r11b";
     if (!strcmp(reg, "r12")) return "r12b";
@@ -5711,6 +5883,29 @@ static const char* reg_low(const char* reg) {
     if (!strcmp(reg, "r14")) return "r14b";
     if (!strcmp(reg, "r15")) return "r15b";
     return "al";
+}
+
+static void emit_reg_trunc(Codegen* cg, const char* reg, int bits, int sg) {
+    const char* lo;
+    const char* w;
+    const char* d;
+    if (!reg || bits >= 64) return;
+    if (!strcmp(reg, "rax") || !strcmp(reg, "eax")) {
+        emit_width_trunc(cg, bits, sg);
+        return;
+    }
+    lo = reg_low(reg);
+    w = reg_word(reg);
+    d = reg_dword(reg);
+    if (sg) {
+        if (bits <= 8) emit(cg, "    movsx %s, %s\n", reg, lo);
+        else if (bits <= 16) emit(cg, "    movsx %s, %s\n", reg, w);
+        else emit(cg, "    movsxd %s, %s\n", reg, d);
+    } else {
+        if (bits <= 8) emit(cg, "    movzx %s, %s\n", reg, lo);
+        else if (bits <= 16) emit(cg, "    movzx %s, %s\n", reg, w);
+        else emit(cg, "    mov %s, %s\n", d, d);
+    }
 }
 
 static void emit_alu(Codegen* cg, const char* dest, const char* op, const char* src, int is_imm, long long imm) {
@@ -5742,6 +5937,7 @@ static void emit_alu_leaf(Codegen* cg, const char* dest, const char* op, OpLeaf*
 
 static int can_place_k(Codegen* cg, AstNode* n, const char* dest, int allow);
 static void place_k(Codegen* cg, AstNode* n, const char* dest, int allow);
+static void place_k_raw(Codegen* cg, AstNode* n, const char* dest, int allow);
 
 // rax is the scratch, unless the result itself is rax: then rbx is scratch.
 // Neither register holds a local.
@@ -5846,7 +6042,7 @@ static void place_ordered_k(Codegen* cg, const char* op, AstNode* left, AstNode*
     }
 }
 
-static void place_k(Codegen* cg, AstNode* n, const char* dest, int allow) {
+static void place_k_raw(Codegen* cg, AstNode* n, const char* dest, int allow) {
     if (n->type == AST_NUMBER) {
         emit(cg, "    mov %s, %s\n", dest, n->value);
         return;
@@ -5910,14 +6106,39 @@ static void place_k(Codegen* cg, AstNode* n, const char* dest, int allow) {
         place_ordered_k(cg, op, R, L, dest, allow);
 }
 
+static void place_k(Codegen* cg, AstNode* n, const char* dest, int allow) {
+    VTy t;
+    place_k_raw(cg, n, dest, allow);
+    if (!n || !dest) return;
+    if (n->type == AST_BINOP) t = ty_binop(cg, n);
+    else if (n->type == AST_UNARY && n->op && (n->op[0] == '-' || n->op[0] == '~') && !n->op[1])
+        t = expr_ty(cg, n);
+    else return;
+    if (t.kind == VK_INT && !t.lit && t.bits < 64)
+        emit_reg_trunc(cg, dest, t.bits, t.sg);
+}
+
+static const char* ucond(const char* s) {
+    if (!g_cmp_unsigned || !s) return s;
+    if (!strcmp(s, "setl")) return "setb";
+    if (!strcmp(s, "setg")) return "seta";
+    if (!strcmp(s, "setle")) return "setbe";
+    if (!strcmp(s, "setge")) return "setae";
+    if (!strcmp(s, "jl")) return "jb";
+    if (!strcmp(s, "jg")) return "ja";
+    if (!strcmp(s, "jle")) return "jbe";
+    if (!strcmp(s, "jge")) return "jae";
+    return s;
+}
+
 static const char* cmp_setcc(const char* op) {
     if (!op) return NULL;
     if (!strcmp(op, "==")) return "sete";
     if (!strcmp(op, "!=")) return "setne";
-    if (!strcmp(op, "<")) return "setl";
-    if (!strcmp(op, ">")) return "setg";
-    if (!strcmp(op, "<=")) return "setle";
-    if (!strcmp(op, ">=")) return "setge";
+    if (!strcmp(op, "<")) return ucond("setl");
+    if (!strcmp(op, ">")) return ucond("setg");
+    if (!strcmp(op, "<=")) return ucond("setle");
+    if (!strcmp(op, ">=")) return ucond("setge");
     return NULL;
 }
 
@@ -5925,10 +6146,10 @@ static const char* cmp_fail_jcc(const char* op) {
     if (!op) return NULL;
     if (!strcmp(op, "==")) return "jne";
     if (!strcmp(op, "!=")) return "je";
-    if (!strcmp(op, "<")) return "jge";
-    if (!strcmp(op, ">")) return "jle";
-    if (!strcmp(op, "<=")) return "jg";
-    if (!strcmp(op, ">=")) return "jl";
+    if (!strcmp(op, "<")) return ucond("jge");
+    if (!strcmp(op, ">")) return ucond("jle");
+    if (!strcmp(op, "<=")) return ucond("jg");
+    if (!strcmp(op, ">=")) return ucond("jl");
     return NULL;
 }
 
@@ -6028,8 +6249,9 @@ static int assign_direct(Codegen* cg, AstNode* n) {
     return 1;
 }
 
-static void emit_binop_rax_rbx(Codegen* cg, const char* op) {
-    if (legacy_bits()) { emit_binop_legacy(cg, op); return; }
+static void emit_binop_rax_rbx(Codegen* cg, const char* op, int bits, int sg) {
+    int u32 = legacy_bits() && !sg && bits >= 32 && bits < 64;
+    if (legacy_bits()) { emit_binop_legacy(cg, op, u32); return; }
     if (!strcmp(op, "<<")) emit(cg, "    mov rcx, rbx\n    shl rax, cl\n");
     else if (!strcmp(op, ">>")) emit(cg, "    mov rcx, rbx\n    sar rax, cl\n");
     else if (op[0] == '&') emit(cg, "    and rax, rbx\n");
@@ -6060,6 +6282,13 @@ static void emit_binop_rax_rbx(Codegen* cg, const char* op) {
         emit(cg, "    mov rax, rdx  ; Move remainder to rax\n");
         emit(cg, ".L%d_end:\n", skip_label);
     }
+}
+
+static void emit_node_binop(Codegen* cg, AstNode* n) {
+    VTy t = ty_binop(cg, n);
+    int bits = 64, sg = 1;
+    if (t.kind == VK_INT) { bits = t.bits; sg = t.sg; }
+    emit_binop_rax_rbx(cg, n->op, bits, sg);
 }
 
 // Read a named register into the accumulator. Zero-extends a narrower
@@ -6384,6 +6613,7 @@ void gen_expr(Codegen* cg, AstNode* n) {
             } else if (n->op && n->op[0] == '~') {
                 emit(cg, "    not rax\n");
             }
+            trunc_rax_node(cg, n);
         }
     } else if (n->type == AST_CAST) {
         // Pointer and 64-bit casts are a type change only. A narrower integer
@@ -6517,20 +6747,27 @@ void gen_expr(Codegen* cg, AstNode* n) {
                 } else {
                     emit(cg, "    mov rbx, rax\n");
                     emit(cg, "    mov rax, %s\n", g_expr_tmp);
-                    emit_binop_rax_rbx(cg, n->op);
+                    emit_node_binop(cg, n);
                 }
+                trunc_rax_node(cg, n);
                 return;
             } else {
                 emit(cg, "    push rax\n");
                 gen_expr(cg, n->children[1]);
                 emit(cg, "    mov rbx, rax\n    pop rax\n");
             }
-            emit_binop_rax_rbx(cg, n->op);
+            emit_node_binop(cg, n);
             if (legacy_bits()) emit(cg, "    pop ebx\n");
         }
+        trunc_rax_node(cg, n);
     } else if (n->type == AST_COMPARE) {
+        int uns = cmp_legacy_unsigned(cg, n);
+        const char* scc;
         if (o2_hosted() && emit_cmp_raw(cg, n)) {
-            emit(cg, "    %s al\n", cmp_setcc(n->op));
+            g_cmp_unsigned = uns;
+            scc = cmp_setcc(n->op);
+            g_cmp_unsigned = 0;
+            if (scc) emit(cg, "    %s al\n", scc);
             emit(cg, "    movzx rax, al\n");
             return;
         }
@@ -6553,12 +6790,10 @@ void gen_expr(Codegen* cg, AstNode* n) {
             emit(cg, "    mov rbx, rax\n    pop rax\n");
             emit(cg, "    cmp rax, rbx\n");
         }
-        if (!strcmp(n->op, "==")) emit(cg, "    sete al\n");
-        else if (!strcmp(n->op, "!=")) emit(cg, "    setne al\n");
-        else if (!strcmp(n->op, "<")) emit(cg, "    setl al\n");
-        else if (!strcmp(n->op, ">")) emit(cg, "    setg al\n");
-        else if (!strcmp(n->op, "<=")) emit(cg, "    setle al\n");
-        else if (!strcmp(n->op, ">=")) emit(cg, "    setge al\n");
+        g_cmp_unsigned = uns;
+        scc = cmp_setcc(n->op);
+        g_cmp_unsigned = 0;
+        if (scc) emit(cg, "    %s al\n", scc);
         if (legacy_bits()) emit(cg, "    movzx eax, al\n");
         else emit(cg, "    movzx rax, al\n");
     } else if (n->type == AST_LOGICAL) {
@@ -7597,15 +7832,15 @@ static const char* jcc_when_true(const char* op, int swapped) {
     if (!strcmp(op, "==")) return "je";
     if (!strcmp(op, "!=")) return "jne";
     if (!swapped) {
-        if (!strcmp(op, "<")) return "jl";
-        if (!strcmp(op, ">")) return "jg";
-        if (!strcmp(op, "<=")) return "jle";
-        if (!strcmp(op, ">=")) return "jge";
+        if (!strcmp(op, "<")) return ucond("jl");
+        if (!strcmp(op, ">")) return ucond("jg");
+        if (!strcmp(op, "<=")) return ucond("jle");
+        if (!strcmp(op, ">=")) return ucond("jge");
     } else {
-        if (!strcmp(op, "<")) return "jg";
-        if (!strcmp(op, ">")) return "jl";
-        if (!strcmp(op, "<=")) return "jge";
-        if (!strcmp(op, ">=")) return "jle";
+        if (!strcmp(op, "<")) return ucond("jg");
+        if (!strcmp(op, ">")) return ucond("jl");
+        if (!strcmp(op, "<=")) return ucond("jge");
+        if (!strcmp(op, ">=")) return ucond("jle");
     }
     return NULL;
 }
@@ -9373,8 +9608,12 @@ static void branch_succeed(Codegen* cg, AstNode* n, int ok_lab);
 
 static int emit_cmp_jcc(Codegen* cg, AstNode* n, int lab, int succeed) {
     const char* jcc;
+    int uns;
     if (!n || n->type != AST_COMPARE || !n->op || n->child_count != 2) return 0;
+    uns = cmp_legacy_unsigned(cg, n);
+    g_cmp_unsigned = uns;
     jcc = succeed ? jcc_when_true(n->op, 0) : cmp_fail_jcc(n->op);
+    g_cmp_unsigned = 0;
     if (!jcc) return 0;
     emit_cmp_acc(cg, n);
     emit(cg, "    %s .L%d\n", jcc, lab);
