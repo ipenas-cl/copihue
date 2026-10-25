@@ -86,7 +86,7 @@ The full language reference is in [docs/REFERENCE.md](docs/REFERENCE.md).
 - Diagnostics in the form `file:line:col: error: ...`, with the source line and a caret. They cover syntax errors,
   undeclared variables, indexing a non-array, unknown struct fields, unknown functions, a call with the wrong
   number of arguments, an interrupt function with the wrong shape, bad escapes, and hosted-only calls in freestanding code
-- Optimizations: `-O1` constant folding; `-O2` adds strength reduction. Every test must give identical output at `-O0` and `-O2`
+- Optimizations: `-O1` constant folding; `-O2` adds strength reduction and, in hosted code, keeps up to four scalar locals in registers and evaluates a simple right-hand side without `push`/`pop`. `-O0`, `--freestanding`, `--flat`, and `--boot` keep the stack-machine code. Every test must give identical output at `-O0` and `-O2`
 
 ### Tested
 
@@ -94,7 +94,7 @@ The full language reference is in [docs/REFERENCE.md](docs/REFERENCE.md).
 
 | Suite | What it checks |
 |---|---|
-| 141 test programs + 18 examples | compiled at `-O0` and `-O2`, run, and stdout + exit code compared to golden files in `tests/expected/` |
+| 142 test programs + 18 examples | compiled at `-O0` and `-O2`, run, and stdout + exit code compared to golden files in `tests/expected/` |
 | 26 error tests | the compiler rejects the program with the exact expected message |
 | 14 freestanding tests | `--freestanding` output has no `_start`/syscalls and assembles; the instruction stream is golden. Six of them also require the same stream at `-O2` |
 | 4 flat-binary tests | `--flat` puts `_start` at offset 0; the raw image matches a golden hexdump. Two of them also require the same image at `-O2` |
@@ -110,7 +110,7 @@ The full language reference is in [docs/REFERENCE.md](docs/REFERENCE.md).
 - Integer arithmetic is always 64-bit and overflow wraps. Narrow types only change loads and stores. There are no bounds checks on pointer indexing.
 - A kernel is still one translation unit: there are no modules and no relocatable ELF objects. `bits 16` and `bits 32` are naked functions only: there is no 16-bit frame, and the `read_cr*` / `write_cr*` builtins are the 64-bit `mov rax, crN` form. `tests/boot/boot_sector.lap` reaches protected mode. It does not enter long mode; a page table does not fit as static data in 512 bytes.
 - `syscall fn` switches stacks with `set_syscall_stack` and returns with `o64 sysret` (sysretq). It does not program `STAR`, `LSTAR`, `SFMASK`, or `EFER`, and it does not emit `swapgs`. `TSS.rsp0` is a packed-struct store the kernel performs; the compiler does not build the GDT descriptor. The `syscall` instruction does not read the TSS.
-- `volatile` on a global scalar, a `*volatile T` pointee, or a struct field is reloaded and stored on every use, including inside a loop at `-O2`, at the access's real width. It is not a memory model: there are no atomics, and `let volatile` on a local scalar does not change codegen. `let volatile` on a struct or an array is a compile error.
+- `volatile` on a global scalar, a `*volatile T` pointee, or a struct field is reloaded and stored on every use, including inside a loop at `-O2`, at the access's real width. It is not a memory model: there are no atomics. `let volatile` on a local scalar keeps that local in its stack slot at `-O2` (a non-volatile scalar may live in a register). At `-O0` and in freestanding code every local is on the stack, so the keyword does not change those. `let volatile` on a struct or an array is a compile error.
 - Indexing a local array in hosted mode emits a bounds check (`syscall` + `exit`). `--freestanding` and `--flat` index the same local array without that trap. Pointer indexing is never checked.
 - The generated code is simple stack-machine style. `rbx` is scratch, so freestanding callers must not rely on it being preserved. Hosted tests assemble `iretq`, `sysret`, `ltr`, and moves to or from CR0/CR2/CR3/CR4; they do not run those instructions as a Linux process. `tests/usermode` runs them under QEMU.
 - Linux x86-64 only. There is no way to place a page table at a chosen virtual address except by writing through a pointer.

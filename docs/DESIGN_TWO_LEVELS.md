@@ -132,7 +132,7 @@ El orden de abajo es el que ya está acordado. Los tiempos de `bench/` no lo reo
 
 ## Qué midió `bench/`
 
-Las cifras son las de [`bench/RESULTS.md`](../bench/RESULTS.md). Muestras del 2026-10-25 entre 12:50:52 y 12:51:48 UTC. Linux 6.12.94+ x86_64, CPU que `/proc/cpuinfo` llama Intel Xeon a 2700.000 MHz, 4 CPUs, ejecución con `taskset -c 0`. gcc 13.3.0 `-O2` con `-march=x86-64`, rustc 1.83.0 `-O` (opt-level 2), ocamlopt 4.14.1 `-O3` con `flambda=false`, Copihue 0.19.0 `-O2`. Mediana de 7 ejecuciones tras un calentamiento; entre paréntesis, en el archivo de resultados, el mínimo y el máximo. Las cuatro versiones de cada programa imprimieron la misma línea.
+Las cifras de esta sección son la corrida de Copihue 0.19.0 del 2026-10-25 entre 12:50:52 y 12:51:48 UTC. [`bench/RESULTS.md`](../bench/RESULTS.md) lo vuelve a escribir `make bench`, así que una corrida posterior no sustituye los números de abajo. Muestras del 2026-10-25 entre 12:50:52 y 12:51:48 UTC. Linux 6.12.94+ x86_64, CPU que `/proc/cpuinfo` llama Intel Xeon a 2700.000 MHz, 4 CPUs, ejecución con `taskset -c 0`. gcc 13.3.0 `-O2` con `-march=x86-64`, rustc 1.83.0 `-O` (opt-level 2), ocamlopt 4.14.1 `-O3` con `flambda=false`, Copihue 0.19.0 `-O2`. Mediana de 7 ejecuciones tras un calentamiento; entre paréntesis, en el archivo de resultados, el mínimo y el máximo. Las cuatro versiones de cada programa imprimieron la misma línea.
 
 Ejecución, mediana en milisegundos:
 
