@@ -2,6 +2,16 @@
 
 Todos los cambios importantes del proyecto.
 
+## [0.23.1] - 2026-10-25
+
+### Added
+- Hosted `-O2` keeps up to four scalar locals or parameters in `r12`–`r15` and evaluates a simple right-hand side in `rbx` instead of `push`/`pop`. Arrays, pointers, structs, address-taken names, `let volatile` locals, a name declared twice, and any function that contains `asm()` stay on the stack. `-O0`, `--freestanding`, `--flat`, and `--boot` generate the same code as 0.23.0.
+- `tests/lang/o2_regs.lap` checks that this matches `-O0`, including a call, recursion, `&local`, sibling blocks, `malloc`, and a volatile global.
+
+### Changed
+- `malloc` holds the requested size in `rbx` so it does not clobber a local kept in `r12`.
+- Language version is 0.23.1.
+
 ## [0.23.0] - 2026-10-25
 
 ### Added
