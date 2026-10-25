@@ -1,0 +1,30 @@
+// A bump allocator over a static buffer: the pattern a kernel uses before paging.
+let heap: [u8; 64];
+let hp: i64 = 0;
+
+fn alloc(n: i64) -> i64 {
+    if (n <= 0) { return 0; }
+    if (hp + n > 64) { return 0; }
+    let p = &heap[0] + hp;
+    hp = hp + n;
+    return p;
+}
+
+fn main() -> i32 {
+    let a = alloc(4);
+    let b = alloc(4);
+    let p: *u8 = a;
+    let q: *u8 = b;
+    p[0] = 42;
+    q[0] = 7;
+    p[3] = 9;
+    print_int(p[0]); println("");
+    print_int(q[0]); println("");
+    print_int(p[3]); println("");
+    print_int(b - a); println("");
+    print_int(hp); println("");
+    let c = alloc(100);
+    print_int(c); println("");
+    print_int(hp); println("");
+    return 0;
+}

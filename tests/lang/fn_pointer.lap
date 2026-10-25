@@ -1,0 +1,25 @@
+// Function pointers: take an address with &fn and call it like a function.
+fn add(a: i64, b: i64) -> i64 { return a + b; }
+fn mul(a: i64, b: i64) -> i64 { return a * b; }
+
+fn apply(f: i64, a: i64, b: i64) -> i64 {
+    return f(a, b);
+}
+
+fn main() -> i32 {
+    let f = &add;
+    print_int(f(20, 22));
+    println("");
+    f = &mul;
+    print_int(f(6, 7));
+    println("");
+    let tab: [i64; 2];
+    tab[0] = &add;
+    tab[1] = &mul;
+    let g = tab[1];
+    print_int(g(3, 5));
+    println("");
+    print_int(apply(&add, 100, 23));
+    println("");
+    return 0;
+}

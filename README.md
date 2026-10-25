@@ -61,18 +61,23 @@ Old `.ch` files are still accepted, with a deprecation warning.
 
 The full language reference is in [docs/REFERENCE.md](docs/REFERENCE.md).
 
-- Functions, recursion, up to 6 parameters, structs passed by value (copied) or by pointer
-- `let` locals, globals, integer types `i8 i16 i32 i64 u8 u16 u32 u64`, typed arrays, pointers, `&`, `*`, `->`
+- Functions, recursion, up to 16 parameters, structs passed by value (copied) or by pointer
+- `let` locals, globals, `let volatile` globals, integer types `i8 i16 i32 i64 u8 u16 u32 u64`, typed arrays, pointers, `&`, `*`, `->`
 - `struct`s, including nested structs, arrays of structs, and nested struct literals
+- `packed struct` for hardware records (an x86-64 IDT gate is 16 bytes, not eight slots of 8)
+- Function addresses (`&timer`) and indirect calls, so a table of handlers can be installed from the language
+- `interrupt fn` (full GPR save, optional CPU error code, `iretq`) and `syscall fn` (`syscall`/`sysret` entry, up to 7 arguments)
 - `if`/`else if`/`else`, `while`, `for`, `break`/`continue`
 - Arithmetic with signed division and remainder that truncate toward zero, comparisons, `&&`/`||` (short-circuit),
   and bitwise `& | ^ ~ << >>` with Rust-like precedence. Hex `0xFF`, binary `0b1010`, `1_000_000` and `'A'` literals
 - String literals with escapes (`\n \t \r \0 \\ \" \'`)
 - Hosted built-ins (Linux syscalls): `print`, `println`, `print_int`, `strlen`, `strcmp`, `strcpy`,
   `malloc`/`free`, `open`/`read`/`write`/`close`, `syscall6`, `exit`
-- Freestanding built-ins: `inb/inw/inl`, `outb/outw/outl`, `cli`, `sti`, `hlt`, `pause`, and inline `asm("...")`
+- Freestanding built-ins: `inb/inw/inl`, `outb/outw/outl`, `cli`, `sti`, `hlt`, `pause`, `swapgs`,
+  `lidt`/`lgdt`/`invlpg`, `rdmsr`/`wrmsr`, `set_syscall_stack`, and inline `asm("...")`
 - Diagnostics in the form `file:line:col: error: ...`, with the source line and a caret. They cover syntax errors,
-  undeclared variables, indexing a non-array, unknown struct fields, bad escapes, and hosted-only calls in freestanding code
+  undeclared variables, indexing a non-array, unknown struct fields, unknown functions, a call with the wrong
+  number of arguments, an interrupt function with the wrong shape, bad escapes, and hosted-only calls in freestanding code
 - Optimizations: `-O1` constant folding; `-O2` adds strength reduction. Every test must give identical output at `-O0` and `-O2`
 
 ### Tested
@@ -81,18 +86,23 @@ The full language reference is in [docs/REFERENCE.md](docs/REFERENCE.md).
 
 | Suite | What it checks |
 |---|---|
-| 127 test programs + 18 examples | compiled at `-O0` and `-O2`, run, and stdout + exit code compared to golden files in `tests/expected/` |
-| 12 error tests | the compiler rejects the program with the exact expected message |
-| 2 freestanding tests | `--freestanding` output has no `_start`/syscalls and assembles |
-| 1 flat-binary test | `--flat` puts `_start` at offset 0; the raw image matches a golden hexdump |
+| 135 test programs + 18 examples | compiled at `-O0` and `-O2`, run, and stdout + exit code compared to golden files in `tests/expected/` |
+| 14 error tests | the compiler rejects the program with the exact expected message |
+| 6 freestanding tests | `--freestanding` output has no `_start`/syscalls and assembles; the instruction stream is golden |
+| 2 flat-binary tests | `--flat` puts `_start` at offset 0; the raw image matches a golden hexdump |
 | `make net-test` | starts `examples/simple_api_server.lap`, queries it with `curl` and with two Copihue HTTP clients, then stops it |
 
 ### Known limitations
 
-- Functions take at most 6 parameters. Struct values are copied 8 bytes per field. There is no type checking beyond what the diagnostics above cover.
-- Integer overflow wraps (x86-64 behavior). There are no bounds checks on pointer indexing.
-- The generated code is simple stack-machine style. `rbx` is used as scratch, so freestanding callers must not rely on it being preserved.
-- Linux x86-64 only.
+- Ordinary struct fields still occupy 8 bytes each. Only `packed struct` uses the real width of `u8`/`u16`/`u32`. There is no struct assignment `a = b`, and no padding or alignment attributes beyond packed-or-not.
+- Call checking is the function name and the argument count. Argument types, assignment types, and `const` are not checked. Function pointers are integer addresses, not a typed `fn` type, and an indirect call is not arity-checked.
+- Integer arithmetic is always 64-bit and overflow wraps. Narrow types only change loads and stores. There are no bounds checks on pointer indexing.
+- A kernel is still one translation unit: there are no modules and no relocatable ELF objects. There is no 16-bit or 32-bit code generation, so a bootloader that leaves long mode stays assembly.
+- `syscall fn` switches stacks and returns with `sysret`, but it does not program `STAR`, `LSTAR`, or `EFER`. The kernel does that with `wrmsr` (or `asm`) and must call `set_syscall_stack` with a 16-byte-aligned top before any entry. There is no TSS or IST setup.
+- `volatile` is a global scalar that is reloaded and stored on every use, including inside a loop at `-O2`. It is not a memory model: the compiler has no other reordering pass, and `*volatile` does not change how a pointee load is emitted.
+- Indexing a local array emits a hosted bounds-check (`syscall` + `exit`). Freestanding code should index a global array or a pointer. `tests/flat/min_kernel.lap` does it that way.
+- The generated code is simple stack-machine style. `rbx` is scratch, so freestanding callers must not rely on it being preserved. `iretq` and `sysret` are checked by assembling them, not by running them as a Linux process.
+- Linux x86-64 only. There is no way to place a page table at a chosen virtual address except by writing through a pointer.
 
 ## Freestanding mode (kernels)
 
@@ -107,6 +117,34 @@ fn serial_putc(c: i64) -> i64 {
 `copihue --freestanding -o kernel.asm kernel.lap` produces NASM with no `_start`, no syscalls and no runtime.
 Your own entry code `%include`s it and calls your functions using the System V argument registers.
 Hosted built-ins such as `println` are a compile error in this mode.
+
+The same mode can express the pieces a small kernel needs after it is already in long mode:
+
+```copihue
+packed struct IdtEntry {
+    off_lo: u16, sel: u16, ist: u8, typ: u8,
+    off_mid: u16, off_hi: u32, zero: u32
+}
+
+let volatile ticks: i64 = 0;
+let idt: [IdtEntry; 32];
+
+interrupt fn timer() {
+    ticks = ticks + 1;
+    outb(0x20, 0x20);
+}
+
+fn set_gate(n: i64, handler: i64) -> i64 {
+    idt[n].off_lo = handler & 0xFFFF;
+    idt[n].sel = 0x08;
+    idt[n].typ = 0x8E;
+    idt[n].off_mid = (handler >> 16) & 0xFFFF;
+    idt[n].off_hi = handler >> 32;
+    return 0;
+}
+```
+
+`set_gate(32, &timer)` then `lidt(&idtr)` installs it. `tests/flat/min_kernel.lap` is a complete `--flat 0x10000` image: it clears the BSS, writes a byte to the serial port, bump-allocates from a global buffer, builds a packed IDT, and defines an interrupt handler and a syscall entry. A `syscall fn` takes the Linux register convention (`rax` = number, `rdi`/`rsi`/`rdx`/`r10`/`r8`/`r9` = arguments), switches to the stack given to `set_syscall_stack`, and returns with `sysret`.
 
 ### Flat binaries (`--flat`)
 
@@ -126,10 +164,10 @@ Hosted built-ins such as `println` are a compile error in this mode.
 
 Correctness and tooling come before new features. All items below are **planned**.
 
-- **0.19:** type checking for assignments and calls, more than 6 parameters, `const`, warnings for unused variables
-- **0.20:** `u8`/`i32` arithmetic semantics (currently everything computes in 64 bits), struct copy assignment, defined overflow behavior
+- **Types:** checking assignments and argument types (calls already reject an unknown name or the wrong count), `const`, warnings for unused variables
+- **Narrow arithmetic:** `u8`/`i32` operations (everything still computes in 64 bits), struct copy assignment, defined overflow behavior
 - **Memory safety:** bounds-checked arrays, null-free references (`Option<T>`), and later an ownership model
-- **Systems features driven by [AtomicOS](https://github.com/ipenas-cl/AtomicOS):** `volatile` memory access, interrupt handler functions, packed structs and explicit layout, and function pointers (needed for an IDT, a timer interrupt, and a scheduler)
+- **Still needed for a larger [AtomicOS](https://github.com/ipenas-cl/AtomicOS):** separate compilation, a way to name sections and load addresses, and 16/32-bit codegen so the bootloader can leave assembly. User mode can be written with `wrmsr` and `syscall fn`, but the compiler does not build a TSS or program `STAR`/`LSTAR`/`EFER` for you
 - **Longer term:** a module system, self-hosting, and an ARM64 back end
 
 Version history: [CHANGELOG.md](CHANGELOG.md). Older design notes: [docs/VISION.md](docs/VISION.md), [ROADMAP.md](ROADMAP.md).

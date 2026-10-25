@@ -1,0 +1,7 @@
+// The load of a volatile global stays inside the loop at every opt level.
+let volatile ticks: i64 = 0;
+
+fn spin() -> i64 {
+    while (ticks == 0) { pause(); }
+    return ticks;
+}

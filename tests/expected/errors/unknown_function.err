@@ -1,0 +1,4 @@
+tests/errors/unknown_function.lap:2:12: error: unknown function 'no_such'
+      2 |     return no_such(1);
+        |            ^
+1 error, compilation failed
