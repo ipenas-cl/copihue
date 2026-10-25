@@ -67,7 +67,8 @@ The full language reference is in [docs/REFERENCE.md](docs/REFERENCE.md).
 - `struct`s, including nested structs, arrays of structs, nested struct literals, and assignment `a = b` (exact size, packed records included)
 - `packed struct` for hardware records (an x86-64 IDT gate is 16 bytes, not eight slots of 8)
 - Function addresses (`&timer`) and indirect calls, so a table of handlers can be installed from the language
-- `interrupt fn` (full GPR save, optional CPU error code, `iretq`) and `syscall fn` (`syscall`/`sysret` entry, up to 7 arguments)
+- `interrupt fn` (full GPR save, optional CPU error code, `iretq` back to the ring in the CPU frame, including ring 3) and `syscall fn` (`syscall`/`sysretq` entry, up to 7 arguments)
+- `ltr(selector)`, `iretq()`, and `sysretq()` (`o64 sysret` in NASM). A packed 104-byte TSS: `rsp0` at offset 4, IST at 36, and `tss.rsp0 = sp` on a context switch
 - `naked fn` and `bits 16` / `bits 32` / `bits 64` on a function, so real mode and protected mode have no 64-bit frame
 - `data name { db/dw/dd/dq ... }` for a GDT, a disk packet, or a string. `asm()` still splits on `;`, so raw bytes go here
 - `ljmp(selector, label)` and `int(n)` for a far jump and a BIOS interrupt
@@ -79,7 +80,7 @@ The full language reference is in [docs/REFERENCE.md](docs/REFERENCE.md).
 - Hosted built-ins (Linux syscalls): `print`, `println`, `print_int`, `strlen`, `strcmp`, `strcpy`,
   `malloc`/`free`, `open`/`read`/`write`/`close`, `syscall6`, `exit`
 - Freestanding built-ins: `inb/inw/inl`, `outb/outw/outl`, `cli`, `sti`, `hlt`, `pause`, `swapgs`,
-  `lidt`/`lgdt`/`invlpg` (any address expression, including a variable), `rdmsr`/`wrmsr`,
+  `lidt`/`lgdt`/`invlpg` (any address expression, including a variable), `rdmsr`/`wrmsr`, `ltr`, `iretq`, `sysretq`,
   `read_cr0`/`read_cr2`/`read_cr3`/`read_cr4`, `write_cr0`/`write_cr3`/`write_cr4`,
   `set_syscall_stack`, `ljmp`, `int`, and inline `asm("...")`. The control-register builtins, `ljmp`, and `int` are a compile error in hosted mode. `read_cr*` / `write_cr*` are 64-bit forms; 16-bit code uses `asm("mov eax, cr0")`
 - Diagnostics in the form `file:line:col: error: ...`, with the source line and a caret. They cover syntax errors,
@@ -93,11 +94,12 @@ The full language reference is in [docs/REFERENCE.md](docs/REFERENCE.md).
 
 | Suite | What it checks |
 |---|---|
-| 140 test programs + 18 examples | compiled at `-O0` and `-O2`, run, and stdout + exit code compared to golden files in `tests/expected/` |
-| 25 error tests | the compiler rejects the program with the exact expected message |
-| 13 freestanding tests | `--freestanding` output has no `_start`/syscalls and assembles; the instruction stream is golden. Five of them also require the same stream at `-O2` |
-| 3 flat-binary tests | `--flat` puts `_start` at offset 0; the raw image matches a golden hexdump. One of them also requires the same image at `-O2` |
+| 141 test programs + 18 examples | compiled at `-O0` and `-O2`, run, and stdout + exit code compared to golden files in `tests/expected/` |
+| 26 error tests | the compiler rejects the program with the exact expected message |
+| 14 freestanding tests | `--freestanding` output has no `_start`/syscalls and assembles; the instruction stream is golden. Six of them also require the same stream at `-O2` |
+| 4 flat-binary tests | `--flat` puts `_start` at offset 0; the raw image matches a golden hexdump. Two of them also require the same image at `-O2` |
 | 1 boot sector | `--boot` at `-O0` and `-O2` is the same 512-byte image ending in `55 aa`, compared to a golden hexdump. If `qemu-system-x86_64` is installed, the image is booted and COM1 must contain `COPIHUE`. CI installs QEMU; without it the hexdump test still runs |
+| 1 user-mode image | `tests/usermode`: a 512-byte sector plus a flat kernel at `0x8000`. Both images match at `-O0` and `-O2`. If QEMU is installed, both kernels are booted and COM1 must contain `USER` |
 | `make net-test` | starts `examples/simple_api_server.lap`, queries it with `curl` and with two Copihue HTTP clients, then stops it |
 
 ### Known limitations
@@ -107,10 +109,10 @@ The full language reference is in [docs/REFERENCE.md](docs/REFERENCE.md).
 - Locals are block-scoped. Two `let`s of the same name in sibling blocks are different slots, so a use reads the one that is in scope. The stack slot is not reused after the block ends.
 - Integer arithmetic is always 64-bit and overflow wraps. Narrow types only change loads and stores. There are no bounds checks on pointer indexing.
 - A kernel is still one translation unit: there are no modules and no relocatable ELF objects. `bits 16` and `bits 32` are naked functions only: there is no 16-bit frame, and the `read_cr*` / `write_cr*` builtins are the 64-bit `mov rax, crN` form. `tests/boot/boot_sector.lap` reaches protected mode. It does not enter long mode; a page table does not fit as static data in 512 bytes.
-- `syscall fn` switches stacks and returns with `sysret`, but it does not program `STAR`, `LSTAR`, or `EFER`. The kernel does that with `wrmsr` (or `asm`) and must call `set_syscall_stack` with a 16-byte-aligned top before any entry. There is no TSS or IST setup.
+- `syscall fn` switches stacks with `set_syscall_stack` and returns with `o64 sysret` (sysretq). It does not program `STAR`, `LSTAR`, `SFMASK`, or `EFER`, and it does not emit `swapgs`. `TSS.rsp0` is a packed-struct store the kernel performs; the compiler does not build the GDT descriptor. The `syscall` instruction does not read the TSS.
 - `volatile` on a global scalar, a `*volatile T` pointee, or a struct field is reloaded and stored on every use, including inside a loop at `-O2`, at the access's real width. It is not a memory model: there are no atomics, and `let volatile` on a local scalar does not change codegen. `let volatile` on a struct or an array is a compile error.
 - Indexing a local array in hosted mode emits a bounds check (`syscall` + `exit`). `--freestanding` and `--flat` index the same local array without that trap. Pointer indexing is never checked.
-- The generated code is simple stack-machine style. `rbx` is scratch, so freestanding callers must not rely on it being preserved. `iretq`, `sysret`, and moves to or from CR0/CR2/CR3/CR4 are checked by assembling them, not by running them as a Linux process.
+- The generated code is simple stack-machine style. `rbx` is scratch, so freestanding callers must not rely on it being preserved. Hosted tests assemble `iretq`, `sysret`, `ltr`, and moves to or from CR0/CR2/CR3/CR4; they do not run those instructions as a Linux process. `tests/usermode` runs them under QEMU.
 - Linux x86-64 only. There is no way to place a page table at a chosen virtual address except by writing through a pointer.
 
 ## Freestanding mode (kernels)
@@ -153,7 +155,7 @@ fn set_gate(n: i64, handler: i64) -> i64 {
 }
 ```
 
-`set_gate(32, &timer)` then `lidt(&idtr)` installs it. The selector `0x18` is the 64-bit code segment of the AtomicOS bootloader GDT; `0x08` on that loader is 32-bit code and a gate that uses it hangs. `tests/flat/min_kernel.lap` is a complete `--flat 0x10000` image for that GDT, not a generic bootable kernel: it clears the BSS, writes a byte to the serial port, bump-allocates from a global buffer, builds a packed IDT, and defines an interrupt handler and a syscall entry. A `syscall fn` takes the Linux register convention (`rax` = number, `rdi`/`rsi`/`rdx`/`r10`/`r8`/`r9` = arguments), switches to the stack given to `set_syscall_stack`, and returns with `sysret`.
+`set_gate(32, &timer)` then `lidt(&idtr)` installs it. The selector `0x18` is the 64-bit code segment of the AtomicOS bootloader GDT; `0x08` on that loader is 32-bit code and a gate that uses it hangs. `tests/flat/min_kernel.lap` is a complete `--flat 0x10000` image for that GDT, not a generic bootable kernel: it clears the BSS, writes a byte to the serial port, bump-allocates from a global buffer, builds a packed IDT, and defines an interrupt handler and a syscall entry. A `syscall fn` takes the Linux register convention (`rax` = number, `rdi`/`rsi`/`rdx`/`r10`/`r8`/`r9` = arguments), switches to the stack given to `set_syscall_stack`, and returns with `o64 sysret` (sysretq). `tests/flat/user_syscall.lap` is the `ltr` plus `EFER`/`STAR`/`LSTAR`/`SFMASK` sequence. `tests/usermode` is the same sequence booted in QEMU through to ring 3; its GDT is its own, not the AtomicOS loader GDT.
 
 ### Flat binaries (`--flat`)
 
@@ -204,7 +206,7 @@ Correctness and tooling come before new features. All items below are **planned*
 - **Types:** checking assignments and argument types (calls already reject an unknown name or the wrong count), `const`, warnings for unused variables
 - **Narrow arithmetic:** `u8`/`i32` operations (everything still computes in 64 bits) and defined overflow behavior
 - **Memory safety:** bounds-checked arrays, null-free references (`Option<T>`), and later an ownership model
-- **Still needed for a larger [AtomicOS](https://github.com/ipenas-cl/AtomicOS):** separate compilation and a way to name sections. A boot sector and a protected-mode stub can be written with `--boot`, `naked`, and `bits`. A long-mode transition still has to build its page tables in code; the checked example does not. User mode can be written with `wrmsr` and `syscall fn`, but the compiler does not build a TSS or program `STAR`/`LSTAR`/`EFER` for you
+- **Still needed for a larger [AtomicOS](https://github.com/ipenas-cl/AtomicOS):** separate compilation and a way to name sections. A boot sector, a protected-mode stub, and a long-mode kernel with a TSS and a user `syscall` can be written in Copihue (`--boot`, `--flat`, `ltr`, a packed TSS, `wrmsr`). The compiler does not emit the GDT, the page tables, or the `STAR`/`LSTAR`/`EFER` writes; the kernel does, as `tests/usermode` shows
 - **Longer term:** a module system, self-hosting, and an ARM64 back end
 
 Version history: [CHANGELOG.md](CHANGELOG.md). Older design notes: [docs/VISION.md](docs/VISION.md), [ROADMAP.md](ROADMAP.md).
