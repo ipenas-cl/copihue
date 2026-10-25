@@ -288,10 +288,10 @@ typedef struct {
 // Kind of the function currently being generated (for return/epilogue).
 static int g_fn_flags = 0;
 static int g_fn_bits = 0;   // 0 or 64: rax. 16 or 32: eax (legacy mode)
-// 1 while an if/while condition is being emitted in bits 16 or bits 32.
-// The compare saves ebx around `cmp eax, ebx`. A binary operator inside
-// the condition push/pops ebx, and a shift push/pops ecx, before the jump.
-static int g_in_cond = 0;
+// bits 16/32: ebx is the ALU scratch and also a naked lvalue (the INT 15h
+// continuation token). Every binary operator and every comparison used as a
+// value push/pops ebx, not only an if/while. A shift also push/pops ecx
+// (`shl`/`sar` need cl). 64-bit rbx stays scratch.
 static char g_fn_name[128];
 static AstNode* g_cur_fn = NULL;   // Function whose body is being generated
 // A naked local is a labeled slot in the image. A stack frame at the first
@@ -5585,14 +5585,14 @@ static void emit_rbx(Codegen* cg, AstNode* n) {
 }
 
 // eax/ebx form for bits 16 and bits 32. edx is not touched, so an rdmsr
-// high half survives `rdmsr(m) | imm`.
+// high half survives `rdmsr(m) | imm`. The caller push/pops ebx around this.
 static void emit_binop_legacy(Codegen* cg, const char* op) {
-    // A shift count lives in cl. Inside an if/while condition that ecx is a
-    // named register (the E820 buffer size), so put it back before the jump.
+    // A shift count lives in cl. ecx is also a named register (the E820
+    // buffer size), so put it back after shl/sar, in a condition and outside.
     if (!strcmp(op, "<<") || !strcmp(op, ">>")) {
-        if (g_in_cond) emit(cg, "    push ecx\n");
+        emit(cg, "    push ecx\n");
         emit(cg, "    mov ecx, ebx\n    %s eax, cl\n", op[0] == '<' ? "shl" : "sar");
-        if (g_in_cond) emit(cg, "    pop ecx\n");
+        emit(cg, "    pop ecx\n");
     } else if (op[0] == '&') emit(cg, "    and eax, ebx\n");
     else if (op[0] == '|') emit(cg, "    or eax, ebx\n");
     else if (op[0] == '^') emit(cg, "    xor eax, ebx\n");
@@ -6494,12 +6494,10 @@ void gen_expr(Codegen* cg, AstNode* n) {
             emit(cg, "    add rax, rdx\n    and rax, %ld\n    sub rax, rdx\n", mask);
         } else {
             // Hosted -O2: a simple right-hand side lands in rbx. No push/pop.
-            // bits 16/32 keep edx (the high half of an MSR) across the operator.
-            int saved_ebx = 0;
+            // bits 16/32 keep edx (the high half of an MSR) across the operator,
+            // and put ebx back: `di = di + 24` must not leave 24 in ebx.
             if (legacy_bits()) {
-                // ebx is the ALU scratch and also a naked lvalue. A condition
-                // must not keep the scratch: the caller still needs the token.
-                if (g_in_cond) { emit(cg, "    push ebx\n"); saved_ebx = 1; }
+                emit(cg, "    push ebx\n");
                 emit(cg, "    push eax\n    push edx\n");
                 gen_expr(cg, n->children[1]);
                 emit(cg, "    mov ebx, eax\n    pop edx\n    pop eax\n");
@@ -6528,7 +6526,7 @@ void gen_expr(Codegen* cg, AstNode* n) {
                 emit(cg, "    mov rbx, rax\n    pop rax\n");
             }
             emit_binop_rax_rbx(cg, n->op);
-            if (saved_ebx) emit(cg, "    pop ebx\n");
+            if (legacy_bits()) emit(cg, "    pop ebx\n");
         }
     } else if (n->type == AST_COMPARE) {
         if (o2_hosted() && emit_cmp_raw(cg, n)) {
@@ -6538,10 +6536,14 @@ void gen_expr(Codegen* cg, AstNode* n) {
         }
         gen_expr(cg, n->children[0]);
         if (legacy_bits()) {
-            emit(cg, "    push eax\n    push edx\n");
+            // A comparison used as a value (`let x = a == b`) writes ebx for
+            // `cmp eax, ebx`. Pop after cmp: pop does not change the flags,
+            // so sete still sees the compare, and a named ebx is intact.
+            emit(cg, "    push ebx\n    push eax\n    push edx\n");
             gen_expr(cg, n->children[1]);
             emit(cg, "    mov ebx, eax\n    pop edx\n    pop eax\n");
             emit(cg, "    cmp eax, ebx\n");
+            emit(cg, "    pop ebx\n");
         } else if (optimization_level >= 2 && !g_freestanding && can_emit_rbx(cg, n->children[1])) {
             emit_rbx(cg, n->children[1]);
             emit(cg, "    cmp rax, rbx\n");
@@ -9380,10 +9382,7 @@ static int emit_cmp_jcc(Codegen* cg, AstNode* n, int lab, int succeed) {
 }
 
 static void branch_fail(Codegen* cg, AstNode* n, int fail_lab) {
-    int prev;
     if (!n) return;
-    prev = g_in_cond;
-    if (legacy_bits()) g_in_cond = 1;
     if (cond_is_not(n)) {
         branch_succeed(cg, n->children[0], fail_lab);
     } else if (emit_cmp_jcc(cg, n, fail_lab, 0)) {
@@ -9399,14 +9398,10 @@ static void branch_fail(Codegen* cg, AstNode* n, int fail_lab) {
         gen_expr(cg, n);
         emit_acc_jcc(cg, fail_lab, 1);
     }
-    g_in_cond = prev;
 }
 
 static void branch_succeed(Codegen* cg, AstNode* n, int ok_lab) {
-    int prev;
     if (!n) return;
-    prev = g_in_cond;
-    if (legacy_bits()) g_in_cond = 1;
     if (cond_is_not(n)) {
         branch_fail(cg, n->children[0], ok_lab);
     } else if (emit_cmp_jcc(cg, n, ok_lab, 1)) {
@@ -9422,7 +9417,6 @@ static void branch_succeed(Codegen* cg, AstNode* n, int ok_lab) {
         gen_expr(cg, n);
         emit_acc_jcc(cg, ok_lab, 0);
     }
-    g_in_cond = prev;
 }
 
 void gen_stmt(Codegen* cg, AstNode* n) {

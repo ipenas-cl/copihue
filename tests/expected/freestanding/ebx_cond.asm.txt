@@ -16,6 +16,7 @@ keep16:
     pop ebx
     je .L1
     mov eax, ebx
+    push ebx
     push eax
     push edx
     mov eax, 1
@@ -23,6 +24,7 @@ keep16:
     pop edx
     pop eax
     sub eax, ebx
+    pop ebx
     mov ebx, eax
 .L2:
     jmp .L0
@@ -70,6 +72,7 @@ keep32:
     pop ebx
     je .L6
     mov eax, ebx
+    push ebx
     push eax
     push edx
     mov eax, 1
@@ -77,6 +80,7 @@ keep32:
     pop edx
     pop eax
     sub eax, ebx
+    pop ebx
     mov ebx, eax
 .L7:
     jmp .L5
