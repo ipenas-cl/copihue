@@ -2,6 +2,14 @@
 
 Todos los cambios importantes del proyecto.
 
+## [0.22.1] - 2026-10-25
+
+### Added
+- A function return type may be any type, not a single token. `-> *u8`, `-> *mut u8`, `-> *volatile mut u8`, `-> **u8`, `-> [u8; 4]`, and `-> [*u8; 2]` parse. A missing type is `expected a type, found '...'`. The type is not checked, and the value still comes back in `rax`.
+
+### Changed
+- Language version is 0.22.1.
+
 ## [0.22.0] - 2026-10-25
 
 ### Added

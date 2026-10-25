@@ -1,4 +1,4 @@
-# Copihue Language Reference (v0.22.0)
+# Copihue Language Reference (v0.22.1)
 
 This document describes the language that `copihue` accepts today. Anything not listed here is not supported.
 Planned features are in the README roadmap.
@@ -53,6 +53,7 @@ fn add(a: i64, b: i64) -> i64 { return a + b; }
 ```
 
 - Functions take up to 16 parameters. The first six are passed in `rdi, rsi, rdx, rcx, r8, r9`. The seventh is at `[rbp+16]`, then one 8-byte slot each. The return value comes back in `rax`.
+- The type after `->` may be any type: a name (`i64`, `Point`), a pointer (`*u8`, `*mut u8`, `*volatile mut u8`, `**u8`), or an array (`[u8; 4]`, `[*u8; 2]`). `volatile` and `mut` may appear in either order after `*`. A missing piece is `expected a type, found '...'`. The return type is not checked against `return`, and it does not change the calling convention.
 - A struct parameter (`r: Rect`) is passed by value: the callee gets its own copy. A pointer parameter (`r: *Rect`) refers to the caller's struct; use `r->field`.
 - Using an undeclared variable, or assigning to one, is a compile error.
 - A direct call of an unknown function is a compile error, and the argument count must match the declaration. A call through a local or a global is indirect and is not checked (see Function pointers).
@@ -259,7 +260,7 @@ The regression suite compares the hexdump at `-O0` and `-O2`. When `qemu-system-
 ## Known limitations
 
 - Integer arithmetic is 64-bit two's complement and wraps. Narrow types only affect memory accesses.
-- Direct calls check the function name and the argument count. Assignments, argument types, and indirect calls are not type-checked. There is no bounds checking on pointer indexing.
+- Direct calls check the function name and the argument count. Assignments, argument types, return types, and indirect calls are not type-checked. There is no bounds checking on pointer indexing.
 - Ordinary struct fields still occupy 8 bytes each. Only `packed struct` uses the real width of `u8`/`u16`/`u32`. There is no padding or alignment attribute beyond packed-or-not. Struct assignment copies the whole value; it does not assign field by field in the source. Nested fields (`r.b.x`) use the real offset.
 - Indexing a local array in hosted mode inserts a bounds check that exits the process. `--freestanding` and `--flat` omit that check. Pointer indexing is never checked.
 - There are no modules or imports and no relocatable objects. A program is a single file. `bits 16` and `bits 32` exist only as naked functions: there is no 16-bit or 32-bit frame, and `read_cr*` / `write_cr*` are not valid in those modes. `interrupt fn`, `syscall fn`, and the control-register builtins can be assembled; running `iretq`, `sysret`, or a move to or from a control register requires a CPU already in ring 0, which the hosted test suite does not do. The boot-sector test does execute real mode and protected mode under QEMU when QEMU is installed.
