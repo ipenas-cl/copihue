@@ -12,7 +12,7 @@ bits 16 naked fn real_mode() {
 
 bits 32 naked fn protected() {
     ds = 0x10;
-    let n: u8 = inb(0x80);
+    let n: u8 = inb(0x80) as u8;
     outb(0x80, n);
 }
 

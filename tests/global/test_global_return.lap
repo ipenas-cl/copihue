@@ -1,11 +1,11 @@
 // Test 4: Return global value
 let result = 42;
 
-fn get_result() -> i32 {
+fn get_result() -> i64 {
     return result;
 }
 
-fn main() -> i32 {
+fn main() -> i64 {
     let x = get_result();
     print_int(x);
     println("");

@@ -2,6 +2,6 @@ fn take(a: i64) -> i64 {
     return a;
 }
 
-fn main() -> i32 {
+fn main() -> i64 {
     return take(1, 2);
 }

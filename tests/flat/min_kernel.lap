@@ -41,7 +41,7 @@ fn exercise() -> i64 {
     t = s;
     let p: *volatile u32 = regs;
     p[0] = t.a;
-    p[1] = read_cr2();
+    p[1] = read_cr2() as u32;
     return tmp[0] + tmp[1] + p[0];
 }
 
@@ -74,12 +74,12 @@ syscall fn sys_write(nr: i64, ch: i64, a2: i64, a3: i64, a4: i64, a5: i64) -> i6
 }
 
 fn set_gate(n: i64, handler: i64) -> i64 {
-    idt[n].off_lo = handler & 0xFFFF;
+    idt[n].off_lo = (handler & 0xFFFF) as u16;
     idt[n].sel = 0x18;
     idt[n].ist = 0;
     idt[n].typ = 0x8E;
-    idt[n].off_mid = (handler >> 16) & 0xFFFF;
-    idt[n].off_hi = handler >> 32;
+    idt[n].off_mid = ((handler >> 16) & 0xFFFF) as u16;
+    idt[n].off_hi = (handler >> 32) as u32;
     idt[n].zero = 0;
     return 0;
 }
@@ -96,7 +96,7 @@ fn _start() -> i64 {
     set_syscall_stack(kstack + 256);
     set_gate(32, &timer);
     let idtr: DescPtr;
-    idtr.limit = 32 * 16 - 1;
+    idtr.limit = (32 * 16 - 1) as u16;
     idtr.base = idt as u64;
     lidt(&idtr);
     let buf = alloc(8);

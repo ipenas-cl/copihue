@@ -16,7 +16,7 @@
 
 // ==== NAMING (single place to change when the language is renamed) ====
 #define LANG_NAME     "Copihue"
-#define LANG_VERSION  "0.30.0"
+#define LANG_VERSION  "0.31.0"
 #define COMPILER_BIN  "copihue"
 #define SRC_EXT       ".lap"   /* Lapageria rosea, the copihue */
 #define OLD_SRC_EXT   ".cph"   /* v0.18.x extension, still accepted with a warning */
@@ -2924,14 +2924,15 @@ static AstNode* find_func(Codegen* cg, const char* name) {
     return fwd;
 }
 
-// ==== TYPES (0.24.0) ====
+// ==== TYPES (0.31.0) ====
 // Assignments, call arguments, and `return` distinguish integers from pointers.
-// `mut` is not part of the type. `volatile` is: `*volatile T` is not `*T`.
-// Adding volatile is allowed; dropping it is an error. An integer literal may
-// initialize a pointer (a physical address or null). Pointer arithmetic and
-// malloc() yield an address, which converts to an integer and, for malloc, to
-// any pointer. `as` is the explicit conversion. A narrow integer operator
-// truncates to that width; i64 and u64 stay 64-bit.
+// A wider integer does not narrow: `as` is that conversion. Same width (i64
+// and u64, i8 and u8) and a narrower source still match. `mut` is not part of
+// the type. `volatile` is: `*volatile T` is not `*T`. Adding volatile is
+// allowed; dropping it is an error. An integer literal may initialize a
+// pointer (a physical address or null). Pointer arithmetic and malloc() yield
+// an address, which converts to an integer and, for malloc, to any pointer.
+// A narrow integer operator truncates to that width; i64 and u64 stay 64-bit.
 
 static char* array_elem_type_name(Codegen* cg, AstNode* arr);
 static char* obj_record_type(Codegen* cg, AstNode* obj);
@@ -3392,13 +3393,22 @@ static void check_types(AstNode* at, const char* ctx, VTy dst, VTy src) {
     if (src.kind == VK_ADDR) return;
     if (dst.kind == VK_MEM) return;
     if (dst.kind == VK_INT && src.kind == VK_INT) {
-        if (src.lit && !lit_fits(dst.bits, dst.sg, src.litv)) {
-            if (ctx && ctx[0])
-                diag_error(at->line, at->col, "%s: expected %s, found integer literal %lld",
-                           ctx, dst.disp, src.litv);
-            else
-                diag_error(at->line, at->col, "expected %s, found integer literal %lld",
-                           dst.disp, src.litv);
+        if (src.lit) {
+            if (!lit_fits(dst.bits, dst.sg, src.litv)) {
+                if (ctx && ctx[0])
+                    diag_error(at->line, at->col, "%s: expected %s, found integer literal %lld",
+                               ctx, dst.disp, src.litv);
+                else
+                    diag_error(at->line, at->col, "expected %s, found integer literal %lld",
+                               dst.disp, src.litv);
+            }
+            return;
+        }
+        // A wider integer does not narrow by itself. `as` is that conversion.
+        // Same width (i64 and u64, i8 and u8) and a narrower source still match.
+        if (src.bits > dst.bits) {
+            mismatch(at, ctx, dst.disp, src.disp);
+            return;
         }
         return;
     }
@@ -3575,6 +3585,17 @@ static int is_numeral(AstNode* n, long long* v) {
     return 0;
 }
 
+// A store of `e as T` into a slot of width T already keeps the low bits.
+// Drop that cast so the store text stays the instruction it was without `as`.
+static AstNode* peel_store_cast(AstNode* e, int bits) {
+    int sb = 64, ss = 1;
+    if (bits >= 64 || bits <= 0) return e;
+    if (!e || e->type != AST_CAST || (e->is_pointer & 1) || e->child_count < 1) return e;
+    if (!e->value || !int_name(e->value, &sb, &ss)) return e;
+    if (sb != bits) return e;
+    return e->children[0];
+}
+
 static void emit_store_trunc(Codegen* cg, const char* tname, AstNode* rhs) {
     int bits = 64, sg = 1;
     long long v = 0;
@@ -3583,7 +3604,7 @@ static void emit_store_trunc(Codegen* cg, const char* tname, AstNode* rhs) {
     if (is_numeral(rhs, &v) && lit_fits(bits, sg, v)) return;
     // The operator already truncated to this type. A second mask would be a
     // new instruction in front of the same store.
-    if (rhs && (rhs->type == AST_BINOP ||
+    if (rhs && (rhs->type == AST_BINOP || rhs->type == AST_CAST ||
                 (rhs->type == AST_UNARY && rhs->op &&
                  (rhs->op[0] == '-' || rhs->op[0] == '~') && !rhs->op[1]))) {
         s = expr_ty(cg, rhs);
@@ -5531,7 +5552,7 @@ static int gen_embedded_array(Codegen* cg, AstNode* field, AstNode* index, AstNo
         return 1;
     }
     if (value) {
-        gen_expr(cg, value);
+        gen_expr(cg, peel_store_cast(value, elem * 8));
         emit(cg, "    push rax\n");
     }
     if (index) gen_expr(cg, index);
@@ -6412,7 +6433,7 @@ static void gen_mem_store(Codegen* cg, AstNode* n) {
         // `*(addr) = 0` must not `mov rax, 0`. The syscall result lives in rax
         // until the next expression that needs the accumulator.
         if (!val || !emit_imm_store(cg, val, mem, sz)) {
-            if (val) gen_expr(cg, val);
+            if (val) gen_expr(cg, peel_store_cast(val, sz * 8));
             emit_acc_store(cg, mem, sz, n->line, n->col);
         }
         return;
@@ -6420,7 +6441,7 @@ static void gen_mem_store(Codegen* cg, AstNode* n) {
     if (addr) gen_expr(cg, addr);
     if (legacy_bits()) emit(cg, "    push eax\n");
     else emit(cg, "    push rax\n");
-    if (val) gen_expr(cg, val);
+    if (val) gen_expr(cg, peel_store_cast(val, sz * 8));
     if (legacy_bits()) emit(cg, "    pop ebx\n");
     else emit(cg, "    pop rbx\n");
     emit_acc_store(cg, legacy_bits() ? "ebx" : "rbx", sz, n->line, n->col);
@@ -7081,7 +7102,7 @@ void gen_expr(Codegen* cg, AstNode* n) {
                     char mem[96];
                     snprintf(mem, sizeof mem, "rbp%d+%s*%d", asym->offset, ireg, el);
                     if (!emit_imm_store(cg, value_expr, mem, el)) {
-                        gen_expr(cg, value_expr);
+                        gen_expr(cg, peel_store_cast(value_expr, el * 8));
                         emit_scaled_store(cg, mem, el, "rax");
                     }
                     return;
@@ -7100,7 +7121,7 @@ void gen_expr(Codegen* cg, AstNode* n) {
                         char mem[128];
                         snprintf(mem, sizeof mem, "%s+%s*%d", gv->name, ireg, el);
                         if (!emit_imm_store(cg, value_expr, mem, el)) {
-                            gen_expr(cg, value_expr);
+                            gen_expr(cg, peel_store_cast(value_expr, el * 8));
                             emit_scaled_store(cg, mem, el, "rax");
                         }
                         return;
@@ -7129,7 +7150,7 @@ void gen_expr(Codegen* cg, AstNode* n) {
                         char mem[96];
                         snprintf(mem, sizeof mem, "rbp%lld+%s*%d", off, ireg, el);
                         if (!emit_imm_store(cg, value_expr, mem, el)) {
-                            gen_expr(cg, value_expr);
+                            gen_expr(cg, peel_store_cast(value_expr, el * 8));
                             emit_scaled_store(cg, mem, el, "rax");
                         }
                         return;
@@ -7148,7 +7169,7 @@ void gen_expr(Codegen* cg, AstNode* n) {
                         char mem[128];
                         snprintf(mem, sizeof mem, "%s%+lld+%s*%d", gv->name, off, ireg, el);
                         if (!emit_imm_store(cg, value_expr, mem, el)) {
-                            gen_expr(cg, value_expr);
+                            gen_expr(cg, peel_store_cast(value_expr, el * 8));
                             emit_scaled_store(cg, mem, el, "rax");
                         }
                         return;
@@ -7197,8 +7218,14 @@ void gen_expr(Codegen* cg, AstNode* n) {
             }
         }
 
-        // Evaluate value expression and save it
-        gen_expr(cg, value_expr);
+        // Evaluate value expression and save it. A matching `as` is not an
+        // extra trunc: the store below writes only this element's width.
+        {
+            char* et = array_elem_type_name(cg, arr);
+            int bits = 64, sg = 1;
+            if (!et || !int_name(et, &bits, &sg)) bits = 64;
+            gen_expr(cg, peel_store_cast(value_expr, bits));
+        }
         emit(cg, "    push rax\n");  // Save value
 
         // Evaluate index expression
@@ -7373,8 +7400,14 @@ void gen_expr(Codegen* cg, AstNode* n) {
             }
         }
 
-        // Evaluate value expression
-        gen_expr(cg, value_expr);
+        // Evaluate value expression. The field store writes `ft`'s width.
+        {
+            char* rec = obj_record_type(cg, obj);
+            char* ft = rec ? typetab_field_type(cg->types, rec, field_name) : NULL;
+            int bits = 64, sg = 1;
+            if (!ft || !int_name(ft, &bits, &sg)) bits = 64;
+            gen_expr(cg, peel_store_cast(value_expr, bits));
+        }
         emit(cg, "    push rax\n");  // Save value
 
         // Check if object is an array index expression (e.g., arr[0])

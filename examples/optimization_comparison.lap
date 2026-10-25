@@ -8,7 +8,7 @@
 //
 // Luego comparar output.asm para ver las diferencias
 
-fn constant_folding_demo() -> i32 {
+fn constant_folding_demo() -> i64 {
     println("1. Constant Folding (-O1+)");
 
     // Estas operaciones son optimizadas en compile-time
@@ -42,7 +42,7 @@ fn constant_folding_demo() -> i32 {
     return result;
 }
 
-fn strength_reduction_demo(x: i32) -> i32 {
+fn strength_reduction_demo(x: i64) -> i64 {
     println("2. Strength Reduction (-O2)");
 
     // Multiplicaciones por potencias de 2
@@ -100,7 +100,7 @@ fn strength_reduction_demo(x: i32) -> i32 {
     return mult2 + div2 + mod2;
 }
 
-fn complex_expression() -> i32 {
+fn complex_expression() -> i64 {
     println("3. Expresión Compleja");
 
     // Esta expresión se beneficia de ambas optimizaciones
@@ -143,7 +143,7 @@ fn array_indexing() {
     let i = 0;
 
     while (i < 8) {
-        arr[i] = i * 4;  // -O2: i * 4 se convierte en shift
+        arr[i] = (i * 4) as i32;  // -O2: i * 4 se convierte en shift
         i++;
     }
 
@@ -158,7 +158,7 @@ fn array_indexing() {
     println("");
 }
 
-fn main() -> i32 {
+fn main() -> i64 {
     println("=== Comparación de Optimizaciones ===");
     println("");
     println("Compila este programa con diferentes flags:");

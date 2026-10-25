@@ -5,17 +5,17 @@
 bits 16 naked fn _start() {
     ax = 67;
     if (ax == 0) { ax = 1; }
-    *(32768 as *u8) = ax;
+    *(32768 as *u8) = ax as u8;
     outb(1016, *(32768 as *u8));
 
     ax = 79;
     while (ax == 0) { ax = 1; }
-    *(32768 as *u8) = ax;
+    *(32768 as *u8) = ax as u8;
     outb(1016, *(32768 as *u8));
 
     ax = 80;
     *(32768 as *u8) = 0;
-    *(32769 as *u8) = ax;
+    *(32769 as *u8) = ax as u8;
     outb(1016, *(32769 as *u8));
 
     outb(1016, 73);

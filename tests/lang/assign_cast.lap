@@ -1,0 +1,25 @@
+// A wider integer needs `as`. A narrower one promotes. Same width matches.
+fn widen(x: u8) -> i64 {
+    return x;
+}
+
+fn main() -> i64 {
+    let wide = 300;
+    let z: u8 = wide as u8;
+    print_int(z);
+    println("");
+    print_int(widen(z));
+    println("");
+
+    let s: i64 = 0 - 1;
+    let u: u64 = s;
+    print_int(u);
+    println("");
+
+    let bytes: [i8; 2];
+    bytes[0] = 65;
+    let p: *u8 = bytes;
+    print_int(p[0]);
+    println("");
+    return 0;
+}

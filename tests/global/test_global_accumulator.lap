@@ -1,12 +1,12 @@
 // Test 8: Global as accumulator
 let sum = 0;
 
-fn add_value(n: i32) -> i32 {
+fn add_value(n: i64) -> i64 {
     sum = sum + n;
     return sum;
 }
 
-fn main() -> i32 {
+fn main() -> i64 {
     add_value(5);
     add_value(10);
     add_value(15);

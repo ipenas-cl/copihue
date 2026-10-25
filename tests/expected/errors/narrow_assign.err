@@ -1,0 +1,16 @@
+tests/errors/narrow_assign.lap:7:12: error: return value: expected u8, found i64
+      7 |     return n;
+        |            ^
+tests/errors/narrow_assign.lap:16:17: error: expected u8, found i64
+     16 |     let b: u8 = n;
+        |                 ^
+tests/errors/narrow_assign.lap:18:19: error: expected *u16, found *u8
+     18 |     let q: *u16 = p;
+        |                   ^
+tests/errors/narrow_assign.lap:19:13: error: argument 1 of 'take_u8': expected u8, found i64
+     19 |     take_u8(n);
+        |             ^
+tests/errors/narrow_assign.lap:20:14: error: argument 1 of 'take_ptr': expected *u16, found *u8
+     20 |     take_ptr(p);
+        |              ^
+5 errors, compilation failed

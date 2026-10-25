@@ -8,13 +8,13 @@ let SYS_CONNECT = 42;
 let sockaddr: [i8; 16];
 let buffer: [i8; 4096];
 
-fn htons(port: i32) -> i32 {
+fn htons(port: i64) -> i64 {
     let high = port / 256;
     let low = port % 256;
     return (low * 256) + high;
 }
 
-fn main() -> i32 {
+fn main() -> i64 {
     println("Test HTTP Client");
     
     // Create socket
@@ -32,8 +32,8 @@ fn main() -> i32 {
         i++;
     }
     sockaddr[0] = 2;  // AF_INET
-    sockaddr[2] = 8000 / 256;  // sin_port, network byte order
-    sockaddr[3] = 8000 % 256;
+    sockaddr[2] = (8000 / 256) as i8;  // sin_port, network byte order
+    sockaddr[3] = (8000 % 256) as i8;
     sockaddr[4] = 127;  // 127.0.0.1
     sockaddr[5] = 0;
     sockaddr[6] = 0;

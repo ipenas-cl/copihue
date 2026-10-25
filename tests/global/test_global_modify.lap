@@ -1,17 +1,17 @@
 // Test 3: Modify global from multiple functions
 let shared = 100;
 
-fn add_ten() -> i32 {
+fn add_ten() -> i64 {
     shared = shared + 10;
     return shared;
 }
 
-fn subtract_five() -> i32 {
+fn subtract_five() -> i64 {
     shared = shared - 5;
     return shared;
 }
 
-fn main() -> i32 {
+fn main() -> i64 {
     add_ten();      // 110
     add_ten();      // 120
     subtract_five(); // 115

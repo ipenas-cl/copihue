@@ -11,17 +11,17 @@ struct Rectangle {
     height: i32
 }
 
-fn calculate_distance(p1: Point, p2: Point) -> i32 {
+fn calculate_distance(p1: Point, p2: Point) -> i64 {
     let dx = p2.x - p1.x;
     let dy = p2.y - p1.y;
     return dx + dy;  // Manhattan distance
 }
 
-fn area(r: Rectangle) -> i32 {
+fn area(r: Rectangle) -> i64 {
     return r.width * r.height;
 }
 
-fn main() -> i32 {
+fn main() -> i64 {
     println("=== Copihue Struct Demonstration ===");
     println("");
 
