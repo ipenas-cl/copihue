@@ -1,0 +1,19 @@
+// BENCH: arith n=100000000
+// Three accumulators. The multiply-free chain still has independent adds
+// so a register allocator has something to schedule. Values stay in 31 bits.
+fn main() -> i32 {
+    let n = 100000000;
+    let a = 1;
+    let b = 2;
+    let c = 3;
+    let i = 0;
+    while (i < n) {
+        a = (a + b) & 2147483647;
+        b = (b + c) & 2147483647;
+        c = (c + i) & 2147483647;
+        i = i + 1;
+    }
+    print_int(a + b + c);
+    println("");
+    return 0;
+}

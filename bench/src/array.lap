@@ -1,0 +1,33 @@
+// BENCH: array n=100000 rounds=1000
+// Fill an i64 array, then rewrite every element `rounds` times. Checksum
+// is sum of a[i] * (i + 1). The mask keeps every value inside 0..1023.
+fn main() -> i32 {
+    let n = 100000;
+    let rounds = 1000;
+    let a: [i64; 100000];
+    let i = 0;
+    let v = 0;
+    let sum = 0;
+    let round = 0;
+    while (i < n) {
+        a[i] = (i * 3 + 1) & 1023;
+        i = i + 1;
+    }
+    while (round < rounds) {
+        i = 0;
+        while (i < n) {
+            v = a[i];
+            a[i] = (v * 3 + (i & 7) + 1) & 1023;
+            i = i + 1;
+        }
+        round = round + 1;
+    }
+    i = 0;
+    while (i < n) {
+        sum = sum + a[i] * (i + 1);
+        i = i + 1;
+    }
+    print_int(sum);
+    println("");
+    return 0;
+}
