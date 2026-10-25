@@ -74,7 +74,9 @@ The full language reference is in [docs/REFERENCE.md](docs/REFERENCE.md).
 - Hosted built-ins (Linux syscalls): `print`, `println`, `print_int`, `strlen`, `strcmp`, `strcpy`,
   `malloc`/`free`, `open`/`read`/`write`/`close`, `syscall6`, `exit`
 - Freestanding built-ins: `inb/inw/inl`, `outb/outw/outl`, `cli`, `sti`, `hlt`, `pause`, `swapgs`,
-  `lidt`/`lgdt`/`invlpg`, `rdmsr`/`wrmsr`, `set_syscall_stack`, and inline `asm("...")`
+  `lidt`/`lgdt`/`invlpg` (any address expression, including a variable), `rdmsr`/`wrmsr`,
+  `read_cr0`/`read_cr2`/`read_cr3`/`read_cr4`, `write_cr0`/`write_cr3`/`write_cr4`,
+  `set_syscall_stack`, and inline `asm("...")`. The control-register builtins are a compile error in hosted mode
 - Diagnostics in the form `file:line:col: error: ...`, with the source line and a caret. They cover syntax errors,
   undeclared variables, indexing a non-array, unknown struct fields, unknown functions, a call with the wrong
   number of arguments, an interrupt function with the wrong shape, bad escapes, and hosted-only calls in freestanding code
@@ -87,8 +89,8 @@ The full language reference is in [docs/REFERENCE.md](docs/REFERENCE.md).
 | Suite | What it checks |
 |---|---|
 | 135 test programs + 18 examples | compiled at `-O0` and `-O2`, run, and stdout + exit code compared to golden files in `tests/expected/` |
-| 14 error tests | the compiler rejects the program with the exact expected message |
-| 6 freestanding tests | `--freestanding` output has no `_start`/syscalls and assembles; the instruction stream is golden |
+| 15 error tests | the compiler rejects the program with the exact expected message |
+| 8 freestanding tests | `--freestanding` output has no `_start`/syscalls and assembles; the instruction stream is golden |
 | 2 flat-binary tests | `--flat` puts `_start` at offset 0; the raw image matches a golden hexdump |
 | `make net-test` | starts `examples/simple_api_server.lap`, queries it with `curl` and with two Copihue HTTP clients, then stops it |
 
@@ -101,7 +103,7 @@ The full language reference is in [docs/REFERENCE.md](docs/REFERENCE.md).
 - `syscall fn` switches stacks and returns with `sysret`, but it does not program `STAR`, `LSTAR`, or `EFER`. The kernel does that with `wrmsr` (or `asm`) and must call `set_syscall_stack` with a 16-byte-aligned top before any entry. There is no TSS or IST setup.
 - `volatile` is a global scalar that is reloaded and stored on every use, including inside a loop at `-O2`. It is not a memory model: the compiler has no other reordering pass, and `*volatile` does not change how a pointee load is emitted.
 - Indexing a local array emits a hosted bounds-check (`syscall` + `exit`). Freestanding code should index a global array or a pointer. `tests/flat/min_kernel.lap` does it that way.
-- The generated code is simple stack-machine style. `rbx` is scratch, so freestanding callers must not rely on it being preserved. `iretq` and `sysret` are checked by assembling them, not by running them as a Linux process.
+- The generated code is simple stack-machine style. `rbx` is scratch, so freestanding callers must not rely on it being preserved. `iretq`, `sysret`, and moves to or from CR0/CR2/CR3/CR4 are checked by assembling them, not by running them as a Linux process.
 - Linux x86-64 only. There is no way to place a page table at a chosen virtual address except by writing through a pointer.
 
 ## Freestanding mode (kernels)
@@ -136,7 +138,7 @@ interrupt fn timer() {
 
 fn set_gate(n: i64, handler: i64) -> i64 {
     idt[n].off_lo = handler & 0xFFFF;
-    idt[n].sel = 0x08;
+    idt[n].sel = 0x18;
     idt[n].typ = 0x8E;
     idt[n].off_mid = (handler >> 16) & 0xFFFF;
     idt[n].off_hi = handler >> 32;
@@ -144,7 +146,7 @@ fn set_gate(n: i64, handler: i64) -> i64 {
 }
 ```
 
-`set_gate(32, &timer)` then `lidt(&idtr)` installs it. `tests/flat/min_kernel.lap` is a complete `--flat 0x10000` image: it clears the BSS, writes a byte to the serial port, bump-allocates from a global buffer, builds a packed IDT, and defines an interrupt handler and a syscall entry. A `syscall fn` takes the Linux register convention (`rax` = number, `rdi`/`rsi`/`rdx`/`r10`/`r8`/`r9` = arguments), switches to the stack given to `set_syscall_stack`, and returns with `sysret`.
+`set_gate(32, &timer)` then `lidt(&idtr)` installs it. The selector `0x18` is the 64-bit code segment of the AtomicOS bootloader GDT; `0x08` on that loader is 32-bit code and a gate that uses it hangs. `tests/flat/min_kernel.lap` is a complete `--flat 0x10000` image for that GDT, not a generic bootable kernel: it clears the BSS, writes a byte to the serial port, bump-allocates from a global buffer, builds a packed IDT, and defines an interrupt handler and a syscall entry. A `syscall fn` takes the Linux register convention (`rax` = number, `rdi`/`rsi`/`rdx`/`r10`/`r8`/`r9` = arguments), switches to the stack given to `set_syscall_stack`, and returns with `sysret`.
 
 ### Flat binaries (`--flat`)
 

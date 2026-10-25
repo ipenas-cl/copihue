@@ -14,7 +14,7 @@
 
 // ==== NAMING (single place to change when the language is renamed) ====
 #define LANG_NAME     "Copihue"
-#define LANG_VERSION  "0.20.0"
+#define LANG_VERSION  "0.20.1"
 #define COMPILER_BIN  "copihue"
 #define SRC_EXT       ".lap"   /* Lapageria rosea, the copihue */
 #define OLD_SRC_EXT   ".cph"   /* v0.18.x extension, still accepted with a warning */
@@ -1827,6 +1827,29 @@ static int gen_core_builtin(Codegen* cg, AstNode* n) {
         if (n->child_count != 2) { diag_error(n->line, n->col, "wrmsr(msr, value) takes 2 arguments"); return 1; }
         gen_two_args(cg, n);                 // rdx = msr, rax = value
         emit(cg, "    mov rcx, rdx\n    mov rdx, rax\n    shr rdx, 32\n    wrmsr\n");
+        return 1;
+    }
+    // CR0/CR2/CR3/CR4. Reads leave the register in rax (an i64 expression).
+    // Writes take one value and leave that value in rax. Ring 0 only, so
+    // hosted programs get a compile error instead of a faulting instruction.
+    if (!strcmp(f, "read_cr0") || !strcmp(f, "read_cr2") || !strcmp(f, "read_cr3") ||
+        !strcmp(f, "read_cr4")) {
+        if (!g_freestanding) {
+            diag_error(n->line, n->col, "%s() is only available with --freestanding or --flat", f);
+            return 1;
+        }
+        if (n->child_count != 0) { diag_error(n->line, n->col, "%s() takes no arguments", f); return 1; }
+        emit(cg, "    mov rax, cr%c\n", f[7]);
+        return 1;
+    }
+    if (!strcmp(f, "write_cr0") || !strcmp(f, "write_cr3") || !strcmp(f, "write_cr4")) {
+        if (n->child_count != 1) { diag_error(n->line, n->col, "%s(value) takes 1 argument", f); return 1; }
+        gen_expr(cg, n->children[0]);   // also diagnoses a nested read_cr* in hosted mode
+        if (!g_freestanding) {
+            diag_error(n->line, n->col, "%s() is only available with --freestanding or --flat", f);
+            return 1;
+        }
+        emit(cg, "    mov cr%c, rax\n", f[8]);
         return 1;
     }
     if (!strcmp(f, "set_syscall_stack")) {

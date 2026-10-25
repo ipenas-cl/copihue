@@ -1,6 +1,12 @@
 // Smallest kernel surface Copihue can compile on its own: boot, serial,
 // a bump allocator, a packed IDT, an interrupt handler and a syscall entry.
 // Loaded at 0x10000 by a long-mode stub. No hosted runtime.
+//
+// The IDT code selector is 0x18, the 64-bit code segment of the AtomicOS
+// bootloader GDT. That loader's 32-bit code segment is 0x08; a gate that
+// uses 0x08 drops out of 64-bit mode and the image hangs. This binary
+// assumes that GDT is already loaded. It is not a generic bootable kernel
+// and will not run under a loader with a different GDT.
 
 packed struct IdtEntry {
     off_lo: u16,
@@ -50,7 +56,7 @@ syscall fn sys_write(nr: i64, ch: i64, a2: i64, a3: i64, a4: i64, a5: i64) -> i6
 
 fn set_gate(n: i64, handler: i64) -> i64 {
     idt[n].off_lo = handler & 0xFFFF;
-    idt[n].sel = 0x08;
+    idt[n].sel = 0x18;
     idt[n].ist = 0;
     idt[n].typ = 0x8E;
     idt[n].off_mid = (handler >> 16) & 0xFFFF;
