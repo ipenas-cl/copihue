@@ -15,7 +15,7 @@
 
 // ==== NAMING (single place to change when the language is renamed) ====
 #define LANG_NAME     "Copihue"
-#define LANG_VERSION  "0.26.1"
+#define LANG_VERSION  "0.26.2"
 #define COMPILER_BIN  "copihue"
 #define SRC_EXT       ".lap"   /* Lapageria rosea, the copihue */
 #define OLD_SRC_EXT   ".cph"   /* v0.18.x extension, still accepted with a warning */
@@ -497,6 +497,38 @@ void emit(Codegen* cg, const char* fmt, ...);
 // so a nested a[b[i]] still loads the inner element into rax.
 static const char* g_index_dest;
 static int g_index_hit;
+
+// Cold copies of the hosted bounds trap, emitted after the function's ret
+// so the in-range path falls through instead of jumping over the trap.
+static char* g_cold;
+static int g_cold_len;
+static int g_cold_cap;
+
+// Set while the fall-through of a compare means this register is >= 0.
+static const char* g_nonneg_reg;
+
+// The value just loaded for a compare is still in rax. The next identical
+// index load in the taken body reuses it. Compiler-time only.
+static int g_fwd_ok;
+static int g_fwd_hold;
+static char g_fwd_arr[96];
+static char g_fwd_idx[96];
+
+// A callee-saved register that is not a local, saved in the prologue, used
+// to hold a value across a call so the caller does not push it.
+static const char* g_expr_tmp;
+
+// Push/pop frame for a hosted -O2 function that never addresses rbp.
+static int g_slim;
+static int g_slim_pad;
+static int g_slim_nsave;
+static const char* g_slim_save[5];
+
+// Inside a proven `while (i < lim)` the index `i` needs no bounds check.
+static const char* g_proven_idx;
+static long long g_proven_lim;
+static AstNode* g_prev_stmt;
+static int g_strength_busy;
 
 static const char* reg_dword(const char* reg) {
     if (!strcmp(reg, "rax")) return "eax";
@@ -2368,6 +2400,49 @@ void emit(Codegen* cg, const char* fmt, ...) {
 
 int new_label(Codegen* cg) { return cg->label_count++; }
 
+static void cold_emit(const char* fmt, ...) {
+    va_list args;
+    va_start(args, fmt);
+    va_list copy;
+    va_copy(copy, args);
+    int needed = vsnprintf(NULL, 0, fmt, copy);
+    va_end(copy);
+    if (needed < 0) needed = 0;
+    while (g_cold_len + needed + 1 > g_cold_cap) {
+        g_cold_cap = g_cold_cap ? g_cold_cap * 2 : 4096;
+        g_cold = safe_realloc(g_cold, g_cold_cap);
+    }
+    vsnprintf(g_cold + g_cold_len, needed + 1, fmt, args);
+    g_cold_len += needed;
+    va_end(args);
+}
+
+static void cold_flush(Codegen* cg) {
+    if (g_cold && g_cold_len > 0) emit(cg, "%s", g_cold);
+    g_cold_len = 0;
+}
+
+// In-range path falls through. The trap is appended and emitted after ret.
+static void emit_bounds_hot(Codegen* cg, const char* reg, int count, int skip_neg) {
+    int lab = new_label(cg);
+    if (!skip_neg) {
+        emit(cg, "    test %s, %s\n", reg, reg);
+        emit(cg, "    js .Lbounds_error_%d\n", lab);
+    }
+    emit(cg, "    cmp %s, %d\n", reg, count);
+    emit(cg, "    jge .Lbounds_error_%d\n", lab);
+    cold_emit(".Lbounds_error_%d:\n", lab);
+    char* err_msg = strtab_add(cg->strtab, "Array bounds error\\n", 19);
+    cold_emit("    mov rsi, %s\n", err_msg);
+    cold_emit("    mov rdx, 19\n");
+    cold_emit("    mov rdi, 2\n");
+    cold_emit("    mov rax, 1\n");
+    cold_emit("    syscall\n");
+    cold_emit("    mov rdi, 1\n");
+    cold_emit("    mov rax, 60\n");
+    cold_emit("    syscall\n");
+}
+
 void gen_expr(Codegen* cg, AstNode* n);
 
 // Load or store `size` bytes at `mem` (a NASM address without brackets).
@@ -3040,9 +3115,54 @@ static void gen_load_callee(Codegen* cg, const char* name) {
     emit(cg, "    xor rbx, rbx\n");
 }
 
+static int can_place(Codegen* cg, AstNode* n, const char* dest);
+static void place_in(Codegen* cg, AstNode* n, const char* dest);
+
+static int node_has_call(AstNode* n) {
+    if (!n) return 0;
+    if (n->type == AST_CALL) return 1;
+    for (int i = 0; i < n->child_count; i++)
+        if (node_has_call(n->children[i])) return 1;
+    return 0;
+}
+
+// How many callee-saved temps are live at once to hold a value across a call.
+static int expr_tmp_depth(AstNode* n) {
+    if (!n) return 0;
+    if (n->type == AST_BINOP && n->child_count == 2) {
+        int ld = expr_tmp_depth(n->children[0]);
+        int rd = expr_tmp_depth(n->children[1]);
+        if (node_has_call(n->children[1])) {
+            int need = 1 + rd;
+            return ld > need ? ld : need;
+        }
+        return ld > rd ? ld : rd;
+    }
+    int m = 0;
+    for (int i = 0; i < n->child_count; i++) {
+        int d = expr_tmp_depth(n->children[i]);
+        if (d > m) m = d;
+    }
+    return m;
+}
+
+// Hosted -O2: each argument can be placed straight into its register.
+// -O0 and freestanding keep the push/pop sequence below.
+static int args_all_direct(Codegen* cg, AstNode* n, int argc) {
+    static const char* regs[] = {"rdi", "rsi", "rdx", "rcx", "r8", "r9"};
+    if (!o2_hosted() || argc > 6) return 0;
+    for (int i = 0; i < argc; i++) {
+        if (is_struct_value_arg(cg, n->children[i])) return 0;
+        if (!can_place(cg, n->children[i], regs[i])) return 0;
+    }
+    return 1;
+}
+
 // User-function call. Six or fewer register arguments keep the historical
-// push/pop sequence so existing programs generate the same instructions.
-// Further arguments follow the System V stack convention (7th at [rbp+16]).
+// push/pop sequence at -O0 and in freestanding mode. Hosted -O2 places a
+// simple argument in rdi..r9 directly. The syscall instruction and
+// syscall()/syscall6() are not this path. Further arguments follow the
+// System V stack convention (7th at [rbp+16]).
 static void gen_user_call(Codegen* cg, AstNode* n, int indirect) {
     const char* regs[] = {"rdi", "rsi", "rdx", "rcx", "r8", "r9"};
     int argc = n->child_count;
@@ -3063,6 +3183,12 @@ static void gen_user_call(Codegen* cg, AstNode* n, int indirect) {
                 check_user_args(cg, n, fn);
             }
         }
+    }
+    if (!indirect && argc <= 6 && args_all_direct(cg, n, argc)) {
+        for (int i = 0; i < argc; i++)
+            place_in(cg, n->children[i], regs[i]);
+        emit(cg, "    call %s\n", n->name);
+        return;
     }
     if (!indirect && argc <= 6) {
         for (int i = 0; i < argc; i++) {
@@ -3877,6 +4003,16 @@ void gen_array_index(Codegen* cg, AstNode* n) {
     const char* want = g_index_dest;
     g_index_dest = NULL;
     AstNode* arr = n->children[0];
+    AstNode* ixn = (n->child_count > 1) ? n->children[1] : NULL;
+    if (g_fwd_ok && arr && arr->type == AST_IDENT && arr->name && ixn &&
+        ixn->type == AST_IDENT && ixn->name &&
+        !strcmp(arr->name, g_fwd_arr) && !strcmp(ixn->name, g_fwd_idx)) {
+        g_fwd_ok = 0;
+        if (want && strcmp(want, "rax") != 0) emit(cg, "    mov %s, rax\n", want);
+        if (want) g_index_hit = 1;
+        return;
+    }
+    g_fwd_ok = 0;
     check_indexable(cg, arr);
 
     // Handle field access indexing: lex.source[i]
@@ -4123,7 +4259,15 @@ void gen_array_index(Codegen* cg, AstNode* n) {
         // Bounds checking. idxreg is non-NULL only at hosted -O2; the rax
         // text is what -O0 and freestanding already emit.
         const char* breg = idxreg ? idxreg : "rax";
-        if (sym->size > 0 && !g_freestanding) {
+        int proven = o2_hosted() && g_proven_idx && n->children[1] &&
+            n->children[1]->type == AST_IDENT && n->children[1]->name &&
+            !strcmp(n->children[1]->name, g_proven_idx) &&
+            g_proven_lim >= 0 && (long long)array_count >= g_proven_lim;
+        if (!proven && sym->size > 0 && !g_freestanding) {
+            if (o2_hosted()) {
+                int skip_neg = g_nonneg_reg && !strcmp(g_nonneg_reg, breg);
+                emit_bounds_hot(cg, breg, array_count, skip_neg);
+            } else {
             int ok_label = new_label(cg);
 
             emit(cg, "    test %s, %s\n", breg, breg);
@@ -4145,6 +4289,7 @@ void gen_array_index(Codegen* cg, AstNode* n) {
             emit(cg, "    syscall\n");
 
             emit(cg, ".Lbounds_ok_%d:\n", ok_label);
+            }
         }
 
         // base + index*scale in one instruction when the element size is a
@@ -4843,6 +4988,17 @@ static void place_ordered_k(Codegen* cg, const char* op, AstNode* left, AstNode*
         // imul dest, src, imm32 is one instruction. A power of two never
         // reaches here: place_k already turned it into shl.
         OpLeaf Ls;
+        // lea rdi, [r12-1] is one instruction. add is shorter when dest is
+        // already the source (`i = i + 1`).
+        if ((op[0] == '+' || (op[0] == '-' && !op[1])) && R.kind == 3 &&
+            scalar_leaf(cg, left, &Ls) && Ls.kind == 1 && strcmp(Ls.reg, dest) != 0) {
+            long long d = op[0] == '-' ? -R.imm : R.imm;
+            if (d >= -2147483648LL && d <= 2147483647LL) {
+                if (d == 0) emit(cg, "    mov %s, %s\n", dest, Ls.reg);
+                else emit(cg, "    lea %s, [%s%+lld]\n", dest, Ls.reg, d);
+                return;
+            }
+        }
         if (op[0] == '*' && R.kind == 3 && scalar_leaf(cg, left, &Ls) && Ls.kind == 1) {
             emit(cg, "    imul %s, %s, %lld\n", dest, Ls.reg, R.imm);
             return;
@@ -5229,8 +5385,37 @@ static void gen_mem_store(Codegen* cg, AstNode* n) {
     emit_acc_store(cg, legacy_bits() ? "ebx" : "rbx", sz, n->line, n->col);
 }
 
+// ident, ident+imm, or ident-imm already in a register. add is the
+// constant added to the register. Bare idents return 0 so the existing
+// path keeps its text.
+static int parse_index_disp(Codegen* cg, AstNode* ix, const char** reg, long long* add) {
+    if (!ix || !reg || !add) return 0;
+    if (ix->type != AST_BINOP || !ix->op || ix->child_count != 2) return 0;
+    if (!(ix->op[0] == '+' || (ix->op[0] == '-' && !ix->op[1])) || ix->op[1]) return 0;
+    AstNode* a = ix->children[0];
+    AstNode* b = ix->children[1];
+    AstNode* id = NULL;
+    AstNode* num = NULL;
+    int neg = ix->op[0] == '-';
+    if (a && a->type == AST_IDENT && b && b->type == AST_NUMBER) { id = a; num = b; }
+    else if (!neg && b && b->type == AST_IDENT && a && a->type == AST_NUMBER) { id = b; num = a; }
+    else return 0;
+    long long v = 0;
+    if (!parse_i64(num->value, &v)) return 0;
+    Symbol* s = symtab_lookup_symbol(cg->symtab, id->name);
+    const char* r = local_reg(s);
+    if (!r) return 0;
+    *reg = r;
+    *add = neg ? -v : v;
+    if (*add < -4194304 || *add > 4194304) return 0;
+    return *add != 0;
+}
+
 void gen_expr(Codegen* cg, AstNode* n) {
     if (!n) return;  // Null safety guard
+    // An index load may reuse the value a compare just left in rax.
+    // An array store generates that load as its value expression.
+    if (n->type != AST_INDEX && n->type != AST_ARRAY_ASSIGN) g_fwd_ok = 0;
     if (n->file) focus_file(n->file);
     if (n->type == AST_NUMBER) {
         if (legacy_bits()) emit(cg, "    mov eax, %s\n", n->value);
@@ -5452,7 +5637,24 @@ void gen_expr(Codegen* cg, AstNode* n) {
                 emit(cg, "    mov ebx, eax\n    pop edx\n    pop eax\n");
             } else if (optimization_level >= 2 && !g_freestanding && can_emit_rbx(cg, right))
                 emit_rbx(cg, right);
-            else {
+            else if (o2_hosted() && g_expr_tmp && node_has_call(right) && expr_tmp_depth(right) == 0) {
+                // Left stays in a callee-saved register across the call.
+                // Both calls keep the stack alignment the prologue established.
+                emit(cg, "    mov %s, rax\n", g_expr_tmp);
+                gen_expr(cg, right);
+                if (n->op[0] == '+' || n->op[0] == '*' || n->op[0] == '&' ||
+                    n->op[0] == '|' || n->op[0] == '^')
+                    emit_alu(cg, "rax", n->op, g_expr_tmp, 0, 0);
+                else if (n->op[0] == '-' && !n->op[1]) {
+                    emit(cg, "    sub %s, rax\n", g_expr_tmp);
+                    emit(cg, "    mov rax, %s\n", g_expr_tmp);
+                } else {
+                    emit(cg, "    mov rbx, rax\n");
+                    emit(cg, "    mov rax, %s\n", g_expr_tmp);
+                    emit_binop_rax_rbx(cg, n->op);
+                }
+                return;
+            } else {
                 emit(cg, "    push rax\n");
                 gen_expr(cg, n->children[1]);
                 emit(cg, "    mov rbx, rax\n    pop rax\n");
@@ -5799,6 +6001,50 @@ void gen_expr(Codegen* cg, AstNode* n) {
                         gen_expr(cg, value_expr);
                         char mem[128];
                         snprintf(mem, sizeof mem, "%s+%s*%d", gv->name, ireg, el);
+                        emit_scaled_store(cg, mem, el, "rax");
+                        return;
+                    }
+                }
+            }
+        }
+
+        // a[j+1] is [base+8+j*scale]. The value is computed first. Stores do
+        // not bounds-check; the load of the value still does, as before.
+        if (o2_hosted() && index_expr) {
+            const char* ireg = NULL;
+            long long add = 0;
+            if (parse_index_disp(cg, index_expr, &ireg, &add)) {
+                Symbol* asym = symtab_lookup_symbol(cg->symtab, arr->name);
+                if (asym && !asym->is_pointer) {
+                    int el = 8;
+                    if (asym->type_name) {
+                        if (!strcmp(asym->type_name, "i8") || !strcmp(asym->type_name, "u8")) el = 1;
+                        else if (!strcmp(asym->type_name, "i16") || !strcmp(asym->type_name, "u16")) el = 2;
+                        else if (!strcmp(asym->type_name, "i32") || !strcmp(asym->type_name, "u32")) el = 4;
+                        else if (!strcmp(asym->type_name, "i64") || !strcmp(asym->type_name, "u64")) el = 8;
+                    }
+                    long long off = (long long)asym->offset + add * (long long)el;
+                    if (scale_ok(el) && off >= -2147483648LL && off <= 2147483647LL) {
+                        gen_expr(cg, value_expr);
+                        char mem[96];
+                        snprintf(mem, sizeof mem, "rbp%lld+%s*%d", off, ireg, el);
+                        emit_scaled_store(cg, mem, el, "rax");
+                        return;
+                    }
+                }
+                GlobalVar* gv = global_symtab_lookup(cg->global_symtab, arr->name);
+                if (gv && gv->is_array) {
+                    int el = 1;
+                    if (gv->elem_type) {
+                        if (!strcmp(gv->elem_type, "i32") || !strcmp(gv->elem_type, "u32")) el = 4;
+                        else if (!strcmp(gv->elem_type, "i64") || !strcmp(gv->elem_type, "u64")) el = 8;
+                        else if (!strcmp(gv->elem_type, "i16") || !strcmp(gv->elem_type, "u16")) el = 2;
+                    }
+                    long long off = add * (long long)el;
+                    if (scale_ok(el) && off >= -2147483648LL && off <= 2147483647LL) {
+                        gen_expr(cg, value_expr);
+                        char mem[128];
+                        snprintf(mem, sizeof mem, "%s%+lld+%s*%d", gv->name, off, ireg, el);
                         emit_scaled_store(cg, mem, el, "rax");
                         return;
                     }
@@ -6368,7 +6614,18 @@ static void emit_reg_restore(Codegen* cg) {
 }
 
 static void emit_hosted_epilogue(Codegen* cg) {
+    if (g_slim) {
+        // The pushes are the only frame. Early-out jumped here before them.
+        if (g_slim_pad) emit(cg, "    add rsp, 8\n");
+        for (int i = g_slim_nsave - 1; i >= 0; i--)
+            emit(cg, "    pop %s\n", g_slim_save[i]);
+        emit(cg, "    ret\n");
+        return;
+    }
     emit_reg_restore(cg);
+    if (g_expr_tmp)
+        emit(cg, "    mov %s, [rbp - __frame_%s + %d]\n",
+             g_expr_tmp, g_fn_name, 8 * (g_reg_callee_n + 1));
     emit(cg, "    leave\n    ret\n");
 }
 
@@ -6501,15 +6758,587 @@ static EarlyRet match_early_ret(Codegen* cg, AstNode* fn) {
 
 void gen_stmt(Codegen* cg, AstNode* n);
 
+static int regplan_has(const char* name) {
+    if (!name) return 0;
+    for (int i = 0; i < g_reg_local_n; i++)
+        if (g_reg_local_var[i][0] && !strcmp(g_reg_local_var[i], name)) return 1;
+    return 0;
+}
+
+// A value can_emit_rbx can put in rbx, judged before the symtab exists:
+// a reg-plan local, a scalar global, a number, or an alu whose right is a leaf.
+static int slim_leaf(Codegen* cg, AstNode* n) {
+    if (!n) return 0;
+    if (n->type == AST_NUMBER) return 1;
+    if (n->type == AST_UNARY && n->op && n->child_count == 1 &&
+        (n->op[0] == '-' || n->op[0] == '!' || n->op[0] == '~'))
+        return slim_leaf(cg, n->children[0]);
+    if (n->type != AST_IDENT || !n->name) return 0;
+    if (regplan_has(n->name)) return 1;
+    GlobalVar* gv = global_symtab_lookup(cg->global_symtab, n->name);
+    return gv && !gv->is_array && !gv->is_pointer;
+}
+
+static int slim_rbx(Codegen* cg, AstNode* n) {
+    if (!n) return 0;
+    if (slim_leaf(cg, n)) return 1;
+    if (n->type == AST_UNARY && n->op && n->child_count == 1 &&
+        (n->op[0] == '-' || n->op[0] == '!' || n->op[0] == '~'))
+        return slim_rbx(cg, n->children[0]);
+    if (n->type == AST_BINOP && n->op && n->child_count == 2 &&
+        n->op[0] != '/' && n->op[0] != '%')
+        return slim_rbx(cg, n->children[0]) && slim_leaf(cg, n->children[1]);
+    return 0;
+}
+
+// Direct user call whose arguments place into rdi..r9 with no push.
+static int slim_call_shape(Codegen* cg, AstNode* n) {
+    if (!n || n->type != AST_CALL || !n->name || !strcmp(n->name, "asm")) return 0;
+    AstNode* fn = find_func(cg, n->name);
+    if (!fn) return 0;
+    int argc = n->child_count;
+    int want = fn->child_count - 1;
+    if (argc != want || argc > 6) return 0;
+    for (int i = 0; i < argc; i++) {
+        AstNode* arg = n->children[i];
+        AstNode* p = fn->children[i];
+        if (!arg || node_has_call(arg)) return 0;
+        if (p && p->value && typetab_lookup(cg->types, p->value)) return 0;
+        if (!slim_rbx(cg, arg)) return 0;
+    }
+    return 1;
+}
+
+// 1 if generating this expression would push. A slim frame has no matching pop.
+static int expr_pushes(Codegen* cg, AstNode* n) {
+    if (!n) return 0;
+    if (n->type == AST_INDEX || n->type == AST_ADDR_OF || n->type == AST_DEREF ||
+        n->type == AST_FIELD_ACCESS || n->type == AST_STRING || n->type == AST_CAST ||
+        n->type == AST_ARRAY_LITERAL || n->type == AST_STRUCT_LITERAL ||
+        n->type == AST_ARRAY_ASSIGN || n->type == AST_FIELD_ASSIGN)
+        return 1;
+    if (n->type == AST_CALL) {
+        if (!slim_call_shape(cg, n)) return 1;
+        for (int i = 0; i < n->child_count; i++)
+            if (expr_pushes(cg, n->children[i])) return 1;
+        return 0;
+    }
+    if ((n->type == AST_BINOP || n->type == AST_COMPARE) && n->child_count == 2) {
+        AstNode* R = n->children[1];
+        int leaves = n->type == AST_COMPARE && slim_leaf(cg, n->children[0]) && slim_leaf(cg, R);
+        if (!leaves) {
+            if (node_has_call(R)) {
+                if (!(g_expr_tmp && expr_tmp_depth(R) == 0)) return 1;
+            } else if (!slim_rbx(cg, R)) return 1;
+        }
+    }
+    for (int i = 0; i < n->child_count; i++)
+        if (expr_pushes(cg, n->children[i])) return 1;
+    return 0;
+}
+
+static int slim_stmt_ok(Codegen* cg, AstNode* n) {
+    if (!n) return 1;
+    if (n->type == AST_BLOCK) {
+        for (int i = 0; i < n->child_count; i++)
+            if (!slim_stmt_ok(cg, n->children[i])) return 0;
+        return 1;
+    }
+    if (n->type == AST_RETURN) {
+        if (n->child_count == 0) return 1;
+        return !expr_pushes(cg, n->children[0]);
+    }
+    if (n->type == AST_LET) {
+        if ((n->flags & AF_VOLATILE) || n->is_pointer || n->struct_type) return 0;
+        if (!regplan_has(n->name)) return 0;
+        if (n->child_count > 0 && expr_pushes(cg, n->children[0])) return 0;
+        return 1;
+    }
+    if (n->type == AST_ASSIGN) {
+        if (!regplan_has(n->name)) return 0;
+        return n->child_count > 0 && !expr_pushes(cg, n->children[0]);
+    }
+    if (n->type == AST_IF) {
+        if (n->flags & AF_CARRY) return 0;
+        for (int i = 0; i < n->child_count; i++) {
+            if (i == 0) { if (expr_pushes(cg, n->children[0])) return 0; }
+            else if (!slim_stmt_ok(cg, n->children[i])) return 0;
+        }
+        return 1;
+    }
+    if (n->type == AST_WHILE) {
+        if (n->child_count < 1 || expr_pushes(cg, n->children[0])) return 0;
+        for (int i = 1; i < n->child_count; i++)
+            if (!slim_stmt_ok(cg, n->children[i])) return 0;
+        return 1;
+    }
+    if (n->type == AST_BREAK || n->type == AST_CONTINUE) return 1;
+    if (n->type == AST_CALL) return !expr_pushes(cg, n);
+    return 0;
+}
+
+// Push/pop frame only when the body never addresses rbp and never pushes.
+static void prepare_frame(Codegen* cg, AstNode* fn) {
+    g_expr_tmp = NULL;
+    g_slim = 0;
+    g_slim_pad = 0;
+    g_slim_nsave = 0;
+    if (!o2_hosted() || !fn || g_reg_asm || fn->child_count < 1) return;
+    int pc = fn->child_count - 1;
+    AstNode* body = fn->children[pc];
+    int depth = expr_tmp_depth(body);
+    if (depth >= 1 && g_reg_callee_n < MAX_REG_CALLEE)
+        g_expr_tmp = g_reg_local_name[g_reg_callee_n];
+    if (pc > 6) return;
+    for (int i = 0; i < pc; i++) {
+        AstNode* p = fn->children[i];
+        if (!p || !p->name || p->is_pointer) return;
+        if (p->value && typetab_lookup(cg->types, p->value)) return;
+        if (!regplan_has(p->name)) return;
+    }
+    if (depth > 1 || (depth >= 1 && !g_expr_tmp)) return;
+    if (!slim_stmt_ok(cg, body)) return;
+    g_slim = 1;
+    int nsave = 0;
+    if (g_expr_tmp) g_slim_save[nsave++] = g_expr_tmp;
+    for (int i = 0; i < g_reg_callee_n && nsave < 5; i++)
+        g_slim_save[nsave++] = g_reg_local_name[i];
+    g_slim_nsave = nsave;
+    // Entry rsp ≡ 8. An even number of pushes leaves rsp ≡ 8; one pad makes ≡ 0.
+    g_slim_pad = (nsave % 2 == 0);
+}
+
+static const char* fail_jcc_sw(const char* op, int swapped) {
+    const char* t = jcc_when_true(op, swapped);
+    if (!t) return NULL;
+    if (!strcmp(t, "je")) return "jne";
+    if (!strcmp(t, "jne")) return "je";
+    if (!strcmp(t, "jl")) return "jge";
+    if (!strcmp(t, "jge")) return "jl";
+    if (!strcmp(t, "jg")) return "jle";
+    if (!strcmp(t, "jle")) return "jg";
+    return NULL;
+}
+
+// Fall-through means this register is >= 0. Only a scalar compare, not an index.
+static const char* nonneg_reg_of(Codegen* cg, AstNode* n) {
+    if (!n || n->type != AST_COMPARE || n->child_count != 2 || !n->op) return NULL;
+    AstNode* a = n->children[0];
+    AstNode* b = n->children[1];
+    const char* id = NULL;
+    if (a && a->type == AST_IDENT && b && b->type == AST_NUMBER) {
+        long long v;
+        if (!parse_i64(b->value, &v)) return NULL;
+        if (!((!strcmp(n->op, ">=") && v == 0) || (!strcmp(n->op, ">") && v == -1))) return NULL;
+        id = a->name;
+    } else if (b && b->type == AST_IDENT && a && a->type == AST_NUMBER) {
+        long long v;
+        if (!parse_i64(a->value, &v)) return NULL;
+        if (!((!strcmp(n->op, "<=") && v == 0) || (!strcmp(n->op, "<") && v == -1))) return NULL;
+        id = b->name;
+    } else return NULL;
+    Symbol* s = id ? symtab_lookup_symbol(cg->symtab, (char*)id) : NULL;
+    return local_reg(s);
+}
+
+static int cond_cmp_ok(Codegen* cg, AstNode* n) {
+    if (!n || n->type != AST_COMPARE || !n->op || !cmp_fail_jcc(n->op) || n->child_count != 2)
+        return 0;
+    AstNode* a = n->children[0];
+    AstNode* b = n->children[1];
+    int ai = a && a->type == AST_INDEX;
+    int bi = b && b->type == AST_INDEX;
+    if (ai && bi) return 0;
+    if (!ai && !bi) {
+        OpLeaf L, R;
+        return scalar_leaf(cg, a, &L) && scalar_leaf(cg, b, &R);
+    }
+    OpLeaf L;
+    return scalar_leaf(cg, ai ? b : a, &L);
+}
+
+static int can_branch_cond(Codegen* cg, AstNode* n) {
+    if (!n || legacy_bits()) return 0;
+    if (n->type == AST_LOGICAL && n->op && n->child_count == 2 &&
+        (!strcmp(n->op, "&&") || !strcmp(n->op, "||")))
+        return can_branch_cond(cg, n->children[0]) && can_branch_cond(cg, n->children[1]);
+    return cond_cmp_ok(cg, n);
+}
+
+static void emit_cond_fail(Codegen* cg, AstNode* n, int fail_lab);
+static void emit_cond_succeed(Codegen* cg, AstNode* n, int ok_lab);
+
+static void note_fwd_index(AstNode* ix) {
+    g_fwd_ok = 0;
+    if (!ix || ix->child_count < 2) return;
+    AstNode* arr = ix->children[0];
+    AstNode* id = ix->children[1];
+    if (!arr || arr->type != AST_IDENT || !arr->name) return;
+    if (!id || id->type != AST_IDENT || !id->name) return;
+    if (strlen(arr->name) >= sizeof g_fwd_arr || strlen(id->name) >= sizeof g_fwd_idx) return;
+    snprintf(g_fwd_arr, sizeof g_fwd_arr, "%s", arr->name);
+    snprintf(g_fwd_idx, sizeof g_fwd_idx, "%s", id->name);
+    g_fwd_ok = 1;
+}
+
+static void emit_branch_cmp(Codegen* cg, AstNode* n, int lab, int succeed) {
+    g_fwd_ok = 0;
+    AstNode* a = n->children[0];
+    AstNode* b = n->children[1];
+    int ai = a && a->type == AST_INDEX;
+    int bi = b && b->type == AST_INDEX;
+    int swapped = 0;
+    if (!ai && !bi) {
+        emit_cmp_raw(cg, n);
+    } else {
+        AstNode* ix = ai ? a : b;
+        AstNode* leaf = ai ? b : a;
+        const char* saved = g_index_dest;
+        g_index_dest = NULL;
+        gen_array_index(cg, ix);
+        g_index_dest = saved;
+        note_fwd_index(ix);
+        OpLeaf L;
+        scalar_leaf(cg, leaf, &L);
+        if (ai || L.kind == 3) {
+            if (!ai) swapped = 1;
+            if (L.kind == 3) emit(cg, "    cmp rax, %lld\n", L.imm);
+            else if (L.kind == 1) emit(cg, "    cmp rax, %s\n", L.reg);
+            else emit(cg, "    cmp rax, [%s]%s\n", L.mem, L.vol ? "  ; volatile" : "");
+        } else if (L.kind == 1) {
+            emit(cg, "    cmp %s, rax\n", L.reg);
+        } else {
+            emit(cg, "    cmp qword [%s], rax%s\n", L.mem, L.vol ? "  ; volatile" : "");
+        }
+    }
+    const char* jcc = succeed ? jcc_when_true(n->op, swapped) : fail_jcc_sw(n->op, swapped);
+    emit(cg, "    %s .L%d\n", jcc, lab);
+}
+
+static void emit_cond_fail(Codegen* cg, AstNode* n, int fail_lab) {
+    if (n->type == AST_LOGICAL && n->op && !strcmp(n->op, "&&")) {
+        emit_cond_fail(cg, n->children[0], fail_lab);
+        const char* nn = nonneg_reg_of(cg, n->children[0]);
+        const char* saved = g_nonneg_reg;
+        if (nn) g_nonneg_reg = nn;
+        emit_cond_fail(cg, n->children[1], fail_lab);
+        g_nonneg_reg = saved;
+        return;
+    }
+    if (n->type == AST_LOGICAL && n->op && !strcmp(n->op, "||")) {
+        int ok = new_label(cg);
+        emit_cond_succeed(cg, n->children[0], ok);
+        emit_cond_fail(cg, n->children[1], fail_lab);
+        emit(cg, ".L%d:\n", ok);
+        return;
+    }
+    emit_branch_cmp(cg, n, fail_lab, 0);
+}
+
+static void emit_cond_succeed(Codegen* cg, AstNode* n, int ok_lab) {
+    if (n->type == AST_LOGICAL && n->op && !strcmp(n->op, "||")) {
+        emit_cond_succeed(cg, n->children[0], ok_lab);
+        emit_cond_succeed(cg, n->children[1], ok_lab);
+        return;
+    }
+    if (n->type == AST_LOGICAL && n->op && !strcmp(n->op, "&&")) {
+        int fail = new_label(cg);
+        emit_cond_fail(cg, n->children[0], fail);
+        emit_cond_succeed(cg, n->children[1], ok_lab);
+        emit(cg, ".L%d:\n", fail);
+        return;
+    }
+    emit_branch_cmp(cg, n, ok_lab, 1);
+}
+
+static int num_eq(AstNode* n, long long want) {
+    long long v;
+    return n && n->type == AST_NUMBER && n->value && parse_i64(n->value, &v) && v == want;
+}
+
+static int is_plus_one(AstNode* n, const char* name) {
+    if (!n || n->type != AST_ASSIGN || !n->name || !name || strcmp(n->name, name)) return 0;
+    if (n->child_count != 1 || !n->children[0]) return 0;
+    AstNode* e = n->children[0];
+    if (e->type != AST_BINOP || !e->op || e->op[0] != '+' || e->op[1] || e->child_count != 2)
+        return 0;
+    AstNode* a = e->children[0];
+    AstNode* b = e->children[1];
+    int aid = a && a->type == AST_IDENT && a->name && !strcmp(a->name, name);
+    int bid = b && b->type == AST_IDENT && b->name && !strcmp(b->name, name);
+    return (aid && num_eq(b, 1)) || (bid && num_eq(a, 1));
+}
+
+static void count_writes(AstNode* n, const char* name, int* nw) {
+    if (!n || !name) return;
+    if ((n->type == AST_LET || n->type == AST_ASSIGN) && n->name && !strcmp(n->name, name))
+        (*nw)++;
+    for (int i = 0; i < n->child_count; i++) count_writes(n->children[i], name, nw);
+}
+
+static void tally_defs(AstNode* n, const char* name, long long* val, int* nconst, int* nother) {
+    if (!n || !name) return;
+    if ((n->type == AST_LET || n->type == AST_ASSIGN) && n->name && !strcmp(n->name, name)) {
+        AstNode* e = n->child_count == 1 ? n->children[0] : NULL;
+        long long v = 0;
+        if (e && e->type == AST_NUMBER && parse_i64(e->value, &v)) {
+            *val = v;
+            (*nconst)++;
+        } else (*nother)++;
+    }
+    for (int i = 0; i < n->child_count; i++)
+        tally_defs(n->children[i], name, val, nconst, nother);
+}
+
+static int indexes_are(AstNode* n, const char* name) {
+    if (!n) return 1;
+    if (n->type == AST_CALL || n->type == AST_ADDR_OF) return 0;
+    if (n->type == AST_INDEX || n->type == AST_ARRAY_ASSIGN) {
+        AstNode* ix = n->child_count > 1 ? n->children[1] : NULL;
+        if (!ix || ix->type != AST_IDENT || !ix->name || strcmp(ix->name, name)) return 0;
+    }
+    for (int i = 0; i < n->child_count; i++)
+        if (!indexes_are(n->children[i], name)) return 0;
+    return 1;
+}
+
+static int arrays_fit(Codegen* cg, AstNode* n, long long lim) {
+    if (!n) return 1;
+    if ((n->type == AST_INDEX || n->type == AST_ARRAY_ASSIGN) && n->children &&
+        n->children[0] && n->children[0]->type == AST_IDENT && n->children[0]->name) {
+        Symbol* s = symtab_lookup_symbol(cg->symtab, n->children[0]->name);
+        if (s && s->is_array && !s->is_pointer && (long long)s->size < lim) return 0;
+    }
+    for (int i = 0; i < n->child_count; i++)
+        if (!arrays_fit(cg, n->children[i], lim)) return 0;
+    return 1;
+}
+
+static int nonneg_init(AstNode* st, const char* name) {
+    if (!st || !st->name || !name || strcmp(st->name, name)) return 0;
+    if (st->type != AST_ASSIGN && st->type != AST_LET) return 0;
+    if (st->child_count != 1 || !st->children[0] || st->children[0]->type != AST_NUMBER) return 0;
+    long long v;
+    return parse_i64(st->children[0]->value, &v) && v >= 0;
+}
+
+// `i = C` (C >= 0) immediately before `while (i < lim)` whose body only
+// increments i by 1 and indexes with i, and every local array is at least lim.
+static int match_proven(Codegen* cg, AstNode* prev, AstNode* wh, const char** idx, long long* lim) {
+    if (!wh || wh->type != AST_WHILE || wh->child_count != 2) return 0;
+    AstNode* cond = wh->children[0];
+    AstNode* body = wh->children[1];
+    if (!cond || cond->type != AST_COMPARE || !cond->op || strcmp(cond->op, "<") || cond->child_count != 2)
+        return 0;
+    if (!cond->children[0] || cond->children[0]->type != AST_IDENT || !cond->children[0]->name)
+        return 0;
+    const char* name = cond->children[0]->name;
+    AstNode* rhs = cond->children[1];
+    long long bound = -1;
+    if (rhs && rhs->type == AST_NUMBER) {
+        if (!parse_i64(rhs->value, &bound) || bound < 0) return 0;
+    } else if (rhs && rhs->type == AST_IDENT && rhs->name) {
+        long long v = 0;
+        int nc = 0, no = 0;
+        tally_defs(g_cur_fn, rhs->name, &v, &nc, &no);
+        if (nc != 1 || no != 0 || v < 0) return 0;
+        bound = v;
+    } else return 0;
+    if (!nonneg_init(prev, name)) return 0;
+    if (!body || body->type != AST_BLOCK || body->child_count < 1) return 0;
+    if (!is_plus_one(body->children[body->child_count - 1], name)) return 0;
+    for (int i = 0; i < body->child_count - 1; i++) {
+        int w = 0;
+        count_writes(body->children[i], name, &w);
+        if (w) return 0;
+    }
+    if (!indexes_are(body, name) || !arrays_fit(cg, body, bound)) return 0;
+    *idx = name;
+    *lim = bound;
+    return 1;
+}
+
+// a[i*n+k] or a[k*n+j]: (+ (* ident ident) ident), array is an ident.
+typedef struct {
+    int ok;
+    char arr[96];
+    char addend[96];
+    char f0[96];
+    char f1[96];
+} MadIx;
+
+static int mad_copy(char* dst, int cap, const char* s) {
+    if (!s || !s[0] || (int)strlen(s) >= cap) return 0;
+    snprintf(dst, cap, "%s", s);
+    return 1;
+}
+
+static int parse_mad(AstNode* ix, MadIx* m) {
+    memset(m, 0, sizeof *m);
+    if (!ix || ix->type != AST_INDEX || ix->child_count < 2) return 0;
+    AstNode* arr = ix->children[0];
+    AstNode* e = ix->children[1];
+    if (!arr || arr->type != AST_IDENT || !e || e->type != AST_BINOP || !e->op ||
+        e->op[0] != '+' || e->op[1] || e->child_count != 2)
+        return 0;
+    AstNode* mul = NULL;
+    AstNode* add = NULL;
+    if (e->children[0] && e->children[0]->type == AST_BINOP && e->children[0]->op &&
+        e->children[0]->op[0] == '*' && !e->children[0]->op[1]) {
+        mul = e->children[0];
+        add = e->children[1];
+    } else if (e->children[1] && e->children[1]->type == AST_BINOP && e->children[1]->op &&
+               e->children[1]->op[0] == '*' && !e->children[1]->op[1]) {
+        mul = e->children[1];
+        add = e->children[0];
+    } else return 0;
+    if (!mul || mul->child_count != 2 || !add || add->type != AST_IDENT) return 0;
+    if (!mul->children[0] || mul->children[0]->type != AST_IDENT) return 0;
+    if (!mul->children[1] || mul->children[1]->type != AST_IDENT) return 0;
+    if (!mad_copy(m->arr, 96, arr->name) || !mad_copy(m->addend, 96, add->name) ||
+        !mad_copy(m->f0, 96, mul->children[0]->name) ||
+        !mad_copy(m->f1, 96, mul->children[1]->name))
+        return 0;
+    m->ok = 1;
+    return 1;
+}
+
+static int i64_arr(Symbol* s, long long need) {
+    if (!s || !s->is_array || s->is_pointer || !s->type_name) return 0;
+    if (strcmp(s->type_name, "i64") && strcmp(s->type_name, "u64")) return 0;
+    if ((long long)s->size < need) return 0;
+    if (s->array_len > 0 && (long long)s->array_len < need) return 0;
+    return 1;
+}
+
+static const char* distinct_reg(Codegen* cg, const char* name, const char** prev, int nprev) {
+    if (!name) return NULL;
+    Symbol* s = symtab_lookup_symbol(cg->symtab, (char*)name);
+    const char* r = local_reg(s);
+    if (!r) return NULL;
+    for (int i = 0; i < nprev; i++)
+        if (prev[i] && !strcmp(prev[i], r)) return NULL;
+    return r;
+}
+
+// `k = 0; while (k < n) { s = s + a[i*n+k] * b[k*n+j]; k = k + 1; }`
+// with n a sole positive constant and both arrays at least n*n. The fast
+// path keeps two running pointers. A failed i/j guard runs the original loop.
+static int try_strength_dot(Codegen* cg, AstNode* wh) {
+    if (g_strength_busy || !o2_hosted() || !wh || wh->type != AST_WHILE || wh->child_count != 2)
+        return 0;
+    AstNode* prev = g_prev_stmt;
+    AstNode* cond = wh->children[0];
+    AstNode* body = wh->children[1];
+    if (!cond || cond->type != AST_COMPARE || !cond->op || strcmp(cond->op, "<") || cond->child_count != 2)
+        return 0;
+    if (!cond->children[0] || cond->children[0]->type != AST_IDENT || !cond->children[0]->name)
+        return 0;
+    if (!cond->children[1] || cond->children[1]->type != AST_IDENT || !cond->children[1]->name)
+        return 0;
+    const char* kname = cond->children[0]->name;
+    const char* nname = cond->children[1]->name;
+    if (!nonneg_init(prev, kname) || !num_eq(prev->children[0], 0)) return 0;
+    if (!body || body->type != AST_BLOCK || body->child_count != 2) return 0;
+    if (!is_plus_one(body->children[1], kname)) return 0;
+    AstNode* st = body->children[0];
+    if (!st || st->type != AST_ASSIGN || !st->name || st->child_count != 1) return 0;
+    AstNode* e = st->children[0];
+    if (!e || e->type != AST_BINOP || !e->op || e->op[0] != '+' || e->op[1] || e->child_count != 2)
+        return 0;
+    AstNode* prod = NULL;
+    if (e->children[0] && e->children[0]->type == AST_IDENT && e->children[0]->name &&
+        !strcmp(e->children[0]->name, st->name))
+        prod = e->children[1];
+    else if (e->children[1] && e->children[1]->type == AST_IDENT && e->children[1]->name &&
+             !strcmp(e->children[1]->name, st->name))
+        prod = e->children[0];
+    else return 0;
+    if (!prod || prod->type != AST_BINOP || !prod->op || prod->op[0] != '*' || prod->op[1] ||
+        prod->child_count != 2)
+        return 0;
+    MadIx m1, m2;
+    if (!parse_mad(prod->children[0], &m1) || !parse_mad(prod->children[1], &m2)) return 0;
+    MadIx* ak = NULL;
+    MadIx* bk = NULL;
+    if (!strcmp(m1.addend, kname) && (strcmp(m2.f0, kname) == 0 || strcmp(m2.f1, kname) == 0)) {
+        ak = &m1; bk = &m2;
+    } else if (!strcmp(m2.addend, kname) && (strcmp(m1.f0, kname) == 0 || strcmp(m1.f1, kname) == 0)) {
+        ak = &m2; bk = &m1;
+    } else return 0;
+    const char* nb = !strcmp(bk->f0, kname) ? bk->f1 : bk->f0;
+    if (!strcmp(bk->f0, kname) == !strcmp(bk->f1, kname)) return 0;
+    if (strcmp(nb, nname)) return 0;
+    const char* iname = !strcmp(ak->f0, nname) ? ak->f1 : ak->f0;
+    if (!strcmp(ak->f0, nname) == !strcmp(ak->f1, nname)) return 0;
+    const char* jname = bk->addend;
+    const char* sname = st->name;
+    if (!strcmp(iname, nname) || !strcmp(iname, jname) || !strcmp(iname, kname) ||
+        !strcmp(iname, sname) || !strcmp(nname, jname) || !strcmp(nname, kname) ||
+        !strcmp(nname, sname) || !strcmp(jname, kname) || !strcmp(jname, sname) ||
+        !strcmp(kname, sname))
+        return 0;
+    long long N = 0;
+    int nc = 0, no = 0;
+    tally_defs(g_cur_fn, nname, &N, &nc, &no);
+    if (nc != 1 || no != 0 || N <= 0 || N > 1000000) return 0;
+    long long need = N * N;
+    Symbol* sa = symtab_lookup_symbol(cg->symtab, ak->arr);
+    Symbol* sb = symtab_lookup_symbol(cg->symtab, bk->arr);
+    if (!i64_arr(sa, need) || !i64_arr(sb, need)) return 0;
+    const char* got[5] = {0, 0, 0, 0, 0};
+    const char* ri = distinct_reg(cg, iname, got, 0);
+    got[0] = ri;
+    const char* rj = distinct_reg(cg, jname, got, 1);
+    got[1] = rj;
+    const char* rk = distinct_reg(cg, kname, got, 2);
+    got[2] = rk;
+    const char* rn = distinct_reg(cg, nname, got, 3);
+    got[3] = rn;
+    const char* rs = distinct_reg(cg, sname, got, 4);
+    if (!ri || !rj || !rk || !rn || !rs) return 0;
+    int top = new_label(cg);
+    int slow = new_label(cg);
+    int end = new_label(cg);
+    emit(cg, "    test %s, %s\n    js .L%d\n", ri, ri, slow);
+    emit(cg, "    cmp %s, %s\n    jge .L%d\n", ri, rn, slow);
+    emit(cg, "    test %s, %s\n    js .L%d\n", rj, rj, slow);
+    emit(cg, "    cmp %s, %s\n    jge .L%d\n", rj, rn, slow);
+    emit(cg, "    mov rax, %s\n    imul rax, %s\n", ri, rn);
+    emit(cg, "    lea rdi, [rbp%lld+rax*8]\n", (long long)sa->offset);
+    emit(cg, "    lea rsi, [rbp%lld+%s*8]\n", (long long)sb->offset, rj);
+    emit(cg, "    mov rcx, %s\n    shl rcx, 3\n", rn);
+    emit(cg, ".L%d:\n", top);
+    emit(cg, "    cmp %s, %s\n    jge .L%d\n", rk, rn, end);
+    emit(cg, "    mov rax, [rdi]\n    mov rbx, [rsi]\n    imul rax, rbx\n");
+    emit(cg, "    add %s, rax\n", rs);
+    emit(cg, "    add rdi, 8\n    add rsi, rcx\n    add %s, 1\n", rk);
+    emit(cg, "    jmp .L%d\n", top);
+    emit(cg, ".L%d:\n", slow);
+    g_strength_busy = 1;
+    gen_stmt(cg, wh);
+    g_strength_busy = 0;
+    emit(cg, ".L%d:\n", end);
+    return 1;
+}
+
 void gen_stmt(Codegen* cg, AstNode* n) {
     if (!n) return;  // Null safety
+    int keep = g_fwd_hold;
+    g_fwd_hold = 0;
+    if (!keep) g_fwd_ok = 0;
+    g_nonneg_reg = NULL;
     if (n->file) focus_file(n->file);
     if (n->type == AST_BLOCK) {
         // Names declared here hide outer ones and disappear at the closing brace.
         symtab_enter(cg->symtab);
         for (int i = 0; i < n->child_count; i++) {
-            gen_stmt(cg, n->children[i]);
+            g_prev_stmt = i > 0 ? n->children[i - 1] : NULL;
+            if (keep && i == 0) g_fwd_hold = 1;
+            if (!(o2_hosted() && try_strength_dot(cg, n->children[i])))
+                gen_stmt(cg, n->children[i]);
         }
+        g_prev_stmt = NULL;
         symtab_leave(cg->symtab);
         return;
     }
@@ -6699,6 +7528,16 @@ void gen_stmt(Codegen* cg, AstNode* n) {
             if (n->child_count > 1)
                 gen_stmt(cg, n->children[1]);
             emit(cg, ".L%d:\n", end_lab);
+        } else if (o2_hosted() && can_branch_cond(cg, n->children[0])) {
+            g_fwd_ok = 0;
+            emit_cond_fail(cg, n->children[0], else_lab);
+            g_nonneg_reg = NULL;
+            g_fwd_hold = 1;
+            gen_stmt(cg, n->children[1]);
+            emit(cg, "    jmp .L%d\n.L%d:\n", end_lab, else_lab);
+            if (n->child_count > 2)
+                gen_stmt(cg, n->children[2]);
+            emit(cg, ".L%d:\n", end_lab);
         } else {
             gen_expr(cg, n->children[0]);
             if (legacy_bits()) emit(cg, "    test eax, eax\n    jz .L%d\n", else_lab);
@@ -6714,24 +7553,35 @@ void gen_stmt(Codegen* cg, AstNode* n) {
         int end_lab = new_label(cg);
         int cont_lab = new_label(cg);
         emit(cg, ".L%d:\n", start_lab);
+        int branched = 0;
         if (legacy_bits()) {
             gen_expr(cg, n->children[0]);
             emit(cg, "    test eax, eax\n    jz .L%d\n", end_lab);
+        } else if (o2_hosted() && can_branch_cond(cg, n->children[0])) {
+            g_fwd_ok = 0;
+            emit_cond_fail(cg, n->children[0], end_lab);
+            g_nonneg_reg = NULL;
+            branched = 1;
         } else {
-            const char* jcc = NULL;
-            int direct = o2_hosted() && n->children[0] && n->children[0]->type == AST_COMPARE &&
-                (jcc = cmp_fail_jcc(n->children[0]->op)) && emit_cmp_raw(cg, n->children[0]);
-            if (direct) emit(cg, "    %s .L%d\n", jcc, end_lab);
-            else {
-                gen_expr(cg, n->children[0]);
-                emit(cg, "    test rax, rax\n    jz .L%d\n", end_lab);
-            }
+            gen_expr(cg, n->children[0]);
+            emit(cg, "    test rax, rax\n    jz .L%d\n", end_lab);
         }
         if (g_loop_depth >= MAX_LOOP_DEPTH) { diag_error(n->line, n->col, "loops nested too deeply"); return; }
         g_loop_break[g_loop_depth] = end_lab;
         g_loop_cont[g_loop_depth] = cont_lab;
         g_loop_depth++;
+        const char* save_idx = g_proven_idx;
+        long long save_lim = g_proven_lim;
+        const char* pidx = NULL;
+        long long plim = -1;
+        if (o2_hosted() && match_proven(cg, g_prev_stmt, n, &pidx, &plim)) {
+            g_proven_idx = pidx;
+            g_proven_lim = plim;
+        }
+        if (branched) g_fwd_hold = 1;
         gen_stmt(cg, n->children[1]);
+        g_proven_idx = save_idx;
+        g_proven_lim = save_lim;
         g_loop_depth--;
         emit(cg, ".L%d:\n", cont_lab);
         if (n->child_count > 2)  // for-loop increment, its own block
@@ -6832,6 +7682,17 @@ static void bind_param(Codegen* cg, AstNode* par, const char* src_reg, int stack
 void gen_func(Codegen* cg, AstNode* n) {
     g_reg_local_n = 0;
     g_reg_callee_n = 0;
+    g_slim = 0;
+    g_slim_pad = 0;
+    g_slim_nsave = 0;
+    g_expr_tmp = NULL;
+    g_fwd_ok = 0;
+    g_fwd_hold = 0;
+    g_nonneg_reg = NULL;
+    g_proven_idx = NULL;
+    g_proven_lim = -1;
+    g_prev_stmt = NULL;
+    g_strength_busy = 0;
     if (!n || !n->name) return;  // Null safety
     if (n->file) focus_file(n->file);
     int param_count = n->child_count - 1;
@@ -6921,22 +7782,34 @@ void gen_func(Codegen* cg, AstNode* n) {
     } else {
         if (optimization_level >= 2 && !g_freestanding)
             plan_reg_locals(cg, n);
+        prepare_frame(cg, n);
         EarlyRet early = match_early_ret(cg, n);
         if (early.ok) {
             if (early.imm_rhs) emit(cg, "    cmp %s, %lld\n", early.lhs, early.imm);
             else emit(cg, "    cmp %s, %s\n", early.lhs, early.rhs);
             emit(cg, "    %s .Lbase_%s\n", early.jcc, n->name);
         }
-        emit(cg, "    push rbp\n    mov rbp, rsp\n");
-        // Frame size is only known after the body is generated: use a NASM
-        // forward-referenced constant defined after the function.
-        emit(cg, "    sub rsp, __frame_%s\n", n->name);
-        // Callee-saved r12-r15 live in the frame's spare bytes, below the locals.
-        // r10 and r11 are not saved: a local is placed there only when no
-        // call falls inside its live range.
-        for (int i = 0; i < g_reg_callee_n; i++)
-            emit(cg, "    mov [rbp - __frame_%s + %d], %s\n",
-                 n->name, 8 * (i + 1), g_reg_local_name[i]);
+        if (g_slim) {
+            // No rbp. Callee-saved regs (and the call temp) are pushed.
+            // The early-out above jumped before these pushes.
+            for (int i = 0; i < g_slim_nsave; i++)
+                emit(cg, "    push %s\n", g_slim_save[i]);
+            if (g_slim_pad) emit(cg, "    sub rsp, 8\n");
+        } else {
+            emit(cg, "    push rbp\n    mov rbp, rsp\n");
+            // Frame size is only known after the body is generated: use a NASM
+            // forward-referenced constant defined after the function.
+            emit(cg, "    sub rsp, __frame_%s\n", n->name);
+            // Callee-saved r12-r15 live in the frame's spare bytes, below the locals.
+            // r10 and r11 are not saved: a local is placed there only when no
+            // call falls inside its live range. The call temp, if any, is next.
+            for (int i = 0; i < g_reg_callee_n; i++)
+                emit(cg, "    mov [rbp - __frame_%s + %d], %s\n",
+                     n->name, 8 * (i + 1), g_reg_local_name[i]);
+            if (g_expr_tmp)
+                emit(cg, "    mov [rbp - __frame_%s + %d], %s\n",
+                     n->name, 8 * (g_reg_callee_n + 1), g_expr_tmp);
+        }
     }
 
     const char* regs[] = {"rdi", "rsi", "rdx", "rcx", "r8", "r9"};
@@ -7001,8 +7874,12 @@ void gen_func(Codegen* cg, AstNode* n) {
         VTy dst_ty = ty_decl(cg, 1, g_cur_fn->is_pointer, g_cur_fn->value);
         check_types(ret->children[0], "return value", dst_ty, expr_ty(cg, ret->children[0]));
     }
-    for (int i = body_from; i < body->child_count; i++)
-        gen_stmt(cg, body->children[i]);
+    for (int i = body_from; i < body->child_count; i++) {
+        g_prev_stmt = i > 0 ? body->children[i - 1] : NULL;
+        if (!(o2_hosted() && try_strength_dot(cg, body->children[i])))
+            gen_stmt(cg, body->children[i]);
+    }
+    g_prev_stmt = NULL;
     symtab_leave(cg->symtab);
 
     if (is_int) {
@@ -7046,8 +7923,15 @@ void gen_func(Codegen* cg, AstNode* n) {
             emit(cg, "    mov rax, %s\n    ret\n", early_tail.ret_reg);
         }
     }
+    cold_flush(cg);
     g_reg_local_n = 0;
     g_reg_callee_n = 0;
+    g_slim = 0;
+    g_expr_tmp = NULL;
+    g_proven_idx = NULL;
+    g_nonneg_reg = NULL;
+    g_fwd_ok = 0;
+    g_fwd_hold = 0;
 
     // All locals (including nested-scope ones) are now known.
     if (!naked) {
