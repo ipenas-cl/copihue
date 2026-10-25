@@ -361,6 +361,16 @@ else
   fi
 fi
 
+# Hosted -O2: byte copy, byte bump, and a power-of-two struct walk.
+if ! ( cd "$WORK" && "$CC" -O2 -S -o o2mem.asm "$ROOT/tests/lang/o2_mem.lap" >/dev/null 2>err.txt ); then
+  fail=$((fail+1)); failed+=("o2_mem asm"); echo "FAIL o2_mem asm:"; cat "$WORK/err.txt"
+elif ! grep -q 'rep movsb' "$WORK/o2mem.asm" || ! grep -q 'paddb' "$WORK/o2mem.asm" || \
+     ! grep -q 'shl rax, 4' "$WORK/o2mem.asm"; then
+  fail=$((fail+1)); failed+=("o2_mem asm"); echo "FAIL o2_mem asm: rewrite missing"
+else
+  pass=$((pass+1))
+fi
+
 rm -f "$CC"
 echo
 echo "passed: $pass  failed: $fail"
