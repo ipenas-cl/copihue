@@ -6,7 +6,7 @@ El bloque `Lbounds_error_*` (8 instrucciones, `syscall` de salida) no está en e
 
 El bucle que se cuenta es el más interno de cada programa. En `sort` es una vuelta del desplazamiento en que `j >= 0` y `a[j] > key` salen verdaderas. En la criba es `while (j < limit) { flags[j] = 0; j = j + i; }`. `fib` cuenta el camino `n >= 2` desde la entrada de `fib` hasta el primer `ret` de ese camino, sin el bloque del caso base. No se contaron invocaciones en ejecución.
 
-Los ocho binarios `-O2` de este bench, compilados con 0.26.0, coinciden byte a byte con los de 0.25.1. La columna 0.25.1 es esa corrida (muestras 2026-10-25 15:01:14 UTC — 15:01:54 UTC). La columna 0.26.2 es el generador de la tabla de esta página.
+Los ocho binarios `-O2` de este bench, compilados con 0.26.0, coinciden byte a byte con los de 0.25.1. La columna 0.25.1 es esa corrida (muestras 2026-10-25 15:01:14 UTC — 15:01:54 UTC). La columna 0.26.2 es la ventana 2026-10-25 16:06:58 UTC — 16:07:36 UTC. La tabla de tiempos de esta página es la medición de 0.27.2 (el binario de esa ventana se identificaba como 0.26.3).
 
 | Programa | Bucle contado | 0.25.1 ins (push / pop / `mov rbx,rax` / cargas / stores / `call`) | 0.26.2 |
 |---|---|---|---|
@@ -33,7 +33,7 @@ En `fib` el camino `n >= 2` es `cmp rdi, 2; jl .Lbase_fib; push r13; push r12; s
 
 ## Antes y después, mismo `make bench`
 
-Dos corridas distintas, la misma máquina y las mismas versiones de gcc, rustc, ocamlopt, nasm y ld que la tabla de arriba. Copihue 0.25.1: muestras 2026-10-25 15:01:14 UTC — 15:01:54 UTC. Este generador: muestras 2026-10-25 16:06:58 UTC — 16:07:36 UTC, que son las de la tabla de esta página. En esa ventana el binario se identificaba como 0.26.1; main ya usó ese número, y el release es 0.26.2. Los ocho binarios `-O2` de 0.26.2 coinciden con los medidos. Mediana de Copihue en milisegundos (mínimo–máximo). El cociente es 0.25.1 / 0.26.2.
+Dos corridas distintas, la misma máquina y las mismas versiones de gcc, rustc, ocamlopt, nasm y ld que la tabla de arriba. Copihue 0.25.1: muestras 2026-10-25 15:01:14 UTC — 15:01:54 UTC. Copihue 0.26.2: muestras 2026-10-25 16:06:58 UTC — 16:07:36 UTC. Esa ventana no es la tabla de tiempos de esta página; la tabla de arriba es la medición de 0.27.2. En la ventana 0.26.2 el binario se identificaba como 0.26.1; main ya usó ese número, y el release es 0.26.2. Los ocho binarios `-O2` de 0.26.2 coinciden con los medidos ahí. Mediana de Copihue en milisegundos (mínimo–máximo). El cociente es 0.25.1 / 0.26.2.
 
 | Programa | 0.25.1 | 0.26.2 | 0.25.1 / 0.26.2 |
 |---|---:|---:|---:|
@@ -55,3 +55,49 @@ En la ventana 0.26.2, con rangos que no se solapan: `sort` queda por debajo de O
 En `array`, el local tardó 57.5 ms (57.0–57.8) y el global 45.6 ms (45.4–45.9). Los rangos no se solapan. La diferencia es 11.9 ms. En la corrida 0.25.1 era 66.5 contra 45.5 (45.3–45.6), 21.0 ms. El global casi no se movió. Quitar el chequeo del bucle interno bajó el local; no explica todo el hueco que queda.
 
 `-O0`, `--freestanding`, `--flat` y `--boot`, incluido `tests/usermode`, generan el mismo código que 0.26.1. En hosted `-O0` el ensamblado de estos ocho programas coincide con 0.26.1 salvo la línea de versión. `bits 16` y `bits 32` no entran en estas reescrituras.
+
+## 0.26.2 → 0.26.3
+
+Misma máquina y las mismas versiones de gcc, rustc, ocamlopt, nasm y ld. Copihue 0.26.2: muestras 2026-10-25 16:06:58 UTC — 16:07:36 UTC. La medición de este cambio: muestras 2026-10-25 17:00:28 UTC — 17:01:04 UTC, que son las de la tabla de esta página. En esa ventana el binario se identificaba como 0.26.3. main ya usó 0.27.0 para los structs y 0.27.1 para el cambio de contexto, y el release de este cambio es 0.27.2. El ensamblado `-O2` de los ocho programas coincide con el medido, salvo la línea de versión. Mediana de Copihue en milisegundos (mínimo–máximo). El cociente es 0.26.2 / esta medición.
+
+| Programa | 0.26.2 | 0.26.3 | 0.26.2 / 0.26.3 |
+|---|---:|---:|---:|
+| `fib` | 394.3 (393.5–395.2) | 393.2 (392.8–393.4) | 1.00 |
+| `sieve` | 82.3 (82.1–82.5) | 69.6 (69.4–70.0) | 1.18 |
+| `matmul` | 46.8 (46.4–47.1) | 46.5 (46.4–48.5) | 1.01 |
+| `arith` | 67.6 (66.9–71.6) | 67.0 (66.8–67.3) | 1.01 |
+| `chain` | 166.7 (166.4–167.8) | 166.6 (166.3–168.8) | 1.00 |
+| `fold` | 142.1 (141.8–142.7) | 1.6 (1.1–2.5) | 88.81 |
+| `array` | 57.5 (57.0–57.8) | 57.0 (56.7–57.6) | 1.01 |
+| `sort` | 78.3 (78.1–78.4) | 78.0 (77.7–78.2) | 1.00 |
+
+`arith`, `fib`, `matmul`, `chain`, `array` y `sort` son el mismo binario que en 0.26.2. Sus medianas se solapan, salvo `fib`: 392.8–393.4 contra 393.5–395.2, un hueco de 0.1 ms entre ventanas. El código no cambió; no es una mejora de este compilador. `sieve` y `fold` sí cambiaron, y sus rangos no se solapan con los de 0.26.2.
+
+El bucle contado es el mismo de la tabla de arriba. En 0.26.3:
+
+| Programa | 0.26.2 ins | 0.26.3 |
+|---|---|---|
+| `arith` | 10 | 10, el mismo binario |
+| `fold` | 7 | no hay bucle: dos `mov` del total |
+| `chain` | 11 | 11, el mismo binario |
+| `array` | 12 | 12, el mismo binario |
+| `matmul` | 10 | 10, el mismo binario |
+| `sieve` | 6 | 5 (0 / 0 / 0 / 0 / 1 / 0) |
+| `sort` | 10 | 10, el mismo binario |
+| `fib` | 16 | 16, el mismo binario |
+
+En `sieve` el marcado es `cmp r13, r14; jge; mov byte [rbp-3200016+r13*1], 0; add r13, r12; jmp`. Cinco instrucciones: el `mov rax, 0` desapareció. El llenado de `flags` ya no es un bucle por elemento. Es `lea rdi, [rbp-3200016]; mov rcx, 400000; mov al, 1; rep stosb`, y después `mov byte [rbp-3200016], 0` y `mov byte [rbp-3200015], 0`. `i * i < limit` sigue materializando 0/1 y el `imul` de afuera se repite: no hay eliminación de esa subexpresión. El bucle de marcado no se desenrolló.
+
+En `fold` el cuerpo es `mov r13, 374999999750000000; mov r12, 500000000`. No hay `imul` ni salto de vuelta. El decimal está en el `.s`, igual que en gcc y en rustc. Una suma que puede envolver, un coeficiente con los dos signos, o un `i * i`, conserva el bucle.
+
+`text` según `size`, bytes, 0.26.2 → 0.26.3: `sieve` 707 → 682, `fold` 386 → 380. Los otros seis no cambian (`fib` 385, `matmul` 1028, `arith` 435, `chain` 406, `array` 588, `sort` 701).
+
+En la ventana 0.26.3, con rangos que no se solapan salvo donde se dice: `fold` queda en 1.6 ms (1.1–2.5) y se solapa con C (1.3–1.9) y con Rust (1.3–2.1). No queda por debajo de esos dos; el resto es arrancar el proceso. Queda por debajo de OCaml (211.4–256.3). `sieve` baja de 82.3 ms a 69.6 ms (69.4–70.0). Contra C (70.0–70.4) los rangos se tocan en 70.0; el cociente de medianas es 0.99 y no se puede decir que queda por debajo de C. Sigue por encima de Rust (42.8–43.6; cociente 1.62) y por debajo de OCaml (127.8–128.6). `fib` sigue en 3.00× C (392.8–393.4 contra 130.5–131.2), por encima de Rust (193.4–194.0) y de OCaml (365.3–366.0). El prólogo de `n >= 2` ya era de 16 instrucciones y no se tocó. `arith` se solapa con OCaml (66.8–67.3 contra 66.3–66.9) y queda por encima de C (59.2–59.8) y de Rust (55.2–56.1). `matmul` queda por debajo de Rust (46.4–48.5 contra 50.2–51.0) y de OCaml (77.6–78.5), y por encima de C (31.8–32.6). `array` queda por debajo de OCaml (56.7–57.6 contra 58.3–59.2) y por encima de C (42.0–49.7) y de Rust (32.9–35.6). `sort` queda por debajo de OCaml (77.7–78.2 contra 153.6–154.4) y por encima de C (73.2–73.9) y de Rust (52.9–53.3). `chain` queda por debajo de los tres (166.3–168.8 contra C 187.3–187.6, Rust 182.1–183.0 y OCaml 187.2–189.7). El binario es el de 0.25.1, y esto es esta fila y estas corridas.
+
+Se midió invertir el `while` (un chequeo al entrar y un salto tomado al volver) en la ventana 2026-10-25 16:52:01 UTC — 16:52:37 UTC. En `arith` la mediana pasó de 67.6 ms (66.9–71.6) a 73.4 ms (70.7–74.6). Los rangos se tocan en 70.7–71.6. `fib` no se movió. Esa inversión no está en 0.26.3. La ventana de arriba es sin ella.
+
+No se reescribió el árbol de llamadas de `fib`. No hay inlining: en estos ocho programas la función caliente no llama a otra función pequeña no recursiva dentro del bucle (`print_int` queda fuera; `fib` es recursiva). No se desenrolló el marcado ni `arith`: el paso `j = j + i` no tiene un resto demostrado sin desborde. Un módulo por una constante que no es potencia de dos sigue en `idiv`; `*` `/` `%` por potencias de dos ya estaban en 0.26.2.
+
+En `array`, el local tardó 57.0 ms (56.7–57.6) y el global 45.2 ms (45.0–45.5). Los rangos no se solapan. La diferencia es 11.8 ms. El binario de `array` es el de 0.26.2.
+
+`-O0`, `--freestanding`, `--flat` y `--boot`, incluido `tests/usermode`, generan el mismo código que 0.26.2, salvo la línea de versión. `bits 16` y `bits 32` no entran en estas reescrituras.

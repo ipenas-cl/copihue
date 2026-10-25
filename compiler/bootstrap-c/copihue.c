@@ -11,11 +11,12 @@
 #include <stdarg.h>
 #include <ctype.h>
 #include <errno.h>
+#include <limits.h>
 #include <math.h>
 
 // ==== NAMING (single place to change when the language is renamed) ====
 #define LANG_NAME     "Copihue"
-#define LANG_VERSION  "0.27.1"
+#define LANG_VERSION  "0.27.2"
 #define COMPILER_BIN  "copihue"
 #define SRC_EXT       ".lap"   /* Lapageria rosea, the copihue */
 #define OLD_SRC_EXT   ".cph"   /* v0.18.x extension, still accepted with a warning */
@@ -647,6 +648,7 @@ static const char* g_slim_save[5];
 static const char* g_proven_idx;
 static long long g_proven_lim;
 static AstNode* g_prev_stmt;
+static AstNode* g_prev2_stmt;
 static int g_strength_busy;
 
 static const char* reg_dword(const char* reg) {
@@ -5839,6 +5841,32 @@ static int parse_index_disp(Codegen* cg, AstNode* ix, const char** reg, long lon
     return *add != 0;
 }
 
+// `mov byte/word/dword/qword [mem], imm` when the immediate is exactly the
+// value the store would truncate into that width. A qword immediate is the
+// sign-extended imm32 form, so a larger constant stays on the rax path.
+static int imm_store_enc(int elem, long long v, long long* enc) {
+    if (elem == 1) {
+        if (v < -128 || v > 255) return 0;
+    } else if (elem == 2) {
+        if (v < -32768 || v > 65535) return 0;
+    } else if (elem == 4 || elem == 8) {
+        if (!fits_imm32_val(v)) return 0;
+    } else return 0;
+    *enc = v;
+    return 1;
+}
+
+static int emit_imm_store(Codegen* cg, AstNode* value, const char* mem, int el) {
+    long long v, enc;
+    if (!value || value->type != AST_NUMBER || !parse_i64(value->value, &v)) return 0;
+    if (!imm_store_enc(el, v, &enc)) return 0;
+    if (el == 1) emit(cg, "    mov byte [%s], %lld\n", mem, enc);
+    else if (el == 2) emit(cg, "    mov word [%s], %lld\n", mem, enc);
+    else if (el == 4) emit(cg, "    mov dword [%s], %lld\n", mem, enc);
+    else emit(cg, "    mov qword [%s], %lld\n", mem, enc);
+    return 1;
+}
+
 void gen_expr(Codegen* cg, AstNode* n) {
     if (!n) return;  // Null safety guard
     // An index load may reuse the value a compare just left in rax.
@@ -6423,10 +6451,12 @@ void gen_expr(Codegen* cg, AstNode* n) {
                     else if (!strcmp(asym->type_name, "i64") || !strcmp(asym->type_name, "u64")) el = 8;
                 }
                 if (scale_ok(el)) {
-                    gen_expr(cg, value_expr);
                     char mem[96];
                     snprintf(mem, sizeof mem, "rbp%d+%s*%d", asym->offset, ireg, el);
-                    emit_scaled_store(cg, mem, el, "rax");
+                    if (!emit_imm_store(cg, value_expr, mem, el)) {
+                        gen_expr(cg, value_expr);
+                        emit_scaled_store(cg, mem, el, "rax");
+                    }
                     return;
                 }
             }
@@ -6440,10 +6470,12 @@ void gen_expr(Codegen* cg, AstNode* n) {
                         else if (!strcmp(gv->elem_type, "i16") || !strcmp(gv->elem_type, "u16")) el = 2;
                     }
                     if (scale_ok(el)) {
-                        gen_expr(cg, value_expr);
                         char mem[128];
                         snprintf(mem, sizeof mem, "%s+%s*%d", gv->name, ireg, el);
-                        emit_scaled_store(cg, mem, el, "rax");
+                        if (!emit_imm_store(cg, value_expr, mem, el)) {
+                            gen_expr(cg, value_expr);
+                            emit_scaled_store(cg, mem, el, "rax");
+                        }
                         return;
                     }
                 }
@@ -6467,10 +6499,12 @@ void gen_expr(Codegen* cg, AstNode* n) {
                     }
                     long long off = (long long)asym->offset + add * (long long)el;
                     if (scale_ok(el) && off >= -2147483648LL && off <= 2147483647LL) {
-                        gen_expr(cg, value_expr);
                         char mem[96];
                         snprintf(mem, sizeof mem, "rbp%lld+%s*%d", off, ireg, el);
-                        emit_scaled_store(cg, mem, el, "rax");
+                        if (!emit_imm_store(cg, value_expr, mem, el)) {
+                            gen_expr(cg, value_expr);
+                            emit_scaled_store(cg, mem, el, "rax");
+                        }
                         return;
                     }
                 }
@@ -6484,11 +6518,53 @@ void gen_expr(Codegen* cg, AstNode* n) {
                     }
                     long long off = add * (long long)el;
                     if (scale_ok(el) && off >= -2147483648LL && off <= 2147483647LL) {
-                        gen_expr(cg, value_expr);
                         char mem[128];
                         snprintf(mem, sizeof mem, "%s%+lld+%s*%d", gv->name, off, ireg, el);
-                        emit_scaled_store(cg, mem, el, "rax");
+                        if (!emit_imm_store(cg, value_expr, mem, el)) {
+                            gen_expr(cg, value_expr);
+                            emit_scaled_store(cg, mem, el, "rax");
+                        }
                         return;
+                    }
+                }
+            }
+        }
+
+        // arr[2] = 0 is one immediate store. The index is not in a register,
+        // so the ident and reg±imm paths above do not see it.
+        if (o2_hosted() && index_expr && index_expr->type == AST_NUMBER) {
+            long long ix = 0;
+            if (parse_i64(index_expr->value, &ix) && ix >= 0 && ix <= 2147483647LL) {
+                Symbol* asym = symtab_lookup_symbol(cg->symtab, arr->name);
+                if (asym && asym->is_array && !asym->is_pointer) {
+                    int el = 8;
+                    if (asym->type_name) {
+                        if (!strcmp(asym->type_name, "i8") || !strcmp(asym->type_name, "u8")) el = 1;
+                        else if (!strcmp(asym->type_name, "i16") || !strcmp(asym->type_name, "u16")) el = 2;
+                        else if (!strcmp(asym->type_name, "i32") || !strcmp(asym->type_name, "u32")) el = 4;
+                        else if (!strcmp(asym->type_name, "i64") || !strcmp(asym->type_name, "u64")) el = 8;
+                    }
+                    long long disp = (long long)asym->offset + ix * (long long)el;
+                    if (scale_ok(el) && fits_imm32_val(disp)) {
+                        char mem[96];
+                        snprintf(mem, sizeof mem, "rbp%lld", disp);
+                        if (emit_imm_store(cg, value_expr, mem, el)) return;
+                    }
+                }
+                GlobalVar* gvar = global_symtab_lookup(cg->global_symtab, arr->name);
+                if (gvar && gvar->is_array) {
+                    int el = 1;
+                    if (gvar->elem_type) {
+                        if (!strcmp(gvar->elem_type, "i32") || !strcmp(gvar->elem_type, "u32")) el = 4;
+                        else if (!strcmp(gvar->elem_type, "i64") || !strcmp(gvar->elem_type, "u64")) el = 8;
+                        else if (!strcmp(gvar->elem_type, "i16") || !strcmp(gvar->elem_type, "u16")) el = 2;
+                    }
+                    long long disp = ix * (long long)el;
+                    if (scale_ok(el) && fits_imm32_val(disp)) {
+                        char mem[128];
+                        if (disp == 0) snprintf(mem, sizeof mem, "%s", gvar->name);
+                        else snprintf(mem, sizeof mem, "%s%+lld", gvar->name, disp);
+                        if (emit_imm_store(cg, value_expr, mem, el)) return;
                     }
                 }
             }
@@ -7766,6 +7842,315 @@ static int try_strength_dot(Codegen* cg, AstNode* wh) {
     return 1;
 }
 
+static int i128_fits_i64(__int128 v) {
+    return v >= (__int128)LLONG_MIN && v <= (__int128)LLONG_MAX;
+}
+
+static int name_addr_taken(AstNode* n, const char* name) {
+    if (!n || !name) return 0;
+    if (n->type == AST_ADDR_OF && n->child_count > 0 && n->children[0] &&
+        n->children[0]->type == AST_IDENT && n->children[0]->name &&
+        !strcmp(n->children[0]->name, name))
+        return 1;
+    for (int i = 0; i < n->child_count; i++)
+        if (name_addr_taken(n->children[i], name)) return 1;
+    return 0;
+}
+
+static int calls_asm(AstNode* n) {
+    if (!n) return 0;
+    if (n->type == AST_CALL && n->name && !strcmp(n->name, "asm")) return 1;
+    for (int i = 0; i < n->child_count; i++)
+        if (calls_asm(n->children[i])) return 1;
+    return 0;
+}
+
+static void emit_mov_i64(Codegen* cg, const char* reg, long long v) {
+    if (v == LLONG_MIN) emit(cg, "    mov %s, 0x8000000000000000\n", reg);
+    else emit(cg, "    mov %s, %lld\n", reg, v);
+}
+
+static void emit_set_i64(Codegen* cg, Symbol* s, long long imm, const char* reg) {
+    if (!s) return;
+    const char* rr = local_reg(s);
+    if (reg) {
+        if (rr) {
+            if (strcmp(rr, reg)) emit(cg, "    mov %s, %s\n", rr, reg);
+        } else emit(cg, "    mov [rbp%d], %s\n", s->offset, reg);
+        return;
+    }
+    if (rr) emit_mov_i64(cg, rr, imm);
+    else if (fits_imm32_val(imm)) emit(cg, "    mov qword [rbp%d], %lld\n", s->offset, imm);
+    else {
+        emit_mov_i64(cg, "rax", imm);
+        emit(cg, "    mov [rbp%d], rax\n", s->offset);
+    }
+}
+
+static int const_init_val(AstNode* st, const char* name, long long* v) {
+    if (!st || !name || !st->name || strcmp(st->name, name)) return 0;
+    if (st->type != AST_ASSIGN && st->type != AST_LET) return 0;
+    if (st->child_count != 1 || !st->children[0]) return 0;
+    return st->children[0]->type == AST_NUMBER && parse_i64(st->children[0]->value, v);
+}
+
+static int sole_i64(const char* name, long long* v) {
+    long long val = 0;
+    int nc = 0, no = 0;
+    if (!name || !g_cur_fn) return 0;
+    tally_defs(g_cur_fn, name, &val, &nc, &no);
+    if (nc != 1 || no != 0) return 0;
+    *v = val;
+    return 1;
+}
+
+static int is_add_op(AstNode* e) {
+    return e && e->type == AST_BINOP && e->op && e->op[0] == '+' && !e->op[1] && e->child_count == 2;
+}
+
+static int is_mul_op(AstNode* e) {
+    return e && e->type == AST_BINOP && e->op && e->op[0] == '*' && !e->op[1] && e->child_count == 2;
+}
+
+static int collect_add(AstNode* e, AstNode** t, int* n) {
+    if (is_add_op(e)) {
+        if (!collect_add(e->children[0], t, n)) return 0;
+        if (!collect_add(e->children[1], t, n)) return 0;
+        return 1;
+    }
+    if (*n >= 8) return 0;
+    t[(*n)++] = e;
+    return 1;
+}
+
+// Sum after k trips of (A*i + B), i starting at I0. Exact in __int128, or 0
+// if an intermediate product does not fit there.
+static int acc_sum(__int128 S0, __int128 A, __int128 I0, __int128 B, __int128 k, __int128* out) {
+    __int128 t1, t2, t3, half, sum;
+    if (k == 0) { *out = S0; return 1; }
+    if (__builtin_mul_overflow(A, I0, &t1) || __builtin_mul_overflow(t1, k, &t1)) return 0;
+    if (__builtin_mul_overflow(k, k - 1, &t2)) return 0;
+    half = t2 / 2;
+    if (__builtin_mul_overflow(A, half, &t2) || __builtin_mul_overflow(B, k, &t3)) return 0;
+    if (__builtin_add_overflow(S0, t1, &sum) || __builtin_add_overflow(sum, t2, &sum)) return 0;
+    if (__builtin_add_overflow(sum, t3, &sum)) return 0;
+    *out = sum;
+    return 1;
+}
+
+// Closed form of s = s + A*i + B, i = i + 1, while i < N. Only when every
+// partial sum and every intermediate A*i fits in i64. A positive term added
+// to a non-negative s, or a negative term added to a non-positive s, is
+// monotonic, so the endpoints are enough. Anything else keeps the loop:
+// wrapping is not the mathematical sum.
+static int linear_closed(long long S0, long long A, long long I0, long long B, long long N,
+                         long long* s_out, long long* i_out) {
+    __int128 plo, phi, tlo, thi, total;
+    __int128 i_lo, i_hi, trips;
+    int pos, neg;
+    if ((__int128)I0 >= (__int128)N) {
+        *s_out = S0;
+        *i_out = I0;
+        return 1;
+    }
+    trips = (__int128)N - (__int128)I0;
+    i_lo = I0;
+    i_hi = (__int128)N - 1;
+    if (__builtin_mul_overflow((__int128)A, i_lo, &plo) || !i128_fits_i64(plo)) return 0;
+    if (__builtin_mul_overflow((__int128)A, i_hi, &phi) || !i128_fits_i64(phi)) return 0;
+    if (__builtin_add_overflow(plo, (__int128)B, &tlo) || !i128_fits_i64(tlo)) return 0;
+    if (__builtin_add_overflow(phi, (__int128)B, &thi) || !i128_fits_i64(thi)) return 0;
+    pos = S0 >= 0 && B >= 0 && plo >= 0 && phi >= 0;
+    neg = S0 <= 0 && B <= 0 && plo <= 0 && phi <= 0;
+    if (!pos && !neg) return 0;
+    if (!acc_sum(S0, A, I0, B, trips, &total) || !i128_fits_i64(total)) return 0;
+    *s_out = (long long)total;
+    *i_out = N;
+    return 1;
+}
+
+static void emit_rep_fill(Codegen* cg, int base, const char* count_reg, int have_imm,
+                          long long count, long long bytev) {
+    emit(cg, "    push rdi\n    pushfq\n    cld\n");
+    emit(cg, "    lea rdi, [rbp%d]\n", base);
+    if (have_imm) emit(cg, "    mov rcx, %lld\n", count);
+    else if (!count_reg || strcmp(count_reg, "rcx")) emit(cg, "    mov rcx, %s\n", count_reg);
+    emit(cg, "    mov al, %lld\n", bytev);
+    emit(cg, "    rep stosb\n");
+    emit(cg, "    popfq\n    pop rdi\n");
+}
+
+// `i = 0; while (i < lim) { byte_array[i] = C; i = i + 1; }` with lim in range.
+// One `rep stosb` from element 0. A limit that is not a proven in-range
+// constant is checked at run time; out of range runs the original loop.
+static int try_byte_fill(Codegen* cg, AstNode* wh) {
+    AstNode* cond;
+    AstNode* body;
+    AstNode* st;
+    AstNode* arr;
+    AstNode* ix;
+    AstNode* val;
+    AstNode* rhs;
+    Symbol* asym;
+    Symbol* si;
+    Symbol* lsym = NULL;
+    const char* iname;
+    const char* lreg = NULL;
+    char* et;
+    long long iz = 0, bytev = 0, enc = 0, alen = 0, lim = 0;
+    int known = 0;
+    int slow, end;
+    if (g_strength_busy || !o2_hosted() || !wh || wh->type != AST_WHILE || wh->child_count != 2)
+        return 0;
+    if (calls_asm(g_cur_fn)) return 0;
+    cond = wh->children[0];
+    body = wh->children[1];
+    if (!cond || cond->type != AST_COMPARE || !cond->op || strcmp(cond->op, "<") || cond->child_count != 2)
+        return 0;
+    if (!cond->children[0] || cond->children[0]->type != AST_IDENT || !cond->children[0]->name)
+        return 0;
+    iname = cond->children[0]->name;
+    rhs = cond->children[1];
+    if (!const_init_val(g_prev_stmt, iname, &iz) || iz != 0) return 0;
+    if (!body || body->type != AST_BLOCK || body->child_count != 2) return 0;
+    if (!is_plus_one(body->children[1], iname)) return 0;
+    st = body->children[0];
+    if (!st || st->type != AST_ARRAY_ASSIGN || st->child_count < 3) return 0;
+    arr = st->children[0];
+    ix = st->children[1];
+    val = st->children[2];
+    if (!arr || arr->type != AST_IDENT || !arr->name) return 0;
+    if (!ix || ix->type != AST_IDENT || !ix->name || strcmp(ix->name, iname)) return 0;
+    if (!val || val->type != AST_NUMBER || !parse_i64(val->value, &bytev) || !imm_store_enc(1, bytev, &enc))
+        return 0;
+    asym = symtab_lookup_symbol(cg->symtab, arr->name);
+    if (!asym || !asym->is_array || asym->is_pointer || !asym->type_name) return 0;
+    if (strcmp(asym->type_name, "u8") && strcmp(asym->type_name, "i8")) return 0;
+    if (name_addr_taken(g_cur_fn, arr->name) || name_addr_taken(g_cur_fn, iname)) return 0;
+    si = symtab_lookup_symbol(cg->symtab, (char*)iname);
+    if (!si || si->is_array || si->is_pointer || sym_narrow_int(si)) return 0;
+    alen = asym->array_len > 0 ? asym->array_len : asym->size;
+    if (alen < 0 || !fits_imm32_val(alen)) return 0;
+    if (rhs && rhs->type == AST_NUMBER) {
+        if (!parse_i64(rhs->value, &lim) || lim < 0 || lim > alen) return 0;
+        known = 1;
+    } else if (rhs && rhs->type == AST_IDENT && rhs->name && strcmp(rhs->name, iname)) {
+        if (sole_i64(rhs->name, &lim) && !name_addr_taken(g_cur_fn, rhs->name)) {
+            if (lim < 0 || lim > alen) return 0;
+            known = 1;
+        } else {
+            lsym = symtab_lookup_symbol(cg->symtab, rhs->name);
+            if (!lsym || lsym->is_array || lsym->is_pointer || sym_narrow_int(lsym)) return 0;
+            if (name_addr_taken(g_cur_fn, rhs->name)) return 0;
+            lreg = local_reg(lsym);
+        }
+    } else return 0;
+    et = array_elem_type_name(cg, arr);
+    if (et) check_types(val, "", ty_from_spelled(cg, et), expr_ty(cg, val));
+    if (!known && !lsym) return 0;
+    if (known) {
+        emit_rep_fill(cg, asym->offset, NULL, 1, lim, enc);
+        emit_set_i64(cg, si, lim, NULL);
+        return 1;
+    }
+    slow = new_label(cg);
+    end = new_label(cg);
+    if (lreg) emit(cg, "    mov rbx, %s\n", lreg);
+    else emit(cg, "    mov rbx, [rbp%d]\n", lsym->offset);
+    emit(cg, "    test rbx, rbx\n    js .L%d\n", slow);
+    emit(cg, "    cmp rbx, %lld\n    jg .L%d\n", alen, slow);
+    emit_rep_fill(cg, asym->offset, "rbx", 0, 0, enc);
+    emit_set_i64(cg, si, 0, "rbx");
+    emit(cg, "    jmp .L%d\n", end);
+    emit(cg, ".L%d:\n", slow);
+    g_strength_busy = 1;
+    gen_stmt(cg, wh);
+    g_strength_busy = 0;
+    emit(cg, ".L%d:\n", end);
+    return 1;
+}
+
+// `s = S; i = I; while (i < N) { s = s + A*i + B; i = i + 1; }` when the sum
+// is a proved i64. N, A, B, S and I are constants. A loop that can wrap stays.
+static int try_linear_sum(Codegen* cg, AstNode* wh) {
+    AstNode* cond;
+    AstNode* body;
+    AstNode* st;
+    AstNode* rhs;
+    AstNode* terms[8];
+    Symbol* si;
+    Symbol* ss;
+    const char* iname;
+    long long I0 = 0, S0 = 0, N = 0, sfin = 0, ifin = 0;
+    int nt = 0, ns = 0, ni = 0;
+    __int128 A = 0, B = 0;
+    if (g_strength_busy || !o2_hosted() || !wh || wh->type != AST_WHILE || wh->child_count != 2)
+        return 0;
+    if (calls_asm(g_cur_fn)) return 0;
+    cond = wh->children[0];
+    body = wh->children[1];
+    if (!cond || cond->type != AST_COMPARE || !cond->op || strcmp(cond->op, "<") || cond->child_count != 2)
+        return 0;
+    if (!cond->children[0] || cond->children[0]->type != AST_IDENT || !cond->children[0]->name)
+        return 0;
+    iname = cond->children[0]->name;
+    rhs = cond->children[1];
+    if (rhs && rhs->type == AST_NUMBER) {
+        if (!parse_i64(rhs->value, &N)) return 0;
+    } else if (rhs && rhs->type == AST_IDENT && rhs->name) {
+        if (name_addr_taken(g_cur_fn, rhs->name) || !sole_i64(rhs->name, &N)) return 0;
+    } else return 0;
+    if (!body || body->type != AST_BLOCK || body->child_count != 2) return 0;
+    if (!is_plus_one(body->children[1], iname)) return 0;
+    st = body->children[0];
+    if (!st || st->type != AST_ASSIGN || !st->name || st->child_count != 1 || !st->children[0]) return 0;
+    if (!strcmp(st->name, iname)) return 0;
+    if (!const_init_val(g_prev_stmt, iname, &I0)) return 0;
+    if (!const_init_val(g_prev2_stmt, st->name, &S0)) return 0;
+    if (name_addr_taken(g_cur_fn, iname) || name_addr_taken(g_cur_fn, st->name)) return 0;
+    si = symtab_lookup_symbol(cg->symtab, (char*)iname);
+    ss = symtab_lookup_symbol(cg->symtab, st->name);
+    if (!si || !ss || si->is_array || ss->is_array || si->is_pointer || ss->is_pointer) return 0;
+    if (sym_narrow_int(si) || sym_narrow_int(ss)) return 0;
+    if (!collect_add(st->children[0], terms, &nt)) return 0;
+    for (int i = 0; i < nt; i++) {
+        AstNode* e = terms[i];
+        long long c = 0;
+        if (e && e->type == AST_IDENT && e->name && !strcmp(e->name, st->name)) { ns++; continue; }
+        if (e && e->type == AST_NUMBER && parse_i64(e->value, &c)) { B += c; continue; }
+        if (e && e->type == AST_IDENT && e->name && !strcmp(e->name, iname)) { A += 1; ni++; continue; }
+        if (is_mul_op(e)) {
+            AstNode* a = e->children[0];
+            AstNode* b = e->children[1];
+            long long m = 0;
+            if (a && a->type == AST_IDENT && a->name && !strcmp(a->name, iname) &&
+                b && b->type == AST_NUMBER && parse_i64(b->value, &m)) {
+                A += m; ni++; continue;
+            }
+            if (b && b->type == AST_IDENT && b->name && !strcmp(b->name, iname) &&
+                a && a->type == AST_NUMBER && parse_i64(a->value, &m)) {
+                A += m; ni++; continue;
+            }
+        }
+        return 0;
+    }
+    if (ns != 1 || ni > 1 || !i128_fits_i64(A) || !i128_fits_i64(B)) return 0;
+    if (!linear_closed(S0, (long long)A, I0, (long long)B, N, &sfin, &ifin)) return 0;
+    check_assign_types(cg, st);
+    check_assign_types(cg, body->children[1]);
+    emit_set_i64(cg, ss, sfin, NULL);
+    emit_set_i64(cg, si, ifin, NULL);
+    return 1;
+}
+
+static int try_hosted_rewrite(Codegen* cg, AstNode* n) {
+    if (!o2_hosted()) return 0;
+    if (try_strength_dot(cg, n)) return 1;
+    if (try_byte_fill(cg, n)) return 1;
+    if (try_linear_sum(cg, n)) return 1;
+    return 0;
+}
+
 void gen_stmt(Codegen* cg, AstNode* n) {
     if (!n) return;  // Null safety
     int keep = g_fwd_hold;
@@ -7789,12 +8174,14 @@ void gen_stmt(Codegen* cg, AstNode* n) {
         // Names declared here hide outer ones and disappear at the closing brace.
         symtab_enter(cg->symtab);
         for (int i = 0; i < n->child_count; i++) {
+            g_prev2_stmt = i > 1 ? n->children[i - 2] : NULL;
             g_prev_stmt = i > 0 ? n->children[i - 1] : NULL;
             if (keep && i == 0) g_fwd_hold = 1;
-            if (!(o2_hosted() && try_strength_dot(cg, n->children[i])))
+            if (!try_hosted_rewrite(cg, n->children[i]))
                 gen_stmt(cg, n->children[i]);
         }
         g_prev_stmt = NULL;
+        g_prev2_stmt = NULL;
         symtab_leave(cg->symtab);
         return;
     }
@@ -8040,7 +8427,7 @@ void gen_stmt(Codegen* cg, AstNode* n) {
         g_proven_lim = save_lim;
         g_loop_depth--;
         emit(cg, ".L%d:\n", cont_lab);
-        if (n->child_count > 2)  // for-loop increment, its own block
+        if (n->child_count > 2)
             gen_stmt(cg, n->children[2]);
         emit(cg, "    jmp .L%d\n.L%d:\n", start_lab, end_lab);
     } else if (n->type == AST_BREAK || n->type == AST_CONTINUE) {
@@ -8148,6 +8535,7 @@ void gen_func(Codegen* cg, AstNode* n) {
     g_proven_idx = NULL;
     g_proven_lim = -1;
     g_prev_stmt = NULL;
+    g_prev2_stmt = NULL;
     g_strength_busy = 0;
     if (!n || !n->name) return;  // Null safety
     if (n->file) focus_file(n->file);
@@ -8383,11 +8771,13 @@ void gen_func(Codegen* cg, AstNode* n) {
         check_types(ret->children[0], "return value", dst_ty, expr_ty(cg, ret->children[0]));
     }
     for (int i = body_from; i < body->child_count; i++) {
+        g_prev2_stmt = i > 1 ? body->children[i - 2] : NULL;
         g_prev_stmt = i > 0 ? body->children[i - 1] : NULL;
-        if (!(o2_hosted() && try_strength_dot(cg, body->children[i])))
+        if (!try_hosted_rewrite(cg, body->children[i]))
             gen_stmt(cg, body->children[i]);
     }
     g_prev_stmt = NULL;
+    g_prev2_stmt = NULL;
     symtab_leave(cg->symtab);
 
     if (is_int) {
