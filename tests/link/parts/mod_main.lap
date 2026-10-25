@@ -1,0 +1,8 @@
+extern bias;
+extern fn add(a: i64, b: i64) -> i64;
+
+fn main() -> i64 {
+    print_int(add(bias, 35));
+    println("");
+    return 0;
+}

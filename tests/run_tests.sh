@@ -17,6 +17,7 @@
 # 5. Boot sectors: tests/boot/*.lap, and QEMU must print COPIHUE.
 # 6. User mode: tests/usermode, and QEMU must print USER.
 # 7. Context switch: tests/ctx, and QEMU must print COPIHUE.
+# 8. Relocatable objects: tests/link/parts, two -c files linked with ld.
 set -u
 cd "$(dirname "$0")/.."
 ROOT=$PWD
@@ -270,6 +271,94 @@ if ( cd "$WORK" && "$CC" -S -o out.asm \
 else
   sed "s|$ROOT/||g" "$WORK/err.txt" > "$WORK/err.norm"
   check "cli duplicate" "tests/expected/errors/cli_dup.err" "$WORK/err.norm"
+fi
+
+# -c writes one ELF64 object. Two invocations, then ld, with no libc.
+# Helpers live under tests/link/parts and are not matched by tests/*/*.lap.
+link_run() {
+  local opt=$1
+  ( cd "$WORK" && rm -f mod_prog mod_add.o mod_main.o &&
+    "$CC" "$opt" -c -o mod_add.o "$ROOT/tests/link/parts/mod_add.lap" &&
+    "$CC" "$opt" -c -o mod_main.o "$ROOT/tests/link/parts/mod_main.lap" &&
+    ld mod_add.o mod_main.o -o mod_prog ) >/dev/null 2>err.txt || {
+      echo "COMPILE ERROR"; sed "s|$ROOT/||g" "$WORK/err.txt"; return; }
+  ( cd "$WORK" && ./mod_prog </dev/null; echo "exit=$?" ) | mask
+}
+link_run -O0 > "$WORK/link0"
+if ! nm "$WORK/mod_add.o" | grep -q ' T add' || \
+   ! nm "$WORK/mod_add.o" | grep -q ' D bias' || \
+   nm "$WORK/mod_add.o" | grep -q ' _start$' || \
+   ! nm -u "$WORK/mod_main.o" | grep -q ' add$' || \
+   ! nm -u "$WORK/mod_main.o" | grep -q ' bias$' || \
+   ! nm "$WORK/mod_main.o" | grep -q ' T main' || \
+   ! nm "$WORK/mod_main.o" | grep -q ' T _start'; then
+  fail=$((fail+1)); failed+=("link symbols"); echo "FAIL link symbols"; nm "$WORK/mod_add.o"; nm "$WORK/mod_main.o"
+else
+  pass=$((pass+1))
+fi
+if ( cd "$WORK" && ld mod_add.o mod_add.o -o mod_dup >/dev/null 2>&1 ); then
+  fail=$((fail+1)); failed+=("link duplicate"); echo "FAIL link duplicate: ld accepted two definitions of add"
+else
+  pass=$((pass+1))
+fi
+link_run -O2 > "$WORK/link2"
+if ! cmp -s "$WORK/link0" "$WORK/link2"; then
+  fail=$((fail+1)); failed+=("link -c (-O0 vs -O2)"); echo "FAIL link -c: -O0 and -O2 differ"; diff "$WORK/link0" "$WORK/link2" | head -10
+elif grep -q "^COMPILE ERROR" "$WORK/link0"; then
+  fail=$((fail+1)); failed+=("link -c"); echo "FAIL link -c:"; cat "$WORK/link0"
+else
+  check "link -c" "tests/expected/tests/link/reloc.out" "$WORK/link0"
+fi
+if ( cd "$WORK" && "$CC" -c --flat 0x10000 -o flat_bad.o "$ROOT/tests/link/parts/mod_add.lap" >/dev/null 2>err.txt ); then
+  fail=$((fail+1)); failed+=("link -c --flat"); echo "FAIL link -c --flat: compiled"
+elif ! grep -q "cannot be combined with --flat or --boot" "$WORK/err.txt"; then
+  fail=$((fail+1)); failed+=("link -c --flat"); echo "FAIL link -c --flat:"; cat "$WORK/err.txt"
+else
+  pass=$((pass+1))
+fi
+if ! ( cd "$WORK" && "$CC" --freestanding -c -o sec.o "$ROOT/tests/link/parts/sec_plain.lap" >/dev/null 2>err.txt &&
+       "$CC" --freestanding -c -S -o sec.asm "$ROOT/tests/link/parts/sec_plain.lap" >/dev/null 2>>err.txt &&
+       nasm -f elf64 sec.asm -o sec2.o 2>nas.err ); then
+  fail=$((fail+1)); failed+=("link section"); echo "FAIL link section:"; cat "$WORK/err.txt" "$WORK/nas.err"
+elif grep -q vstart "$WORK/sec.asm" || grep -i -q vstart "$WORK/nas.err"; then
+  fail=$((fail+1)); failed+=("link section vstart"); echo "FAIL link section: vstart leaked into -c"; cat "$WORK/nas.err"
+else
+  pass=$((pass+1))
+fi
+
+# Two freestanding bits 32 objects, linked to a raw image at 0x8000.
+# tests/usermode/boot.lap jumps there in protected mode. QEMU must print COPIHUE.
+link_fs() {
+  local opt=$1 out=$2
+  ( cd "$WORK" &&
+    "$CC" "$opt" --freestanding -c -o fs_putc.o "$ROOT/tests/link/parts/fs_putc.lap" &&
+    "$CC" "$opt" --freestanding -c -o fs_entry.o "$ROOT/tests/link/parts/fs_entry.lap" &&
+    ld -T "$ROOT/tests/link/flat.ld" -e _start --oformat binary fs_entry.o fs_putc.o -o "$out" ) \
+    >/dev/null 2>err.txt
+}
+if ! ( cd "$WORK" && "$CC" --boot -o link_boot.bin "$ROOT/tests/usermode/boot.lap" >/dev/null 2>err.txt ); then
+  fail=$((fail+1)); failed+=("link boot"); echo "FAIL link boot:"; cat "$WORK/err.txt"
+elif ! link_fs -O0 fs0.bin || ! link_fs -O2 fs2.bin; then
+  fail=$((fail+1)); failed+=("link freestanding"); echo "FAIL link freestanding:"; cat "$WORK/err.txt"
+elif [ "$(wc -c < "$WORK/fs0.bin")" -gt 8192 ] || [ "$(wc -c < "$WORK/fs2.bin")" -gt 8192 ]; then
+  fail=$((fail+1)); failed+=("link freestanding"); echo "FAIL link freestanding: image larger than 16 sectors"
+else
+  pass=$((pass+1))
+  if command -v qemu-system-x86_64 >/dev/null 2>&1; then
+    for kern in fs0.bin fs2.bin; do
+      dd if=/dev/zero of="$WORK/lpad.bin" bs=8192 count=1 status=none
+      dd if="$WORK/$kern" of="$WORK/lpad.bin" conv=notrunc status=none
+      cat "$WORK/link_boot.bin" "$WORK/lpad.bin" > "$WORK/ldisk.img"
+      rm -f "$WORK/lserial.txt"
+      timeout 8 qemu-system-x86_64 -display none -boot a \
+        -drive file="$WORK/ldisk.img",format=raw,if=floppy,index=0 \
+        -serial file:"$WORK/lserial.txt" </dev/null >/dev/null 2>&1 || true
+      if ! grep -q COPIHUE "$WORK/lserial.txt"; then
+        fail=$((fail+1)); failed+=("link $kern qemu"); echo "FAIL link $kern: QEMU serial did not contain COPIHUE"; od -An -tx1c "$WORK/lserial.txt" | head; continue
+      fi
+      pass=$((pass+1))
+    done
+  fi
 fi
 
 rm -f "$CC"
