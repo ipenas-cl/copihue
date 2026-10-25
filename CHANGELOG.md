@@ -2,6 +2,20 @@
 
 Todos los cambios importantes del proyecto.
 
+## [0.28.0] - 2026-10-25
+
+### Added
+- `section "name" { ... }` and `section "name" @ address { ... }` at the top level, with `--freestanding`, `--flat`, or `--boot`. The functions, `let` globals, and `data` blocks inside the braces go in that NASM section. `section` is contextual (the next token is a string), so a call named `section` is still a call. A nested section is `a section cannot contain another section`. `import` inside a section is `import is not allowed inside a section`. Hosted code is `section is only available with --freestanding, --flat, or --boot`. A name that is not a NASM section name is `section name 'boot rom' is not a NASM section name`. More than 32 sections is `too many sections`.
+- `@ address` is NASM `vstart`: labels in the section resolve to that load address, and the bytes stay packed. It is not `start=`, which would insert a hole (`@ 0x100000` would write a megabyte of zeros). The address is one non-negative integer (`section load address must be a non-negative integer`), including `0`. The first `@` fixes it. Opening the same name again appends. A different address is `section '.a' already has load address 0x1000`. A later block without `@` keeps the first address. The directive is lowercase hex (`vstart=0xffff800000000000`). A named section is `align=1`, so nasm's bin format does not insert 4-byte padding in front of it.
+- `section_start("name")` and `section_end("name")` return `i64`: the load address of the first byte and one past the last byte. `.text`, `.data`, and `.bss` are known even if the source never declared them. `bits 16` emits `mov ax`, `bits 32` emits `mov eax`, and 64-bit code emits `mov rax`. An unknown name is `unknown section '.nope'`. A `vstart` above `0xFFFF` used from `bits 16` is `section '.high' does not fit in bits 16`. The symbols are `__text_start` / `__text_end`, `__data_start` / `__data_end`, `__bss_start` / `__bss_end`, and `__sec_` plus the name with `.` turned into `_` (`.boot` is `__sec__boot_start`). Two names that share a symbol are `section 'a_b' uses the same bounds symbol as 'a.b'`.
+- `bss_start()` and `bss_end()` are unchanged: `*u8`, `--flat` only, `mov rax, __bss_start` / `__bss_end`. Flat mode still emits those two labels around `.bss`. A program that never mentions `section` or `section_start` / `section_end` keeps the same instruction stream and the same flat bytes. Bound labels are emitted only when the program asks for that name or declares that section. `_start` is still first. If it is inside a named section, that section is opened before it, so the entry is byte 0 of the section. A `let` or `data` written before `_start` is still emitted after it.
+- Only the section named `.bss` is omitted from a flat file. `resq` there is nobits. The same `resq` in any other section is progbits and occupies zeros. An initialized scalar stays `name: dq value`.
+- The boot pad `times 510-($-$$) db 0` / `dw 0xAA55` is written in `_start`'s section, after that section's end label, so the measured span excludes the pad. A one-section image is still 512 bytes ending in `55 aa`. Bytes in a second section still count toward the file, so a multi-section sector can grow past 512.
+- `tests/boot/section.lap` is one section `.boot` at `0x7C00`. The image starts with `b8 00 7c` (`mov ax, __sec__boot_start`) and QEMU checks `COPIHUE`. `tests/freestanding/sections.lap` is the instruction stream at `-O0` and `-O2`, including a `let`, a `data` block, and `section_start` / `section_end` of `.extra`, `.text`, `.data`, and `.bss`. It is assembled, not booted. `nasm -f elf64` warns that it ignores `vstart`; `nasm -f bin` applies it.
+
+### Changed
+- Language version is 0.28.0.
+
 ## [0.27.3] - 2026-10-25
 
 ### Added

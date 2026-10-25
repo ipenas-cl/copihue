@@ -1,0 +1,4 @@
+tests/errors/section_name.lap:2:9: error: section name 'boot rom' is not a NASM section name
+      2 | section "boot rom" {
+        |         ^
+1 error, compilation failed

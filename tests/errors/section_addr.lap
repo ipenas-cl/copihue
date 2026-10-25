@@ -1,0 +1,7 @@
+// flags: --freestanding
+section ".a" @ 0x1000 {
+    fn f() -> i64 { return 0; }
+}
+section ".a" @ 0x2000 {
+    fn g() -> i64 { return 0; }
+}

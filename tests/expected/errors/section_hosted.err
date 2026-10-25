@@ -1,0 +1,4 @@
+tests/errors/section_hosted.lap:1:1: error: section is only available with --freestanding, --flat, or --boot
+      1 | section ".text" {
+        | ^
+1 error, compilation failed
