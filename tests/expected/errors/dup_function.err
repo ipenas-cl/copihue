@@ -1,0 +1,4 @@
+tests/errors/dup_function.lap:5:4: error: function 'f' is already defined at tests/errors/dup_function.lap:1:4
+      5 | fn f() -> i64 {
+        |    ^
+1 error, compilation failed
