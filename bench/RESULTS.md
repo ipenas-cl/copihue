@@ -1,20 +1,20 @@
 # Resultados
 
-Generado por `bench/run.sh`. Las muestras se tomaron entre 2026-10-25 22:33:23 UTC y 2026-10-25 22:34:10 UTC. Este archivo se escribió el 2026-10-25 22:40:50 UTC a partir de esas muestras, en la misma máquina. `make bench` vuelve a medir y sustituye este archivo.
+Generado por `bench/run.sh`. Las muestras se tomaron entre 2026-10-25 23:29:22 UTC y 2026-10-25 23:30:09 UTC. Este archivo se escribió el 2026-10-25 23:31:42 UTC a partir de esas muestras, en la misma máquina. `make bench` vuelve a medir y sustituye este archivo.
 
 ## Máquina y versiones
 
 | Dato | Valor |
 |---|---|
-| Muestras | 2026-10-25 22:33:23 UTC — 2026-10-25 22:34:10 UTC |
-| Tablas escritas | 2026-10-25 22:40:50 UTC |
+| Muestras | 2026-10-25 23:29:22 UTC — 2026-10-25 23:30:09 UTC |
+| Tablas escritas | 2026-10-25 23:31:42 UTC |
 | Sistema | Linux 6.12.94+ x86_64 |
 | CPU | Intel(R) Xeon(R) Processor |
 | Frecuencia que reporta `/proc/cpuinfo` | 2700.000 MHz |
 | CPUs en línea | 4 |
 | `ulimit -s` | 8192 KB |
 | `getconf LONG_BIT` | 64 |
-| Copihue | Copihue 0.29.2, flag `-O2` |
+| Copihue | Copihue 0.30.1, flag `-O2` |
 | C | gcc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0, flag `-O2`, -march=x86-64 |
 | Rust | rustc 1.83.0 (90b35a623 2024-11-26), `-O` (Equivalent to -C opt-level=2) |
 | OCaml | ocamlopt 4.14.1, flag `-O3`, flambda=false |
@@ -29,7 +29,7 @@ Cada programa está escrito cuatro veces (`.lap`, `.c`, `.rs`, `.ml`) con el mis
 - Ejecución: 7 repeticiones más una de calentamiento que no entra en la mediana. La mediana es el valor central de las 7 muestras ordenadas (la 4.ª si son 7). En cada celda, entre paréntesis, el mínimo y el máximo de esas repeticiones.
 - La ejecución medida tira stdout a `/dev/null`. El proceso sigue escribiendo una línea. Afinidad a un CPU: sí, `taskset -c 0`.
 - El tamaño es `wc -c` del fichero producido, sin `strip`. `text`/`data`/`bss` salen de `size`.
-- Copihue `-O2` en hosted pliega constantes, reescribe `*`, `/` y `%` por potencias de dos, evalúa una operación de operandos simples directo en el registro del local (o en `rax`/`rbx` si hace falta un temporal), mantiene hasta cuatro locales escalares en `r12`–`r15` y, cuando ninguna llamada cae dentro del rango de uso, dos más en `r10` y `r11`, direcciona un array con `base+índice*escala` en una instrucción, y si la función abre con `if (param <op> hoja) return param` compara el registro de entrada y retorna antes de armar el frame. Una llamada directa del mismo programa, con a lo más seis argumentos que quepan en `rdi`–`r9`, los deja en esos registros; `syscall`, los builtins y un argumento que es otra llamada siguen con `push`/`pop`. Un `if` o `while` cuya condición es una comparación de escalares, o de un elemento de array, salta con las banderas y no materializa 0/1; `&&` y `||` también, y `&&` no evalúa la derecha si la izquierda ya falla. Esa carga se reutiliza en el `a[i]` o `a[i±constante] =` siguiente. Un `while (i < lim)` que arranca en una constante no negativa, solo suma uno a `i` al final, no llama y no toma direcciones, omite el chequeo de límites del array local cuando el arreglo tiene al menos `lim` elementos. El producto `s = s + a[i*n+k] * b[k*n+j]` con `k` de 0 a `n` camina las dos filas con punteros si `i` y `j` están en rango; si no, corre el bucle original. El desplazamiento `j = i - 1; while (j >= 0 && a[j] > key) { a[j+1] = a[j]; j = j - 1; } a[j+1] = key`, dentro de `while (i < N)` con `N` constante positiva, `i` desde una constante no negativa y el array `i64` de al menos `N` elementos, gira el bucle y no chequea el tope de `j`: `j` no baja de -1. `a[j] > key && j >= 0` no entra. Una función que no usa `rbp` y no empuja guarda los registros con `push`/`pop`. Un store de una constante que cabe en el elemento es un `mov` inmediato. Un llenado `a[i] = C` de un array `u8`/`i8`, con `i` desde 0 y el límite dentro del largo, es `rep stosb`. Una suma `s = s + A*i + B` con `i` de una constante a otra, paso 1, se sustituye por el total solo si cada producto y cada suma parcial cabe en i64 y los términos no cambian de signo; si puede envolver, el bucle se ejecuta. Una multiplicación de un registro por 3, 5 o 9 es un `lea`. Una racha de al menos dos `x = (x + y) & imm`, con `imm` entre 0 y 2147483647 y sin que `x` ni `y` se hayan escrito antes en la racha, emite los `add` y después los `and`. No invierte el `while` (medido, no bajó `arith`) y no desenrolla el producto interno (medido, no bajó `matmul`). Un bucle `k` probado al final, con `imul` desde memoria, también se midió y no bajó `matmul`. No borra un bucle arbitrario y no reescribe `fib`. Una copia `dst[i] = src[i]` no pasa a `rep movs` (`rep movsb` sigue siendo el builtin, y `rep stosb` solo el llenado constante). El `matmul` de gcc `-O2` vectoriza el producto con `pmuludq` y no cambia el orden `i, j, k`; eso no se emite. El `fib` de gcc `-O2` parte la recurrencia en pares e impares (`sub rsp, 200`, una sola llamada); no es una limpieza de `mov` del prólogo directo, y tampoco se emite. `-O0`, `--freestanding`, `--flat` y `--boot` no usan eso.
+- Copihue `-O2` en hosted pliega constantes, reescribe `*`, `/` y `%` por potencias de dos, evalúa una operación de operandos simples directo en el registro del local (o en `rax`/`rbx` si hace falta un temporal), mantiene hasta cuatro locales escalares en `r12`–`r15` y, cuando ninguna llamada cae dentro del rango de uso, dos más en `r10` y `r11`, direcciona un array con `base+índice*escala` en una instrucción, y si la función abre con `if (param <op> hoja) return param` compara el registro de entrada y retorna antes de armar el frame. Una llamada directa del mismo programa, con a lo más seis argumentos que quepan en `rdi`–`r9`, los deja en esos registros; `syscall`, los builtins y un argumento que es otra llamada siguen con `push`/`pop`. Un `if` o `while` cuya condición es una comparación de escalares, o de un elemento de array, salta con las banderas y no materializa 0/1; `&&` y `||` también, y `&&` no evalúa la derecha si la izquierda ya falla. Esa carga se reutiliza en el `a[i]` o `a[i±constante] =` siguiente. Un `while (i < lim)` que arranca en una constante no negativa, solo suma uno a `i` al final, no llama y no toma direcciones, omite el chequeo de límites del array local cuando el arreglo tiene al menos `lim` elementos. El producto `s = s + a[i*n+k] * b[k*n+j]` con `k` de 0 a `n` camina las dos filas con punteros si `i` y `j` están en rango; si no, corre el bucle original. El desplazamiento `j = i - 1; while (j >= 0 && a[j] > key) { a[j+1] = a[j]; j = j - 1; } a[j+1] = key`, dentro de `while (i < N)` con `N` constante positiva, `i` desde una constante no negativa y el array `i64` de al menos `N` elementos, gira el bucle y no chequea el tope de `j`: `j` no baja de -1. `a[j] > key && j >= 0` no entra. Una función que no usa `rbp` y no empuja guarda los registros con `push`/`pop`. Un store de una constante que cabe en el elemento es un `mov` inmediato. Un llenado `a[i] = C` de un array `u8`/`i8`, con `i` desde 0 y el límite dentro del largo, es `rep stosb`. Una suma `s = s + A*i + B` con `i` de una constante a otra, paso 1, se sustituye por el total solo si cada producto y cada suma parcial cabe en i64 y los términos no cambian de signo; si puede envolver, el bucle se ejecuta. Una multiplicación de un registro por 3, 5 o 9 es un `lea`. Una racha de al menos dos `x = (x + y) & imm`, con `imm` entre 0 y 2147483647 y sin que `x` ni `y` se hayan escrito antes en la racha, emite los `add` y después los `and`. No invierte el `while` (medido, no bajó `arith`) y no desenrolla el producto interno (medido, no bajó `matmul`). Un bucle `k` probado al final, con `imul` desde memoria, también se midió y no bajó `matmul`. No borra un bucle arbitrario y no reescribe `fib`. Una copia `i = 0; while (i < lim) { dst[i] = src[i]; i = i + 1; }` de arrays `u8`/`i8`, con `lim` constante y dentro de ambos largos, es `rep movsb`. Un `rep movsb` con `rcx = 0` no copia. Un llenado `(buf[i] + i + r) & 255` desde `i = 0`, con `lim` constante, múltiplo de 16 y dentro del largo, es `paddb` (SSE2, `movdqu`). Un stride potencia de dos que no es 1, 2, 4 ni 8 se escala con `shl` (`sal` es el mismo opcode). `while (i >= 0) { sum = sum + g[i].f; i = g[i].h; }` sobre un array global de structs de tamaño potencia de dos, con los dos campos de 8 bytes, es un `shl`, un `lea` y dos cargas. `* 10` sigue siendo `imul`: en `parse` el `lea` de `(x+x*4)*2` y el de `v*10+(c-48)` no separaron los rangos. `rep stosb` sigue siendo solo el llenado constante de un local. El `matmul` de gcc `-O2` vectoriza el producto con `pmuludq` y no cambia el orden `i, j, k`; eso no se emite. El `fib` de gcc `-O2` parte la recurrencia en pares e impares (`sub rsp, 200`, una sola llamada); no es una limpieza de `mov` del prólogo directo, y tampoco se emite. `-O0`, `--freestanding`, `--flat` y `--boot` no usan eso.
 - C usa `long` (64 bits aquí). Rust usa `i64`. OCaml usa `int` nativo, que en amd64 es 63 bits con etiqueta. Las cargas caben en ese rango: las cuatro salidas coincidieron. El desborde de `rustc -O` envuelve, igual que un binario release; no es el modo debug.
 - No hay intrínsecos, `unsafe`, pragmas, `-march=native` ni `-C opt-level=3`. Los flags son los pedidos: `gcc -O2`, `rustc -O`, `ocamlopt -O3`, `copihue -O2`. `list.rs` deriva `Copy` y `Clone` solo para poder construir el array fijo.
 - `fill`, `copy`, `hash` y `parse` recorren bytes. En Copihue y en C el buffer es una global (`.bss`, un byte por elemento). En Rust es un array en la pila. En OCaml es `Bytes` en el heap. `list` es un array de nodos `{val, next}` con `next` entero y centinela `-1`. OCaml guarda el par en un array plano (`2*i`, `2*i+1`) porque un record es un bloque con cabecera, no 16 bytes contiguos; la cadena de índices es la misma. No hay `malloc`.
@@ -41,19 +41,19 @@ Tiempo de compilación en milisegundos: mediana (mínimo–máximo).
 
 | Programa | Carga | Copihue | C | Rust | OCaml |
 |---|---|---:|---:|---:|---:|
-| `fib` | fib(40) | 7.4 (6.8–8.3) | 42.5 (41.5–43.3) | 91.8 (88.6–95.5) | 61.9 (60.6–64.6) |
-| `sieve` | sieve limit=400000 reps=80 | 7.2 (6.8–7.5) | 29.1 (28.3–29.3) | 96.4 (92.3–100.0) | 64.2 (62.7–66.7) |
-| `matmul` | matmul N=384 | 8.2 (7.7–9.4) | 32.4 (31.7–33.4) | 99.7 (96.2–109.6) | 63.9 (63.1–66.2) |
-| `arith` | arith n=100000000 | 6.7 (6.0–8.1) | 25.6 (24.5–27.1) | 91.1 (86.3–92.3) | 62.2 (61.0–63.2) |
-| `chain` | chain n=80000000 | 6.7 (6.6–7.6) | 26.5 (24.9–28.9) | 95.6 (91.9–98.5) | 64.1 (61.8–66.1) |
-| `fold` | fold n=500000000 | 6.0 (5.7–7.0) | 24.6 (24.0–25.3) | 89.4 (85.9–90.8) | 63.1 (61.8–63.6) |
-| `array` | array n=100000 rounds=1000 | 7.7 (7.0–8.3) | 28.8 (28.3–30.2) | 96.2 (95.8–100.7) | 63.1 (62.3–64.9) |
-| `sort` | sort n=28000 | 7.0 (6.3–7.9) | 29.2 (28.6–30.2) | 96.9 (94.5–100.6) | 64.2 (64.0–65.1) |
-| `fill` | fill n=262144 reps=128 | 7.1 (6.9–7.6) | 30.3 (29.6–32.4) | 95.5 (93.9–101.8) | 64.9 (62.7–66.8) |
-| `copy` | copy n=262144 reps=192 | 7.2 (7.0–7.5) | 30.4 (30.0–32.4) | 97.5 (93.8–104.5) | 72.1 (65.5–75.1) |
-| `hash` | hash n=131072 reps=256 | 6.5 (6.2–8.3) | 31.2 (30.0–31.4) | 106.2 (95.9–113.1) | 64.8 (63.4–67.7) |
-| `parse` | parse n=65536 reps=512 | 6.8 (6.6–7.0) | 29.3 (28.9–31.2) | 99.0 (93.9–105.6) | 67.5 (65.3–69.1) |
-| `list` | list n=32768 reps=512 | 7.4 (6.7–8.6) | 29.8 (28.0–33.6) | 99.9 (95.4–108.9) | 66.3 (65.1–69.7) |
+| `fib` | fib(40) | 7.1 (6.3–7.3) | 42.0 (41.8–43.0) | 95.1 (88.5–98.7) | 62.4 (59.9–66.4) |
+| `sieve` | sieve limit=400000 reps=80 | 7.7 (7.0–8.0) | 29.4 (28.5–30.9) | 100.5 (96.4–102.1) | 63.8 (62.7–66.1) |
+| `matmul` | matmul N=384 | 8.8 (8.1–9.8) | 32.1 (31.7–34.2) | 98.1 (96.5–104.8) | 63.3 (62.9–67.2) |
+| `arith` | arith n=100000000 | 7.2 (6.9–7.5) | 25.4 (24.7–26.5) | 92.0 (88.2–94.1) | 63.6 (61.8–64.7) |
+| `chain` | chain n=80000000 | 7.2 (7.1–7.7) | 25.9 (24.8–26.8) | 88.6 (87.3–94.2) | 61.8 (60.7–64.1) |
+| `fold` | fold n=500000000 | 6.7 (6.4–7.1) | 24.4 (23.6–25.8) | 91.1 (88.7–93.0) | 63.0 (62.4–64.0) |
+| `array` | array n=100000 rounds=1000 | 6.8 (6.4–7.5) | 27.8 (27.5–30.5) | 99.3 (97.6–106.1) | 62.9 (61.4–64.7) |
+| `sort` | sort n=28000 | 7.1 (6.5–7.2) | 28.6 (27.8–29.8) | 97.2 (93.4–99.9) | 62.3 (61.4–64.2) |
+| `fill` | fill n=262144 reps=128 | 7.1 (6.6–8.1) | 30.4 (29.8–31.1) | 93.8 (89.9–99.1) | 63.4 (62.4–66.2) |
+| `copy` | copy n=262144 reps=192 | 6.7 (6.5–7.6) | 30.4 (29.4–32.5) | 91.4 (89.4–95.4) | 62.8 (62.5–63.9) |
+| `hash` | hash n=131072 reps=256 | 6.5 (6.1–6.9) | 28.3 (27.8–29.4) | 95.4 (91.8–99.4) | 63.5 (61.7–65.7) |
+| `parse` | parse n=65536 reps=512 | 7.0 (6.5–7.4) | 29.5 (28.2–31.3) | 94.8 (92.5–108.1) | 62.8 (62.6–64.9) |
+| `list` | list n=32768 reps=512 | 7.0 (6.5–7.5) | 27.2 (26.5–27.7) | 96.7 (94.8–99.2) | 63.5 (62.0–66.3) |
 
 Tamaño del ejecutable en bytes, y `text` / `data` / `bss` según `size`.
 
@@ -67,29 +67,29 @@ Tamaño del ejecutable en bytes, y `text` / `data` / `bss` según `size`.
 | `fold` | 9520 (380/1/0) | 15968 (1413/600/8) | 3848880 (331232/10968/304) | 1062072 (620935/136812/28200) |
 | `array` | 9912 (588/1/0) | 16016 (1762/608/8) | 3848880 (331880/10968/304) | 1116552 (651503/147468/28200) |
 | `sort` | 9968 (659/21/0) | 16016 (1778/608/8) | 3848880 (331944/10992/304) | 1116504 (651527/147436/28200) |
-| `fill` | 9904 (493/1/262148) | 15992 (2144/600/262176) | 3848880 (331904/10968/304) | 1062200 (621351/136940/28200) |
-| `copy` | 10032 (534/1/524292) | 16064 (2324/608/524320) | 3848880 (331808/10968/304) | 1066392 (621631/137036/28200) |
+| `fill` | 9936 (582/1/262148) | 15992 (2144/600/262176) | 3848880 (331904/10968/304) | 1062200 (621351/136940/28200) |
+| `copy` | 9936 (557/1/524292) | 16064 (2324/608/524320) | 3848880 (331808/10968/304) | 1066392 (621631/137036/28200) |
 | `hash` | 9904 (494/1/131076) | 15992 (1952/600/131104) | 3848880 (331768/10968/304) | 1062168 (621271/136908/28200) |
 | `parse` | 10168 (586/1/65540) | 16000 (1557/600/65568) | 3848880 (331776/10968/304) | 1062216 (621431/136940/28200) |
-| `list` | 9912 (627/1/524292) | 16000 (1532/600/524320) | 3848880 (331592/10992/304) | 1116504 (651407/147436/28200) |
+| `list` | 9880 (586/1/524292) | 16000 (1532/600/524320) | 3848880 (331592/10992/304) | 1116504 (651407/147436/28200) |
 
 Tiempo de ejecución en milisegundos: mediana (mínimo–máximo). La salida es la de las cuatro versiones.
 
 | Programa | Salida | Copihue | C | Rust | OCaml | Copihue/C | Copihue/Rust | Copihue/OCaml |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
-| `fib` | 102334155 | 400.9 (393.3–404.6) | 130.8 (130.4–131.8) | 193.6 (193.3–194.1) | 365.5 (365.3–365.8) | 3.06 | 2.07 | 1.10 |
-| `sieve` | 6458901531 | 72.2 (72.1–72.7) | 70.0 (69.7–70.2) | 43.0 (42.8–43.3) | 128.0 (127.4–128.3) | 1.03 | 1.68 | 0.56 |
-| `matmul` | 693633024 | 46.3 (46.2–46.5) | 31.6 (31.4–32.1) | 50.4 (50.0–50.7) | 77.9 (77.6–80.3) | 1.47 | 0.92 | 0.59 |
-| `arith` | 3218085318 | 63.1 (62.8–63.4) | 59.3 (58.9–59.7) | 55.7 (55.4–56.0) | 66.6 (66.0–66.6) | 1.06 | 1.13 | 0.95 |
-| `chain` | 215544461 | 166.3 (165.9–166.6) | 187.0 (186.7–187.4) | 182.0 (181.8–184.7) | 187.1 (186.9–187.5) | 0.89 | 0.91 | 0.89 |
-| `fold` | 374999999750000000 | 1.3 (0.9–2.3) | 1.4 (1.2–2.2) | 1.5 (1.3–1.6) | 235.8 (230.3–254.1) | 0.94 | 0.86 | 0.01 |
-| `array` | 2557452942256 | 45.3 (45.0–45.9) | 41.2 (40.9–41.5) | 33.7 (33.0–33.8) | 58.9 (58.4–59.5) | 1.10 | 1.35 | 0.77 |
-| `sort` | 1070217027633 | 52.7 (52.3–53.0) | 73.4 (73.2–77.2) | 53.1 (52.7–53.5) | 153.9 (153.2–157.7) | 0.72 | 0.99 | 0.34 |
-| `fill` | 4286578688 | 32.4 (32.1–32.7) | 11.9 (11.2–12.9) | 12.6 (12.0–12.8) | 91.5 (91.4–91.9) | 2.72 | 2.58 | 0.35 |
-| `copy` | 6417285120 | 47.8 (47.5–49.0) | 9.6 (9.0–10.0) | 17.2 (16.8–17.4) | 162.9 (162.7–163.1) | 4.97 | 2.79 | 0.29 |
-| `hash` | 177127408896 | 45.2 (44.6–45.4) | 45.3 (45.1–45.7) | 38.9 (38.7–39.0) | 46.6 (46.0–47.0) | 1.00 | 1.16 | 0.97 |
-| `parse` | 41421435022848 | 22.3 (21.9–22.5) | 13.8 (13.2–14.2) | 14.2 (12.8–16.1) | 33.7 (32.8–35.8) | 1.62 | 1.57 | 0.66 |
-| `list` | 274869518336 | 53.4 (53.0–54.2) | 33.3 (33.0–33.7) | 41.8 (41.4–42.1) | 30.9 (30.4–31.2) | 1.61 | 1.28 | 1.73 |
+| `fib` | 102334155 | 393.3 (392.7–394.0) | 130.8 (130.5–131.2) | 193.7 (193.1–194.9) | 365.6 (365.3–365.9) | 3.01 | 2.03 | 1.08 |
+| `sieve` | 6458901531 | 72.1 (71.9–72.8) | 70.0 (69.7–70.5) | 43.0 (42.7–43.8) | 127.9 (127.5–129.7) | 1.03 | 1.68 | 0.56 |
+| `matmul` | 693633024 | 46.7 (46.1–49.9) | 32.0 (31.6–32.1) | 50.9 (50.2–55.3) | 78.3 (77.7–82.5) | 1.46 | 0.92 | 0.60 |
+| `arith` | 3218085318 | 63.5 (63.2–63.6) | 59.5 (59.0–59.6) | 55.3 (55.1–55.9) | 66.7 (66.5–67.0) | 1.07 | 1.15 | 0.95 |
+| `chain` | 215544461 | 166.4 (166.0–166.7) | 187.1 (186.8–187.3) | 182.2 (181.5–182.4) | 187.4 (187.2–187.8) | 0.89 | 0.91 | 0.89 |
+| `fold` | 374999999750000000 | 1.1 (1.0–1.8) | 1.2 (1.1–1.8) | 1.4 (1.2–1.8) | 243.5 (235.3–251.0) | 0.92 | 0.78 | 0.00 |
+| `array` | 2557452942256 | 45.3 (45.1–45.8) | 42.1 (41.2–43.0) | 33.7 (33.1–36.3) | 58.7 (58.4–59.2) | 1.08 | 1.34 | 0.77 |
+| `sort` | 1070217027633 | 52.9 (52.6–53.0) | 73.6 (73.0–73.8) | 53.2 (52.6–53.7) | 153.9 (153.3–154.3) | 0.72 | 0.99 | 0.34 |
+| `fill` | 4286578688 | 17.2 (16.6–17.7) | 11.4 (10.9–11.7) | 12.5 (11.9–13.6) | 91.5 (91.0–91.8) | 1.52 | 1.38 | 0.19 |
+| `copy` | 6417285120 | 42.0 (41.5–42.2) | 9.7 (9.2–10.2) | 17.1 (16.6–17.4) | 163.2 (162.6–163.5) | 4.35 | 2.45 | 0.26 |
+| `hash` | 177127408896 | 45.1 (44.6–45.3) | 45.6 (45.1–47.2) | 39.2 (38.9–39.9) | 46.5 (46.3–47.8) | 0.99 | 1.15 | 0.97 |
+| `parse` | 41421435022848 | 22.5 (22.2–24.1) | 14.0 (13.5–14.2) | 14.1 (13.7–15.0) | 33.8 (33.5–34.9) | 1.60 | 1.60 | 0.67 |
+| `list` | 274869518336 | 40.4 (40.3–41.0) | 33.1 (32.8–33.7) | 41.8 (41.5–42.3) | 30.6 (30.3–31.1) | 1.22 | 0.97 | 1.32 |
 
 ## Enlace
 
@@ -106,29 +106,29 @@ Tiempo de ejecución en milisegundos: mediana (mínimo–máximo). La salida es 
 
 ```
 /workspace/bench/out/bin/fib_c: ELF 64-bit LSB pie executable, x86-64, version 1 (SYSV), dynamically linked, interpreter /lib64/ld-linux-x86-64.so.2, BuildID[sha1]=8c7fbbe3fe25a028fbbbcb1c2a779126601723cd, for GNU/Linux 3.2.0, not stripped
-	linux-vdso.so.1 (0x00007f3ca2634000)
-	libc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x00007f3ca2400000)
-	/lib64/ld-linux-x86-64.so.2 (0x00007f3ca2636000)
+	linux-vdso.so.1 (0x00007fbe58cbb000)
+	libc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x00007fbe58a00000)
+	/lib64/ld-linux-x86-64.so.2 (0x00007fbe58cbd000)
 ```
 
 ### fib rs
 
 ```
 /workspace/bench/out/bin/fib_rs: ELF 64-bit LSB pie executable, x86-64, version 1 (SYSV), dynamically linked, interpreter /lib64/ld-linux-x86-64.so.2, BuildID[sha1]=60a688d408ce3b39d85f0efd6c7cd70dc5e1ef56, for GNU/Linux 3.2.0, with debug_info, not stripped
-	linux-vdso.so.1 (0x00007fee178d8000)
-	libgcc_s.so.1 => /lib/x86_64-linux-gnu/libgcc_s.so.1 (0x00007fee17845000)
-	libc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x00007fee17600000)
-	/lib64/ld-linux-x86-64.so.2 (0x00007fee178da000)
+	linux-vdso.so.1 (0x00007faa54512000)
+	libgcc_s.so.1 => /lib/x86_64-linux-gnu/libgcc_s.so.1 (0x00007faa5447f000)
+	libc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x00007faa54200000)
+	/lib64/ld-linux-x86-64.so.2 (0x00007faa54514000)
 ```
 
 ### fib ml
 
 ```
 /workspace/bench/out/bin/fib_ml: ELF 64-bit LSB pie executable, x86-64, version 1 (SYSV), dynamically linked, interpreter /lib64/ld-linux-x86-64.so.2, BuildID[sha1]=3696434e115e14f52c1f11eac0f27956aacd7f73, for GNU/Linux 3.2.0, with debug_info, not stripped
-	linux-vdso.so.1 (0x00007f6a8c0ff000)
-	libm.so.6 => /lib/x86_64-linux-gnu/libm.so.6 (0x00007f6a8bf45000)
-	libc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x00007f6a8bc00000)
-	/lib64/ld-linux-x86-64.so.2 (0x00007f6a8c101000)
+	linux-vdso.so.1 (0x00007fc46fec6000)
+	libm.so.6 => /lib/x86_64-linux-gnu/libm.so.6 (0x00007fc46fd0c000)
+	libc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x00007fc46fa00000)
+	/lib64/ld-linux-x86-64.so.2 (0x00007fc46fec8000)
 ```
 
 ## `fold` y el bucle que otros compiladores pueden borrar
@@ -164,15 +164,15 @@ La misma búsqueda, con la salida de cada programa. `sí` quiere decir que ese d
 
 | Variante | Mediana (mín–máx) ms |
 |---|---:|
-| local (`array`) | 45.3 (45.0–45.9) |
-| global (`array_global`) | 45.1 (45.0–45.4) |
+| local (`array`) | 45.3 (45.1–45.8) |
+| global (`array_global`) | 45.1 (44.8–45.7) |
 
 ## Lectura de esta corrida
 
-El cociente Copihue/C más alto es `copy` (4.97×) y el más bajo es `sort` (0.72×). Un cociente menor que 1 quiere decir que, en esa fila, la mediana de Copihue quedó por debajo de la de C; el mínimo y el máximo de la tabla dicen si los rangos se separan. En `fold` la tabla del decimal dice gcc sí, rustc sí, Copihue sí y OCaml no. Quien lo tiene no ejecutó las 500000000 vueltas, y ese tiempo es el de arrancar el proceso. Quien no lo tiene sí ejecuta el bucle; el cociente Copihue/OCaml es el de la tabla. `chain` es una cadena dependiente de multiplicar: el cociente está en la tabla, no se supone.
+El cociente Copihue/C más alto es `copy` (4.35×) y el más bajo es `sort` (0.72×). Un cociente menor que 1 quiere decir que, en esa fila, la mediana de Copihue quedó por debajo de la de C; el mínimo y el máximo de la tabla dicen si los rangos se separan. En `fold` la tabla del decimal dice gcc sí, rustc sí, Copihue sí y OCaml no. Quien lo tiene no ejecutó las 500000000 vueltas, y ese tiempo es el de arrancar el proceso. Quien no lo tiene sí ejecuta el bucle; el cociente Copihue/OCaml es el de la tabla. `chain` es una cadena dependiente de multiplicar: el cociente está en la tabla, no se supone.
 
 Contra C, el mínimo de Copihue queda por encima del máximo en: `fib` `sieve` `matmul` `arith` `array` `fill` `copy` `parse` `list`. El máximo de Copihue queda por debajo del mínimo en: `chain` `sort`. Los rangos se solapan en: `fold` `hash`.
-Contra Rust, el mínimo de Copihue queda por encima del máximo en: `fib` `sieve` `arith` `array` `fill` `copy` `hash` `parse` `list`. El máximo de Copihue queda por debajo del mínimo en: `matmul` `chain`. Los rangos se solapan en: `fold` `sort`.
+Contra Rust, el mínimo de Copihue queda por encima del máximo en: `fib` `sieve` `arith` `array` `fill` `copy` `hash` `parse`. El máximo de Copihue queda por debajo del mínimo en: `matmul` `chain` `list`. Los rangos se solapan en: `fold` `sort`.
 Contra OCaml, el mínimo de Copihue queda por encima del máximo en: `fib` `list`. El máximo de Copihue queda por debajo del mínimo en: `sieve` `matmul` `arith` `chain` `fold` `array` `sort` `fill` `copy` `hash` `parse`. Los rangos se solapan en: ninguna.
 
 En tiempo de compilación de estos archivos chicos, la mediana de Copihue es la más baja en las 13 filas. Eso mide el arranque de un compilador de una pasada más nasm y ld, no un proyecto grande.
@@ -400,3 +400,30 @@ Los cinco programas nuevos ejecutan el bucle: el decimal de la salida no está e
 `sieve` en esta ventana queda por encima de C sin solape (72.1–72.7 contra 69.7–70.2); el rango de Copihue se solapa con el de 21:45, y el ensamblado es el de entonces. `arith` queda por encima de C (62.8–63.4 contra 58.9–59.7) y `array` también (45.0–45.9 contra 40.9–41.5). Los dos se solapan con 21:45. `matmul` sigue por encima de C (46.2–46.5 contra 31.4–32.1) y por debajo de Rust (50.0–50.7) y de OCaml (77.6–80.3). `sort` queda por debajo de C (52.3–53.0 contra 73.2–77.2) y de OCaml (153.2–157.7). Contra Rust (52.7–53.5) se solapa; el cociente de medianas es 0.99. El local de `array` y el global se solapan (45.0–45.9 y 45.0–45.4). `fold` se solapa con C (0.9–2.3 contra 1.2–2.2) y con Rust (1.3–1.6). Queda por debajo de OCaml (230.3–254.1). El decimal está en el `.s` de gcc, rustc y Copihue. `chain` queda por debajo de los tres (165.9–166.6 contra C 186.7–187.4, Rust 181.8–184.7 y OCaml 186.9–187.5). El binario de `chain` es el de 0.25.1, y esto es esta fila y estas corridas.
 
 El hosted de 64 bits genera el mismo código que el binario medido (imprimía 0.29.2), salvo la línea de versión. `bits 16` y `bits 32` son el arreglo de `ebx` de 0.29.2.
+
+## 0.29.3 → 0.30.1
+
+`main` tomó 0.29.4 para restaurar `ebx` en la aritmética de `bits 16` y `bits 32`, y 0.30.0 para la aritmética al ancho del tipo. Esta ronda es 0.30.1 y no toca esos caminos. La ventana de esta página es 2026-10-25 23:29:22 UTC — 2026-10-25 23:30:09 UTC. El binario imprime 0.30.1. La referencia es la ventana 22:33:23–22:34:10 UTC (el binario imprimía 0.29.2; el `-O2` hosted de 0.29.3 coincide con él salvo la versión). Mediana de Copihue en milisegundos (mínimo–máximo). El cociente es la referencia / esta medición.
+
+| Programa | 22:33 (0.29.3) | 0.30.1 | referencia / 0.30.1 |
+|---|---:|---:|---:|
+| `copy` | 47.8 (47.5–49.0) | 42.0 (41.5–42.2) | 1.14 |
+| `fill` | 32.4 (32.1–32.7) | 17.2 (16.6–17.7) | 1.88 |
+| `list` | 53.4 (53.0–54.2) | 40.4 (40.3–41.0) | 1.32 |
+| `parse` | 22.3 (21.9–22.5) | 22.5 (22.2–24.1) | 0.99 |
+
+`copy`, `fill` y `list` bajan, y los rangos no se solapan. `parse` se solapa. Su ensamblado `-O2` es el de 0.29.3, salvo la línea de versión, y `text` sigue en 586. `fib`, `sieve`, `matmul`, `arith`, `chain`, `fold`, `array`, `sort`, `hash`, `array_global`, `fill` y `list` coinciden con el ensamblado de un binario que imprimía 0.29.5 (ventana 23:19:30–23:20:17 UTC), salvo la línea de versión. `text` de los diez que no se reescriben no cambia (`fib` 385, `sieve` 672, `matmul` 1018, `arith` 435, `chain` 406, `fold` 380, `array` 588, `sort` 659, `hash` 494; `array_global` sigue en 549). `fill` pasa de 493 a 582 y `list` de 627 a 586.
+
+`copy` no coincide con ese binario de 0.29.5. El primer bucle es el mismo `rep movsb`. El segundo, `src[i] = (src[i] + 1) & 255`, gana dos `movzx rax, al` porque 0.30.0 trunca la suma `u8` y la máscara `u8`. En 23:19, sin esos dos `movzx`, `copy` fue 37.7 ms (37.5–38.4). Esta ventana, con ellos, es 42.0 ms (41.5–42.2). `text` pasa de 534 a 557 (549 en el binario de 23:19). El rango sigue por debajo de 47.5–49.0.
+
+La copia reconocible es `rep movsb` (`push rsi` / `push rdi` / `pushfq` / `cld` / dos `lea` / `mov rcx, 262144` / `rep movsb` / los tres `pop`) y luego `mov` de `i` al límite. El bucle que sigue, `sum = sum + dst[i]` y `src[i] = (src[i] + 1) & 255`, queda escalar, con esos dos `movzx`. Por eso `copy` sigue en 4.35× C (41.5–42.2 contra 9.2–10.2), por encima de Rust (16.6–17.4) y por debajo de OCaml (162.6–163.5). gcc sigue con `call memcpy` en la copia.
+
+El llenado `(buf[i] + i + r) & 255` es ocho instrucciones: `movdqu` / `paddb` índice / `paddb` de `r` / `movdqu` / `paddb` de 16 / `add rax, 16` / `sub rcx` / `jnz`. El vector de índice arranca en los bytes 0..15. `movdqu` no pide alineación a 16. No es `rep stosb`: el byte no es constante. `fill` queda en 1.52× C (16.6–17.7 contra 10.9–11.7), por encima de Rust (11.9–13.6) y por debajo de OCaml (91.0–91.8). La suma del buffer sigue escalar. Un largo que no es múltiplo de 16 no entra.
+
+El salto de `list` es `mov rax, i` / `shl rax, 4` / `lea rax, [nodes+rax]` / `add sum, [rax]` / `mov i, [rax+8]` / `cmp i, 0` / `jge`. Siete instrucciones. Antes eran dos `imul rax, 16` y un `push`/`pop` del acumulador. `sal` y `shl` son el mismo opcode; el emisor escribe `shl`. Un array local no entra, para no saltarse el chequeo de límites. Un struct de 24 bytes sigue con `imul`. En esta ventana `list` queda por encima de C (40.3–41.0 contra 32.8–33.7) y de OCaml (30.3–31.1). Queda por debajo de Rust (41.5–42.3); los rangos no se solapan. El cociente de medianas contra C es 1.22 y contra Rust 0.97. Esto es esta fila y estas corridas.
+
+`* 10` sigue siendo `imul`. Se midió `lea` de `(x+x*4)*2`, y el `lea` fusionado de `v * 10 + (c - 48)`, antes de la ventana 23:19 (un calentamiento y siete corridas, `taskset -c 0`). `parse` quedó en 22.6 ms (22.2–22.9) contra 22.3 ms (21.9–22.5). Los rangos se solapan, y esa forma no está. En esta ventana, con `imul`, `parse` es 22.5 ms (22.2–24.1), 1.60× C (13.5–14.2), por encima de C y de Rust (13.7–15.0) y por debajo de OCaml (33.5–34.9).
+
+`hash` se solapa con C (44.6–45.3 contra 45.1–47.2). El cociente de medianas es 0.99. No queda por debajo de C. El ensamblado no cambió. `sort` se solapa con Rust (52.6–53.0 contra 52.6–53.7); el cociente de medianas es 0.99. `fold` se solapa con C (1.0–1.8 contra 1.1–1.8) y con Rust (1.2–1.8). `chain` queda por debajo de los tres (166.0–166.7 contra C 186.8–187.3, Rust 181.5–182.4 y OCaml 187.2–187.8). El binario es el de 0.25.1, y esto es esta fila y estas corridas. `fib` sigue en 3.01× C (392.7–394.0 contra 130.5–131.2). El prólogo de `n >= 2` sigue en 16 instrucciones. gcc `-O2` de `matmul` sigue con `pmuludq`; eso no se emite.
+
+`-O0`, `--freestanding`, `--flat` y `--boot` no entran en estas tres reescrituras. `bits 16` y `bits 32` tampoco: siguen en el arreglo de `ebx` de 0.29.4.
