@@ -1,20 +1,20 @@
 # Resultados
 
-Generado por `bench/run.sh`. Las muestras se tomaron entre 2026-10-25 17:00:28 UTC y 2026-10-25 17:01:04 UTC. Este archivo se escribió el 2026-10-25 17:07:53 UTC a partir de esas muestras, en la misma máquina. `make bench` vuelve a medir y sustituye este archivo.
+Generado por `bench/run.sh`. Las muestras se tomaron entre 2026-10-25 17:00:28 UTC y 2026-10-25 17:01:04 UTC. Este archivo se escribió el 2026-10-25 17:15:53 UTC a partir de esas muestras, en la misma máquina. `make bench` vuelve a medir y sustituye este archivo.
 
 ## Máquina y versiones
 
 | Dato | Valor |
 |---|---|
 | Muestras | 2026-10-25 17:00:28 UTC — 2026-10-25 17:01:04 UTC |
-| Tablas escritas | 2026-10-25 17:07:53 UTC |
+| Tablas escritas | 2026-10-25 17:15:53 UTC |
 | Sistema | Linux 6.12.94+ x86_64 |
 | CPU | Intel(R) Xeon(R) Processor |
 | Frecuencia que reporta `/proc/cpuinfo` | 2700.000 MHz |
 | CPUs en línea | 4 |
 | `ulimit -s` | 8192 KB |
 | `getconf LONG_BIT` | 64 |
-| Copihue | Copihue 0.27.1, flag `-O2` |
+| Copihue | Copihue 0.27.2, flag `-O2` |
 | C | gcc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0, flag `-O2`, -march=x86-64 |
 | Rust | rustc 1.83.0 (90b35a623 2024-11-26), `-O` (Equivalent to -C opt-level=2) |
 | OCaml | ocamlopt 4.14.1, flag `-O3`, flambda=false |
@@ -90,29 +90,29 @@ Tiempo de ejecución en milisegundos: mediana (mínimo–máximo). La salida es 
 
 ```
 /workspace/bench/out/bin/fib_c: ELF 64-bit LSB pie executable, x86-64, version 1 (SYSV), dynamically linked, interpreter /lib64/ld-linux-x86-64.so.2, BuildID[sha1]=8c7fbbe3fe25a028fbbbcb1c2a779126601723cd, for GNU/Linux 3.2.0, not stripped
-	linux-vdso.so.1 (0x00007f1a14e55000)
-	libc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x00007f1a14c00000)
-	/lib64/ld-linux-x86-64.so.2 (0x00007f1a14e57000)
+	linux-vdso.so.1 (0x00007f2beb93b000)
+	libc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x00007f2beb600000)
+	/lib64/ld-linux-x86-64.so.2 (0x00007f2beb93d000)
 ```
 
 ### fib rs
 
 ```
 /workspace/bench/out/bin/fib_rs: ELF 64-bit LSB pie executable, x86-64, version 1 (SYSV), dynamically linked, interpreter /lib64/ld-linux-x86-64.so.2, BuildID[sha1]=60a688d408ce3b39d85f0efd6c7cd70dc5e1ef56, for GNU/Linux 3.2.0, with debug_info, not stripped
-	linux-vdso.so.1 (0x00007f7aa54cc000)
-	libgcc_s.so.1 => /lib/x86_64-linux-gnu/libgcc_s.so.1 (0x00007f7aa5439000)
-	libc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x00007f7aa5200000)
-	/lib64/ld-linux-x86-64.so.2 (0x00007f7aa54ce000)
+	linux-vdso.so.1 (0x00007fe8d4746000)
+	libgcc_s.so.1 => /lib/x86_64-linux-gnu/libgcc_s.so.1 (0x00007fe8d46b3000)
+	libc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x00007fe8d4400000)
+	/lib64/ld-linux-x86-64.so.2 (0x00007fe8d4748000)
 ```
 
 ### fib ml
 
 ```
 /workspace/bench/out/bin/fib_ml: ELF 64-bit LSB pie executable, x86-64, version 1 (SYSV), dynamically linked, interpreter /lib64/ld-linux-x86-64.so.2, BuildID[sha1]=3696434e115e14f52c1f11eac0f27956aacd7f73, for GNU/Linux 3.2.0, with debug_info, not stripped
-	linux-vdso.so.1 (0x00007f4faaac7000)
-	libm.so.6 => /lib/x86_64-linux-gnu/libm.so.6 (0x00007f4faa90d000)
-	libc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x00007f4faa600000)
-	/lib64/ld-linux-x86-64.so.2 (0x00007f4faaac9000)
+	linux-vdso.so.1 (0x00007fce8f094000)
+	libm.so.6 => /lib/x86_64-linux-gnu/libm.so.6 (0x00007fce8eeda000)
+	libc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x00007fce8ec00000)
+	/lib64/ld-linux-x86-64.so.2 (0x00007fce8f096000)
 ```
 
 ## `fold` y el bucle que otros compiladores pueden borrar
@@ -169,7 +169,7 @@ El bloque `Lbounds_error_*` (8 instrucciones, `syscall` de salida) no está en e
 
 El bucle que se cuenta es el más interno de cada programa. En `sort` es una vuelta del desplazamiento en que `j >= 0` y `a[j] > key` salen verdaderas. En la criba es `while (j < limit) { flags[j] = 0; j = j + i; }`. `fib` cuenta el camino `n >= 2` desde la entrada de `fib` hasta el primer `ret` de ese camino, sin el bloque del caso base. No se contaron invocaciones en ejecución.
 
-Los ocho binarios `-O2` de este bench, compilados con 0.26.0, coinciden byte a byte con los de 0.25.1. La columna 0.25.1 es esa corrida (muestras 2026-10-25 15:01:14 UTC — 15:01:54 UTC). La columna 0.26.2 es la ventana 2026-10-25 16:06:58 UTC — 16:07:36 UTC. La tabla de tiempos de esta página es la medición de 0.27.1 (el binario de esa ventana se identificaba como 0.26.3).
+Los ocho binarios `-O2` de este bench, compilados con 0.26.0, coinciden byte a byte con los de 0.25.1. La columna 0.25.1 es esa corrida (muestras 2026-10-25 15:01:14 UTC — 15:01:54 UTC). La columna 0.26.2 es la ventana 2026-10-25 16:06:58 UTC — 16:07:36 UTC. La tabla de tiempos de esta página es la medición de 0.27.2 (el binario de esa ventana se identificaba como 0.26.3).
 
 | Programa | Bucle contado | 0.25.1 ins (push / pop / `mov rbx,rax` / cargas / stores / `call`) | 0.26.2 |
 |---|---|---|---|
@@ -196,7 +196,7 @@ En `fib` el camino `n >= 2` es `cmp rdi, 2; jl .Lbase_fib; push r13; push r12; s
 
 ## Antes y después, mismo `make bench`
 
-Dos corridas distintas, la misma máquina y las mismas versiones de gcc, rustc, ocamlopt, nasm y ld que la tabla de arriba. Copihue 0.25.1: muestras 2026-10-25 15:01:14 UTC — 15:01:54 UTC. Copihue 0.26.2: muestras 2026-10-25 16:06:58 UTC — 16:07:36 UTC. Esa ventana no es la tabla de tiempos de esta página; la tabla de arriba es la medición de 0.27.1. En la ventana 0.26.2 el binario se identificaba como 0.26.1; main ya usó ese número, y el release es 0.26.2. Los ocho binarios `-O2` de 0.26.2 coinciden con los medidos ahí. Mediana de Copihue en milisegundos (mínimo–máximo). El cociente es 0.25.1 / 0.26.2.
+Dos corridas distintas, la misma máquina y las mismas versiones de gcc, rustc, ocamlopt, nasm y ld que la tabla de arriba. Copihue 0.25.1: muestras 2026-10-25 15:01:14 UTC — 15:01:54 UTC. Copihue 0.26.2: muestras 2026-10-25 16:06:58 UTC — 16:07:36 UTC. Esa ventana no es la tabla de tiempos de esta página; la tabla de arriba es la medición de 0.27.2. En la ventana 0.26.2 el binario se identificaba como 0.26.1; main ya usó ese número, y el release es 0.26.2. Los ocho binarios `-O2` de 0.26.2 coinciden con los medidos ahí. Mediana de Copihue en milisegundos (mínimo–máximo). El cociente es 0.25.1 / 0.26.2.
 
 | Programa | 0.25.1 | 0.26.2 | 0.25.1 / 0.26.2 |
 |---|---:|---:|---:|
@@ -221,7 +221,7 @@ En `array`, el local tardó 57.5 ms (57.0–57.8) y el global 45.6 ms (45.4–45
 
 ## 0.26.2 → 0.26.3
 
-Misma máquina y las mismas versiones de gcc, rustc, ocamlopt, nasm y ld. Copihue 0.26.2: muestras 2026-10-25 16:06:58 UTC — 16:07:36 UTC. La medición de este cambio: muestras 2026-10-25 17:00:28 UTC — 17:01:04 UTC, que son las de la tabla de esta página. En esa ventana el binario se identificaba como 0.26.3. main ya usó 0.27.0 para los structs, y el release de este cambio es 0.27.1. El ensamblado `-O2` de los ocho programas coincide con el medido, salvo la línea de versión. Mediana de Copihue en milisegundos (mínimo–máximo). El cociente es 0.26.2 / esta medición.
+Misma máquina y las mismas versiones de gcc, rustc, ocamlopt, nasm y ld. Copihue 0.26.2: muestras 2026-10-25 16:06:58 UTC — 16:07:36 UTC. La medición de este cambio: muestras 2026-10-25 17:00:28 UTC — 17:01:04 UTC, que son las de la tabla de esta página. En esa ventana el binario se identificaba como 0.26.3. main ya usó 0.27.0 para los structs y 0.27.1 para el cambio de contexto, y el release de este cambio es 0.27.2. El ensamblado `-O2` de los ocho programas coincide con el medido, salvo la línea de versión. Mediana de Copihue en milisegundos (mínimo–máximo). El cociente es 0.26.2 / esta medición.
 
 | Programa | 0.26.2 | 0.26.3 | 0.26.2 / 0.26.3 |
 |---|---:|---:|---:|

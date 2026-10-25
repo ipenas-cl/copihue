@@ -1,0 +1,67 @@
+// save_context returns 0 the first time and 1 when restore_context lands
+// back on that instruction. Overwriting the saved rip resumes at a label
+// instead, which is how a framed function records a return point without
+// naming rsp or rbp. Two tasks then switch until both have run.
+
+struct Ctx {
+    rip: i64,
+    rsp: i64,
+    rbp: i64,
+    rbx: i64,
+    r12: i64,
+    r13: i64,
+    r14: i64,
+    r15: i64
+}
+
+let ca: Ctx;
+let cb: Ctx;
+let stage: i64 = 0;
+
+fn hop() -> i64 {
+    restore_context(&ca);
+    return 0;
+}
+
+fn task_b() -> i64 {
+    print_int(1);
+    println("");
+    if (save_context(&cb) == 0) {
+        restore_context(&ca);
+    }
+    print_int(3);
+    println("");
+    restore_context(&ca);
+    return 0;
+}
+
+fn main() -> i64 {
+    let keep: i64 = 42;
+    if (save_context(&ca) == 0) {
+        ca.rip = label_addr(after);
+        hop();
+        return 9;
+    }
+    return 8;
+    label after;
+    if (keep != 42) { return 4; }
+    print_int(7);
+    println("");
+    if (save_context(&ca) == 0) {
+        task_b();
+        return 3;
+    }
+    if (keep != 42) { return 5; }
+    stage = stage + 1;
+    if (stage == 1) {
+        print_int(2);
+        println("");
+        restore_context(&cb);
+    }
+    if (keep != 42) { return 6; }
+    print_int(4);
+    println("");
+    print_int(keep);
+    println("");
+    return 0;
+}

@@ -1,0 +1,207 @@
+// Flat kernel at 0x8000. tests/ctx/boot.lap loads it and jumps to the first
+// byte in 32-bit protected mode. _start builds the same 2MB identity map as
+// tests/usermode and far-jumps to kmain in long mode.
+//
+// kmain reads an unmapped address. The #PF handler rewrites rip and rsp, so
+// iretq enters recovered on a fresh stack. recovered saves its frame, then
+// int 0x80. That handler rewrites rip and rsp again, so iretq enters task_b
+// on a second stack. task_b prints COPI and restore_context returns to
+// recovered, which prints HUE. COM1 must show COPIHUE.
+//
+// GDT: 0x08 kernel code 64, 0x10 kernel data. The later descriptors are
+// unused; the limit stays 55 so the bytes match a known-good table.
+
+struct InterruptFrame {
+    rip: i64,
+    cs: i64,
+    rflags: i64,
+    rsp: i64,
+    ss: i64
+}
+
+struct PfFrame {
+    error_code: i64,
+    rip: i64,
+    cs: i64,
+    rflags: i64,
+    rsp: i64,
+    ss: i64
+}
+
+struct Ctx {
+    rip: i64,
+    rsp: i64,
+    rbp: i64,
+    rbx: i64,
+    r12: i64,
+    r13: i64,
+    r14: i64,
+    r15: i64
+}
+
+packed struct IdtEntry {
+    off_lo: u16,
+    sel: u16,
+    ist: u8,
+    typ: u8,
+    off_mid: u16,
+    off_hi: u32,
+    zero: u32
+}
+
+packed struct DescPtr { limit: u16, base: u64 }
+
+let idt: [IdtEntry; 129];
+let ca: Ctx;
+
+data gdt {
+    dq 0;
+    dw 0;
+    dw 0;
+    db 0;
+    db 0x9A;
+    db 0x20;
+    db 0;
+    dw 0xFFFF;
+    dw 0;
+    db 0;
+    db 0x92;
+    db 0xCF;
+    db 0;
+    dw 0xFFFF;
+    dw 0;
+    db 0;
+    db 0xF2;
+    db 0xCF;
+    db 0;
+    dw 0;
+    dw 0;
+    db 0;
+    db 0xFA;
+    db 0x20;
+    db 0;
+    tss_desc:
+    dw 103;
+    dw 0;
+    db 0;
+    db 0x89;
+    db 0;
+    db 0;
+    dd 0;
+    dd 0;
+}
+
+data gdtr {
+    dw 55;
+    dd gdt;
+}
+
+fn zero_bytes(p: *u8, n: i64) -> i64 {
+    let i = 0;
+    while (i < n) {
+        p[i] = 0;
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn serial_putc(c: i64) -> i64 {
+    let tries = 0;
+    while ((inb(0x3FD) & 0x20) == 0 && tries < 1000) { tries = tries + 1; }
+    outb(0x3F8, c);
+    return 0;
+}
+
+fn set_gate(n: i64, handler: i64) -> i64 {
+    idt[n].off_lo = handler & 0xFFFF;
+    idt[n].sel = 0x08;
+    idt[n].ist = 0;
+    idt[n].typ = 0x8E;
+    idt[n].off_mid = (handler >> 16) & 0xFFFF;
+    idt[n].off_hi = handler >> 32;
+    idt[n].zero = 0;
+    return 0;
+}
+
+interrupt fn pf(frame: *PfFrame) {
+    frame.rip = &recovered;
+    frame.cs = 0x08;
+    frame.rflags = 2;
+    frame.rsp = 0x6800;
+    frame.ss = 0x10;
+}
+
+interrupt fn irq(frame: *InterruptFrame) {
+    frame.rip = &task_b;
+    frame.cs = 0x08;
+    frame.rflags = 2;
+    frame.rsp = 0x7200;
+    frame.ss = 0x10;
+}
+
+fn task_b() -> i64 {
+    serial_putc(67);
+    serial_putc(79);
+    serial_putc(80);
+    serial_putc(73);
+    restore_context(&ca);
+    return 0;
+}
+
+fn recovered() -> i64 {
+    if (save_context(&ca) == 0) {
+        int(0x80);
+        hlt();
+    }
+    serial_putc(72);
+    serial_putc(85);
+    serial_putc(69);
+    hlt();
+    return 0;
+}
+
+fn kmain() -> i64 {
+    zero_bytes(&idt as *u8, 2064);
+    set_gate(14, &pf);
+    set_gate(128, &irq);
+    let idtr: DescPtr;
+    idtr.limit = 2063;
+    idtr.base = idt as u64;
+    lidt(&idtr);
+    let p: *u8 = 0x400000;
+    let b = p[0];
+    outb(0x3F8, b);
+    hlt();
+    return 0;
+}
+
+bits 32 naked fn _start() {
+    cli();
+    asm("lgdt [gdtr]");
+    asm("mov ax, 0x10");
+    asm("mov ds, ax");
+    asm("mov es, ax");
+    asm("mov ss, ax");
+    asm("mov esp, 0x6000");
+    asm("cld");
+    asm("xor eax, eax");
+    asm("mov edi, 0x1000");
+    asm("mov ecx, 3072");
+    asm("rep stosd");
+    asm("mov dword [0x1000], 0x2007");
+    asm("mov dword [0x2000], 0x3007");
+    asm("mov dword [0x3000], 0x87");
+    asm("mov eax, cr4");
+    asm("or eax, 0x20");
+    asm("mov cr4, eax");
+    asm("mov eax, 0x1000");
+    asm("mov cr3, eax");
+    asm("mov ecx, 0xC0000080");
+    asm("rdmsr");
+    asm("or eax, 0x100");
+    asm("wrmsr");
+    asm("mov eax, cr0");
+    asm("or eax, 0x80000000");
+    asm("mov cr0, eax");
+    asm("jmp 0x08:kmain");
+}
