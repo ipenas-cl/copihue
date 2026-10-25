@@ -1,6 +1,6 @@
-// Hosted -O2: insertion shift without the upper bounds check, and a
-// bottom-tested dot product. -O0 prints the same lines. A loop that is not
-// the proved shape keeps the old path and must still match.
+// Hosted -O2: insertion shift without the upper bounds check. The dot
+// product stays the top-tested running-pointer loop. -O0 prints the same
+// lines. A loop that is not the proved shape keeps the bounds check.
 
 fn pack(a0: i64, a1: i64, a2: i64, a3: i64) -> i64 {
     return ((a0 + 20) * 1000000) + ((a1 + 20) * 10000) + ((a2 + 20) * 100) + (a3 + 20);

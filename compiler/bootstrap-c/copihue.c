@@ -7921,10 +7921,10 @@ static const char* distinct_reg(Codegen* cg, const char* name, const char** prev
 
 // `k = 0; while (k < n) { s = s + a[i*n+k] * b[k*n+j]; k = k + 1; }`
 // with n a sole positive constant and both arrays at least n*n. The fast
-// path keeps two running pointers. n > 0 and k starts at 0, so the loop is
-// bottom-tested and the product is `imul rax, [rsi]`. An even unroll was
-// measured and was slower, so it is not emitted. A failed i/j guard runs
-// the original loop. The fast path jumps past that copy.
+// path keeps two running pointers, one step per branch. An even unroll was
+// measured and was slower, so it is not emitted. A bottom-tested loop with
+// `imul` from memory was also measured and was slower, so the test stays
+// at the top. A failed i/j guard runs the original loop.
 static int try_strength_dot(Codegen* cg, AstNode* wh) {
     if (g_strength_busy || !o2_hosted() || !wh || wh->type != AST_WHILE || wh->child_count != 2)
         return 0;
@@ -8010,11 +8010,11 @@ static int try_strength_dot(Codegen* cg, AstNode* wh) {
     emit(cg, "    lea rsi, [rbp%lld+%s*8]\n", (long long)sb->offset, rj);
     emit(cg, "    mov rcx, %s\n    shl rcx, 3\n", rn);
     emit(cg, ".L%d:\n", top);
-    emit(cg, "    mov rax, [rdi]\n    imul rax, qword [rsi]\n");
+    emit(cg, "    cmp %s, %s\n    jge .L%d\n", rk, rn, end);
+    emit(cg, "    mov rax, [rdi]\n    mov rbx, [rsi]\n    imul rax, rbx\n");
     emit(cg, "    add %s, rax\n", rs);
     emit(cg, "    add rdi, 8\n    add rsi, rcx\n    add %s, 1\n", rk);
-    emit(cg, "    cmp %s, %s\n    jl .L%d\n", rk, rn, top);
-    emit(cg, "    jmp .L%d\n", end);
+    emit(cg, "    jmp .L%d\n", top);
     emit(cg, ".L%d:\n", slow);
     g_strength_busy = 1;
     gen_stmt(cg, wh);
