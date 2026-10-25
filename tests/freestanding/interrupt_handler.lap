@@ -1,0 +1,18 @@
+// Interrupt handlers save every GPR and return with iretq.
+// Zero parameters: no CPU error code. One parameter: the error code.
+let volatile ticks: i64 = 0;
+
+interrupt fn timer() {
+    ticks = ticks + 1;
+    outb(0x20, 0x20);
+}
+
+interrupt fn fault(err: i64) {
+    ticks = err;
+}
+
+fn kmain() -> i64 {
+    let h = &timer;
+    let f = &fault;
+    return h + f;
+}

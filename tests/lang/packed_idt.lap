@@ -1,0 +1,62 @@
+// Packed structs keep hardware records contiguous. An x86-64 IDT gate is 16 bytes:
+// u16, u16, u8, u8, u16, u32, u32. Ordinary structs still use 8-byte slots.
+packed struct IdtEntry {
+    off_lo: u16,
+    sel: u16,
+    ist: u8,
+    typ: u8,
+    off_mid: u16,
+    off_hi: u32,
+    zero: u32
+}
+
+packed struct DescPtr { limit: u16, base: u64 }
+
+fn main() -> i32 {
+    let e: IdtEntry;
+    e.off_lo = 0x1234;
+    e.sel = 0x08;
+    e.ist = 1;
+    e.typ = 0x8E;
+    e.off_mid = 0xABCD;
+    e.off_hi = 0x11223344;
+    e.zero = 0;
+
+    let b: *u8 = &e;
+    let i = 0;
+    while (i < 16) {
+        print_int(b[i]);
+        if (i < 15) { print(" "); }
+        i = i + 1;
+    }
+    println("");
+    print_int(e.off_lo); println("");
+    print_int(e.sel); println("");
+    print_int(e.ist); println("");
+    print_int(e.typ); println("");
+    print_int(e.off_mid); println("");
+    print_int(e.off_hi); println("");
+
+    let table: [IdtEntry; 2];
+    table[1].off_lo = 0;
+    table[1].sel = 0x10;
+    table[1].ist = 0;
+    table[1].typ = 0x8E;
+    table[1].off_mid = 0;
+    table[1].off_hi = 0;
+    table[1].zero = 0;
+    let p: *u8 = &table[0];
+    print_int(p[18]); println("");
+    print_int(p[21]); println("");
+    print_int(table[1].sel); println("");
+
+    let d: DescPtr;
+    d.limit = 0x1FF;
+    d.base = 0x10000;
+    let q: *u8 = &d;
+    print_int(q[0]); println("");
+    print_int(q[1]); println("");
+    print_int(q[2]); println("");
+    print_int(q[9]); println("");
+    return 0;
+}

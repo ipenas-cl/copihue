@@ -1,0 +1,81 @@
+section .data
+__syscall_rsp: dq 0
+__syscall_user_rsp: dq 0
+section .bss
+kstack: resb 256
+section .text
+sys_write:
+    mov [__syscall_user_rsp], rsp
+    mov rsp, [__syscall_rsp]
+    push qword [__syscall_user_rsp]
+    push rcx
+    push r11
+    push r9
+    push rax
+    mov r9, r8
+    mov r8, r10
+    mov rcx, rdx
+    mov rdx, rsi
+    mov rsi, rdi
+    mov rdi, rax
+    push rbp
+    mov rbp, rsp
+    sub rsp, __frame_sys_write
+    mov [rbp-8], rdi
+    mov [rbp-16], rsi
+    mov [rbp-24], rdx
+    mov [rbp-32], rcx
+    mov [rbp-40], r8
+    mov [rbp-48], r9
+    mov rax, [rbp+16]
+    mov [rbp-56], rax
+    mov rax, [rbp-8]
+    push rax
+    mov rax, 1
+    mov rbx, rax
+    pop rax
+    cmp rax, rbx
+    sete al
+    movzx rax, al
+    test rax, rax
+    jz .L0
+    mov rax, [rbp-16]
+    push rax
+    mov rax, [rbp-56]
+    mov rbx, rax
+    pop rax
+    add rax, rbx
+    jmp .Lret_sys_write
+    jmp .L1
+.L0:
+.L1:
+    mov rax, 0
+    jmp .Lret_sys_write
+    xor rax, rax
+.Lret_sys_write:
+    leave
+    pop rax
+    pop r9
+    pop r11
+    pop rcx
+    pop rsp
+    o64 sysret
+__frame_sys_write equ 128
+kmain:
+    push rbp
+    mov rbp, rsp
+    sub rsp, __frame_kmain
+    lea rax, [kstack]
+    push rax
+    mov rax, 256
+    mov rbx, rax
+    pop rax
+    add rax, rbx
+    mov [__syscall_rsp], rax
+    mov rax, 0
+    leave
+    ret
+    xor rax, rax
+    leave
+    ret
+__frame_kmain equ 64

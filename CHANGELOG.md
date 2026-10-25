@@ -2,6 +2,21 @@
 
 Todos los cambios importantes del proyecto.
 
+## [0.20.0] - 2026-10-25
+
+### Added
+- `packed struct`: fields use their real width with no padding, so an x86-64 IDT gate is 16 bytes. Global arrays of structs can be indexed and their fields assigned without clobbering a neighbor.
+- Function addresses (`&name`) and indirect calls through a local, a global, or an array element.
+- `interrupt fn` (0 arguments, or 1 for the CPU error code; saves the general registers; returns with `iretq`) and `syscall fn` (Linux register convention in, up to 7 arguments, stack switch, `sysret`). `set_syscall_stack(top)` publishes the kernel stack those entries switch to.
+- `let volatile` globals. A volatile global is loaded and stored on every use and is not folded or lifted out of a loop.
+- Functions may take up to 16 parameters. Arguments past the sixth use the System V stack slots.
+- Freestanding instructions `lidt`, `lgdt`, `invlpg`, `rdmsr`, `wrmsr`, and `swapgs`.
+- `tests/flat/min_kernel.lap`: a `--flat` image with boot, serial output, a bump allocator, a packed IDT, an interrupt handler, and a syscall entry.
+- Diagnostics for an unknown function, a direct call with the wrong argument count, an assignment to an undeclared name, and an interrupt function with the wrong shape.
+
+### Changed
+- Language version is 0.20.0.
+
 ## [0.19.0] - 2026-10-22
 
 ### Changed
