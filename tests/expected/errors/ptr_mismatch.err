@@ -1,0 +1,7 @@
+tests/errors/ptr_mismatch.lap:9:18: error: expected *u8, found *Point
+      9 |     let p: *u8 = &pt;
+        |                  ^
+tests/errors/ptr_mismatch.lap:10:10: error: argument 1 of 'take': expected *u8, found *Point
+     10 |     take(&pt);
+        |          ^
+2 errors, compilation failed

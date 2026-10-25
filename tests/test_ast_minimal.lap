@@ -44,7 +44,7 @@ fn main() -> i64 {
     print_int(node);
     println("");
 
-    let node_type = ast_get_type(node);
+    let node_type = ast_get_type(node as *i64);
     print("node_type = ");
     print_int(node_type);
     println("");

@@ -104,12 +104,12 @@ fn socket_connect(sockfd: i32, port: i32) -> i32 {
     return syscall6(SYS_CONNECT, sockfd, sockaddr, 16, 0, 0, 0);
 }
 
-fn socket_send(sockfd: i32, buffer: i32, length: i32) -> i32 {
+fn socket_send(sockfd: i32, buffer: *u8, length: i32) -> i32 {
     // send = write for sockets
     return write(sockfd, buffer, length);
 }
 
-fn socket_recv(sockfd: i32, buffer: i32, length: i32) -> i32 {
+fn socket_recv(sockfd: i32, buffer: *u8, length: i32) -> i32 {
     // recv = read for sockets
     return read(sockfd, buffer, length);
 }

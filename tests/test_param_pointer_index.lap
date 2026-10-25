@@ -2,7 +2,7 @@
 
 fn read_byte(ptr: *i8, idx: i64) -> i64 {
     print("  In read_byte: ptr = ");
-    print_int(ptr);
+    print_int(ptr as i64);
     println("");
 
     let val = ptr[idx];

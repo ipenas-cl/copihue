@@ -18,7 +18,7 @@ fn main() -> i64 {
     }
 
     print("node_ptr = ");
-    print_int(node_ptr);
+    print_int(node_ptr as i64);
     println("");
 
     println("Calling helper...");

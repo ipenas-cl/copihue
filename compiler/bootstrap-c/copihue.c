@@ -14,7 +14,7 @@
 
 // ==== NAMING (single place to change when the language is renamed) ====
 #define LANG_NAME     "Copihue"
-#define LANG_VERSION  "0.23.1"
+#define LANG_VERSION  "0.24.0"
 #define COMPILER_BIN  "copihue"
 #define SRC_EXT       ".lap"   /* Lapageria rosea, the copihue */
 #define OLD_SRC_EXT   ".cph"   /* v0.18.x extension, still accepted with a warning */
@@ -134,7 +134,7 @@ typedef enum {
     AST_UNARY, AST_DEREF, AST_ADDR_OF, AST_GLOBAL_VAR, AST_ARRAY_ASSIGN, AST_FIELD_ASSIGN,
     AST_LOGICAL,  // && and || operators with short-circuit evaluation
     AST_BREAK, AST_CONTINUE,
-    AST_DATA, AST_DATA_ITEM
+    AST_DATA, AST_DATA_ITEM, AST_CAST
 } AstType;
 
 typedef struct AstNode {
@@ -172,6 +172,7 @@ typedef struct {
     int volatile_pointee; // *volatile T: loads/stores through this pointer are volatile
     int array_len;        // Declared element count when is_array (0 if unknown)
     int reg;              // -1 stack slot; 0..3 = r12..r15 at hosted -O2
+    int as_int;           // Pointer value that may also be used as an integer
 } Symbol;
 
 #define MAX_BLOCK_SCOPE 64
@@ -253,6 +254,7 @@ typedef struct {
 // Kind of the function currently being generated (for return/epilogue).
 static int g_fn_flags = 0;
 static char g_fn_name[128];
+static AstNode* g_cur_fn = NULL;   // Function whose body is being generated
 
 // ==== MEMORY HELPERS ====
 void* safe_realloc(void* ptr, size_t size) {
@@ -410,6 +412,7 @@ int symtab_add(SymbolTable* st, char* name, int size) {
     st->symbols[st->count - 1].is_volatile = 0;
     st->symbols[st->count - 1].volatile_pointee = 0;
     st->symbols[st->count - 1].array_len = 0;
+    st->symbols[st->count - 1].as_int = 0;
     symbol_assign_reg(&st->symbols[st->count - 1]);
     return -st->stack_size;
 }
@@ -427,6 +430,7 @@ int symtab_add_struct(SymbolTable* st, char* name, char* type_name, int size_byt
     st->symbols[st->count - 1].is_volatile = 0;
     st->symbols[st->count - 1].volatile_pointee = 0;
     st->symbols[st->count - 1].array_len = 0;
+    st->symbols[st->count - 1].as_int = 0;
     symbol_assign_reg(&st->symbols[st->count - 1]);
     return -st->stack_size;
 }
@@ -444,6 +448,7 @@ int symtab_add_pointer(SymbolTable* st, char* name) {
     st->symbols[st->count - 1].is_volatile = 0;
     st->symbols[st->count - 1].volatile_pointee = 0;
     st->symbols[st->count - 1].array_len = 0;
+    st->symbols[st->count - 1].as_int = 0;
     symbol_assign_reg(&st->symbols[st->count - 1]);
     return -st->stack_size;
 }
@@ -837,6 +842,9 @@ int get_log2(long n) {
 AstNode* parse_expr(Parser* p);
 AstNode* parse_stmt(Parser* p);
 TypeSpec parse_type(Parser* p);
+static int peek_word(Parser* p, const char* s);
+static int at_type_start(Parser* p);
+static void error_expected_type(Parser* p);
 
 // Turn 42, 1_000, 0xFF, 0b1010, 'A', '\n' into a decimal string
 char* number_literal_to_decimal(Tok t) {
@@ -1102,11 +1110,31 @@ AstNode* parse_postfix(Parser* p) {
     return left;
 }
 
-AstNode* parse_multiplicative(Parser* p) {
+// `as` is a contextual postfix word, not a keyword (a variable may be named as).
+// It binds looser than unary `&`/`*` and postfix `[]` `.` `->`, and tighter
+// than `*` `/` `+`, so `&e as *u8` is `(&e) as *u8` and `1 + 2 as u8` is `1 + (2 as u8)`.
+AstNode* parse_cast(Parser* p) {
     AstNode* left = parse_postfix(p);
+    while (peek_word(p, "as")) {
+        advance_tok(p);
+        if (!at_type_start(p)) error_expected_type(p);
+        TypeSpec spec = parse_type(p);
+        AstNode* cast = ast_new(AST_CAST);
+        cast->value = spec.base_type;
+        cast->is_pointer = spec.is_pointer | (spec.is_mutable << 1) | (spec.is_volatile << 2);
+        cast->array_size = spec.array_count;
+        if (spec.is_array) cast->struct_type = strdup("__array__");
+        ast_add(cast, left);
+        left = cast;
+    }
+    return left;
+}
+
+AstNode* parse_multiplicative(Parser* p) {
+    AstNode* left = parse_cast(p);
     while (check_tok(p, T_STAR) || check_tok(p, T_SLASH) || check_tok(p, T_MOD)) {
         Tok op = advance_tok(p);
-        AstNode* right = parse_postfix(p);
+        AstNode* right = parse_cast(p);
 
         // Constant folding optimization (O1+)
         if (optimization_level >= 1) {
@@ -1682,7 +1710,8 @@ AstNode* parse_func(Parser* p) {
     expect(p, T_RPAREN);
 
     // The return type used to be a single token, so `-> *u8` ate `*` and then
-    // rejected `u8`. It is parsed and not checked: the value still comes back in rax.
+    // rejected `u8`. An integer or pointer return is checked against `return`.
+    // The value still comes back in rax.
     if (match_tok(p, T_ARROW)) {
         TypeSpec spec = parse_type(p);
         func->is_pointer = spec.is_pointer | (spec.is_mutable << 1) | (spec.is_volatile << 2);
@@ -2018,6 +2047,544 @@ static AstNode* find_func(Codegen* cg, const char* name) {
     return fwd;
 }
 
+// ==== TYPES (0.24.0) ====
+// Assignments, call arguments, and `return` distinguish integers from pointers.
+// `*mut` and `*volatile` on the same pointee are the same type. An integer
+// literal may initialize a pointer (a physical address or null). Pointer
+// arithmetic and malloc() yield an address, which converts to an integer and,
+// for malloc, to any pointer. `as` is the explicit conversion.
+
+static char* array_elem_type_name(Codegen* cg, AstNode* arr);
+static char* obj_record_type(Codegen* cg, AstNode* obj);
+
+typedef enum { VK_UNK = 0, VK_INT, VK_PTR, VK_ADDR, VK_STRUCT, VK_MEM } VKind;
+
+typedef struct {
+    VKind kind;
+    int bits;
+    int sg;
+    int lit;
+    int addr_int;
+    long long litv;
+    char disp[160];
+} VTy;
+
+static int int_name(const char* s, int* bits, int* sg) {
+    if (!s) return 0;
+    if (!strcmp(s, "i8"))  { *bits = 8;  *sg = 1; return 1; }
+    if (!strcmp(s, "u8"))  { *bits = 8;  *sg = 0; return 1; }
+    if (!strcmp(s, "i16")) { *bits = 16; *sg = 1; return 1; }
+    if (!strcmp(s, "u16")) { *bits = 16; *sg = 0; return 1; }
+    if (!strcmp(s, "i32")) { *bits = 32; *sg = 1; return 1; }
+    if (!strcmp(s, "u32")) { *bits = 32; *sg = 0; return 1; }
+    if (!strcmp(s, "i64")) { *bits = 64; *sg = 1; return 1; }
+    if (!strcmp(s, "u64")) { *bits = 64; *sg = 0; return 1; }
+    return 0;
+}
+
+static int lit_fits(int bits, int sg, long long v) {
+    if (bits >= 64) return sg ? 1 : v >= 0;
+    if (sg) {
+        long long max = (1LL << (bits - 1)) - 1;
+        long long min = -max - 1;
+        return v >= min && v <= max;
+    }
+    if (v < 0) return 0;
+    unsigned long long max = (bits >= 32) ? 4294967295ULL : ((1ULL << bits) - 1ULL);
+    return (unsigned long long)v <= max;
+}
+
+static void canon_type(const char* in, char* out, int n) {
+    int o = 0;
+    if (!in) { if (n > 0) out[0] = 0; return; }
+    for (int i = 0; in[i] && o + 1 < n; ) {
+        if (in[i] == '*') {
+            out[o++] = '*';
+            i++;
+            for (;;) {
+                if (!strncmp(in + i, "volatile ", 9)) i += 9;
+                else if (!strncmp(in + i, "mut ", 4)) i += 4;
+                else break;
+            }
+        } else out[o++] = in[i++];
+    }
+    out[o] = 0;
+}
+
+static VTy ty_unk(void) {
+    VTy t; memset(&t, 0, sizeof t);
+    t.kind = VK_UNK;
+    snprintf(t.disp, sizeof t.disp, "untyped");
+    return t;
+}
+
+static VTy ty_i64(void) {
+    VTy t; memset(&t, 0, sizeof t);
+    t.kind = VK_INT; t.bits = 64; t.sg = 1;
+    snprintf(t.disp, sizeof t.disp, "i64");
+    return t;
+}
+
+static VTy ty_lit(long long v) {
+    VTy t = ty_i64();
+    t.lit = 1;
+    t.litv = v;
+    return t;
+}
+
+static VTy ty_addr(void) {
+    VTy t; memset(&t, 0, sizeof t);
+    t.kind = VK_ADDR; t.addr_int = 1;
+    snprintf(t.disp, sizeof t.disp, "address");
+    return t;
+}
+
+static VTy ty_mem(void) {
+    VTy t; memset(&t, 0, sizeof t);
+    t.kind = VK_MEM;
+    snprintf(t.disp, sizeof t.disp, "address");
+    return t;
+}
+
+static VTy ty_from_spelled(Codegen* cg, const char* spelled) {
+    VTy t; memset(&t, 0, sizeof t);
+    char canon[160];
+    canon_type(spelled ? spelled : "", canon, (int)sizeof canon);
+    if (!canon[0]) return ty_unk();
+    if (canon[0] == '*') {
+        t.kind = VK_PTR;
+        snprintf(t.disp, sizeof t.disp, "%s", canon);
+        return t;
+    }
+    if (canon[0] == '[') return ty_unk();
+    int bits = 64, sg = 1;
+    if (int_name(canon, &bits, &sg)) {
+        t.kind = VK_INT; t.bits = bits; t.sg = sg;
+        snprintf(t.disp, sizeof t.disp, "%s", canon);
+        return t;
+    }
+    if (cg && cg->types && typetab_lookup(cg->types, canon)) {
+        t.kind = VK_STRUCT;
+        snprintf(t.disp, sizeof t.disp, "%s", canon);
+        return t;
+    }
+    t.kind = VK_UNK;
+    snprintf(t.disp, sizeof t.disp, "%s", canon);
+    return t;
+}
+
+// full=1: function return stores the complete spelling (`*u8`, `i64`, `[u8; 4]`).
+// full=0: a declaration stores the pointee in `base` and the pointer bits apart,
+// so `**u8` is base `*u8` with the pointer bit set.
+static VTy ty_decl(Codegen* cg, int full, int ptr_bits, const char* base) {
+    if (full) return ty_from_spelled(cg, base);
+    if (ptr_bits & 1) {
+        char raw[220];
+        snprintf(raw, sizeof raw, "*%s%s%s",
+                 (ptr_bits & 4) ? "volatile " : "",
+                 (ptr_bits & 2) ? "mut " : "",
+                 base ? base : "");
+        return ty_from_spelled(cg, raw);
+    }
+    return ty_from_spelled(cg, base);
+}
+
+static VTy sym_vty(Codegen* cg, Symbol* s) {
+    if (!s) return ty_unk();
+    if (s->type_name && !strcmp(s->type_name, "__addr__")) return ty_addr();
+    if (s->is_array && s->type_name) {
+        char raw[200];
+        snprintf(raw, sizeof raw, "*%s", s->type_name);
+        return ty_from_spelled(cg, raw);
+    }
+    if (s->is_pointer || (s->type_name && s->type_name[0] == '*')) {
+        VTy p;
+        if (s->type_name && s->type_name[0] == '*') p = ty_from_spelled(cg, s->type_name);
+        else {
+            char raw[200];
+            snprintf(raw, sizeof raw, "*%s", s->type_name ? s->type_name : "u8");
+            p = ty_from_spelled(cg, raw);
+        }
+        p.addr_int = s->as_int;
+        return p;
+    }
+    if (s->type_name) return ty_from_spelled(cg, s->type_name);
+    return ty_unk();
+}
+
+static VTy global_vty(Codegen* cg, GlobalVar* g) {
+    if (!g) return ty_unk();
+    if (g->is_array && g->elem_type) {
+        char raw[200];
+        snprintf(raw, sizeof raw, "*%s", g->elem_type);
+        return ty_from_spelled(cg, raw);
+    }
+    if (g->is_pointer) {
+        char raw[200];
+        const char* base = g->pointee_type ? g->pointee_type : g->type_name;
+        snprintf(raw, sizeof raw, "*%s", base ? base : "");
+        return ty_from_spelled(cg, raw);
+    }
+    if (g->type_name) return ty_from_spelled(cg, g->type_name);
+    return ty_unk();
+}
+
+static void bind_vty(Symbol* s, VTy t) {
+    if (!s) return;
+    if (t.kind == VK_ADDR) {
+        s->type_name = strdup("__addr__");
+        s->is_pointer = 0;
+        s->as_int = 1;
+        return;
+    }
+    if (t.kind == VK_PTR) {
+        s->is_pointer = 1;
+        s->type_name = strdup(t.disp);
+        s->as_int = t.addr_int;
+        return;
+    }
+    if (t.kind == VK_INT) {
+        s->type_name = strdup(t.disp[0] ? t.disp : "i64");
+        s->is_pointer = 0;
+        s->as_int = 0;
+        return;
+    }
+    if (t.kind == VK_STRUCT && t.disp[0]) {
+        s->type_name = strdup(t.disp);
+        s->is_pointer = 0;
+        s->as_int = 0;
+    }
+}
+
+static VTy ty_pointer_to(VTy elem) {
+    if (elem.kind == VK_UNK || elem.kind == VK_ADDR || !elem.disp[0]) return ty_addr();
+    char raw[200];
+    snprintf(raw, sizeof raw, "*%s", elem.disp);
+    return ty_from_spelled(NULL, raw);
+}
+
+static VTy expr_ty(Codegen* cg, AstNode* n);
+
+static VTy ty_indexed(Codegen* cg, AstNode* base) {
+    if (base && base->type == AST_IDENT) {
+        char* et = array_elem_type_name(cg, base);
+        if (et) return ty_from_spelled(cg, et);
+    }
+    VTy b = expr_ty(cg, base);
+    if (b.kind == VK_PTR && b.disp[0] == '*') return ty_from_spelled(cg, b.disp + 1);
+    return ty_unk();
+}
+
+static VTy ty_addr_of(Codegen* cg, AstNode* n) {
+    if (!n || !n->child_count || !n->children[0]) return ty_unk();
+    AstNode* c = n->children[0];
+    if (c->type == AST_IDENT && c->name) {
+        Symbol* s = (cg && cg->symtab) ? symtab_lookup_symbol(cg->symtab, c->name) : NULL;
+        GlobalVar* g = (!s && cg && cg->global_symtab) ? global_symtab_lookup(cg->global_symtab, c->name) : NULL;
+        if (!s && !g && find_func(cg, c->name)) return ty_i64();
+        if (s) {
+            if (s->is_pointer || (s->type_name && s->type_name[0] == '*')) return sym_vty(cg, s);
+            if (s->type_name) {
+                char raw[200];
+                snprintf(raw, sizeof raw, "*%s", s->type_name);
+                return ty_from_spelled(cg, raw);
+            }
+            return ty_addr();
+        }
+        if (g) {
+            if (g->is_pointer) return global_vty(cg, g);
+            if (g->is_array && g->elem_type) {
+                char raw[200];
+                snprintf(raw, sizeof raw, "*%s", g->elem_type);
+                return ty_from_spelled(cg, raw);
+            }
+            if (g->type_name) {
+                char raw[200];
+                snprintf(raw, sizeof raw, "*%s", g->type_name);
+                return ty_from_spelled(cg, raw);
+            }
+        }
+    }
+    return ty_pointer_to(expr_ty(cg, c));
+}
+
+static VTy ty_field(Codegen* cg, AstNode* n) {
+    if (!n || !n->child_count || !n->name) return ty_unk();
+    char* rec = obj_record_type(cg, n->children[0]);
+    if (!rec) return ty_unk();
+    char* ft = typetab_field_type(cg->types, rec, n->name);
+    if (!ft) return ty_unk();
+    return ty_from_spelled(cg, ft);
+}
+
+static int builtin_ret_ty(const char* f, VTy* out) {
+    if (!f) return 0;
+    if (!strcmp(f, "malloc")) { *out = ty_addr(); return 1; }
+    if (!strcmp(f, "bss_start") || !strcmp(f, "bss_end")) {
+        *out = ty_from_spelled(NULL, "*u8");
+        return 1;
+    }
+    if (!strcmp(f, "strlen") || !strcmp(f, "strcmp") || !strcmp(f, "strcpy") ||
+        !strcmp(f, "open") || !strcmp(f, "read") || !strcmp(f, "write") || !strcmp(f, "close") ||
+        !strcmp(f, "inb") || !strcmp(f, "inw") || !strcmp(f, "inl") ||
+        !strcmp(f, "outb") || !strcmp(f, "outw") || !strcmp(f, "outl") ||
+        !strcmp(f, "rdmsr") || !strcmp(f, "wrmsr") || !strcmp(f, "ltr") ||
+        !strcmp(f, "read_cr0") || !strcmp(f, "read_cr2") || !strcmp(f, "read_cr3") || !strcmp(f, "read_cr4") ||
+        !strcmp(f, "write_cr0") || !strcmp(f, "write_cr3") || !strcmp(f, "write_cr4") ||
+        !strcmp(f, "print_int") || !strcmp(f, "print") || !strcmp(f, "println") ||
+        !strcmp(f, "exit") || !strcmp(f, "free") || !strcmp(f, "syscall") || !strcmp(f, "syscall6") ||
+        !strcmp(f, "lidt") || !strcmp(f, "lgdt") || !strcmp(f, "invlpg") ||
+        !strcmp(f, "hlt") || !strcmp(f, "cli") || !strcmp(f, "sti") || !strcmp(f, "pause") ||
+        !strcmp(f, "swapgs") || !strcmp(f, "iretq") || !strcmp(f, "sysretq") ||
+        !strcmp(f, "set_syscall_stack") || !strcmp(f, "ljmp") || !strcmp(f, "int") || !strcmp(f, "asm")) {
+        *out = ty_i64();
+        return 1;
+    }
+    return 0;
+}
+
+static VTy ty_binop(Codegen* cg, AstNode* n) {
+    VTy L = (n->child_count > 0) ? expr_ty(cg, n->children[0]) : ty_unk();
+    VTy R = (n->child_count > 1) ? expr_ty(cg, n->children[1]) : ty_unk();
+    int plus = n->op && n->op[0] == '+' && !n->op[1];
+    int minus = n->op && n->op[0] == '-' && !n->op[1];
+    if ((plus || minus) && (L.kind == VK_PTR || L.kind == VK_ADDR) && R.kind == VK_INT) {
+        if (L.kind == VK_ADDR) return ty_addr();
+        L.addr_int = 1;
+        return L;
+    }
+    if (plus && L.kind == VK_INT && (R.kind == VK_PTR || R.kind == VK_ADDR)) {
+        if (R.kind == VK_ADDR) return ty_addr();
+        R.addr_int = 1;
+        return R;
+    }
+    if (minus && (L.kind == VK_PTR || L.kind == VK_ADDR) && (R.kind == VK_PTR || R.kind == VK_ADDR))
+        return ty_i64();
+    return ty_i64();
+}
+
+static VTy expr_ty(Codegen* cg, AstNode* n) {
+    if (!n) return ty_unk();
+    if (n->type == AST_NUMBER) return ty_lit(n->value ? atoll(n->value) : 0);
+    if (n->type == AST_STRING) return ty_from_spelled(NULL, "*u8");
+    if (n->type == AST_CAST) {
+        if (n->struct_type && !strcmp(n->struct_type, "__array__")) return ty_unk();
+        return ty_decl(cg, 0, n->is_pointer, n->value);
+    }
+    if (n->type == AST_IDENT && n->name) {
+        Symbol* s = (cg && cg->symtab) ? symtab_lookup_symbol(cg->symtab, n->name) : NULL;
+        if (s) return sym_vty(cg, s);
+        GlobalVar* g = (cg && cg->global_symtab) ? global_symtab_lookup(cg->global_symtab, n->name) : NULL;
+        if (g) return global_vty(cg, g);
+        return ty_unk();
+    }
+    if (n->type == AST_ADDR_OF) return ty_addr_of(cg, n);
+    if (n->type == AST_DEREF && n->child_count > 0) {
+        VTy p = expr_ty(cg, n->children[0]);
+        if (p.kind == VK_PTR && p.disp[0] == '*') return ty_from_spelled(cg, p.disp + 1);
+        return ty_unk();
+    }
+    if (n->type == AST_INDEX && n->child_count > 0) return ty_indexed(cg, n->children[0]);
+    if (n->type == AST_FIELD_ACCESS) return ty_field(cg, n);
+    if (n->type == AST_UNARY && n->child_count > 0) {
+        if (n->op && n->op[0] == '-') {
+            VTy c = expr_ty(cg, n->children[0]);
+            if (c.kind == VK_INT && c.lit) return ty_lit(-c.litv);
+        }
+        return ty_i64();
+    }
+    if (n->type == AST_BINOP) return ty_binop(cg, n);
+    if (n->type == AST_COMPARE || n->type == AST_LOGICAL) return ty_i64();
+    if (n->type == AST_CALL && n->name) {
+        VTy b;
+        if (builtin_ret_ty(n->name, &b)) return b;
+        Symbol* loc = (cg && cg->symtab) ? symtab_lookup_symbol(cg->symtab, n->name) : NULL;
+        GlobalVar* gv = (!loc && cg && cg->global_symtab) ? global_symtab_lookup(cg->global_symtab, n->name) : NULL;
+        AstNode* fn = cg ? find_func(cg, n->name) : NULL;
+        int indirect = (loc || (gv && !fn)) ? 1 : 0;
+        if (indirect || !fn) return ty_unk();
+        return ty_decl(cg, 1, fn->is_pointer, fn->value);
+    }
+    if (n->type == AST_STRUCT_LITERAL && n->struct_type) return ty_from_spelled(cg, n->struct_type);
+    if (n->type == AST_ASSIGN && n->child_count > 0) return expr_ty(cg, n->children[0]);
+    return ty_unk();
+}
+
+static int ptr_compat(const char* a, const char* b);
+
+static void mismatch(AstNode* at, const char* ctx, const char* exp, const char* got) {
+    if (!at) return;
+    if (ctx && ctx[0])
+        diag_error(at->line, at->col, "%s: expected %s, found %s", ctx, exp, got);
+    else
+        diag_error(at->line, at->col, "expected %s, found %s", exp, got);
+}
+
+static void check_types(AstNode* at, const char* ctx, VTy dst, VTy src) {
+    if (!at) return;
+    if (dst.kind == VK_UNK || src.kind == VK_UNK) return;
+    if (dst.kind == VK_STRUCT || src.kind == VK_STRUCT) return;
+    if (src.kind == VK_ADDR) return;
+    if (dst.kind == VK_MEM) return;
+    if (dst.kind == VK_INT && src.kind == VK_INT) {
+        if (src.lit && !lit_fits(dst.bits, dst.sg, src.litv)) {
+            if (ctx && ctx[0])
+                diag_error(at->line, at->col, "%s: expected %s, found integer literal %lld",
+                           ctx, dst.disp, src.litv);
+            else
+                diag_error(at->line, at->col, "expected %s, found integer literal %lld",
+                           dst.disp, src.litv);
+        }
+        return;
+    }
+    if (dst.kind == VK_INT && src.kind == VK_PTR && src.addr_int) return;
+    if (dst.kind == VK_INT && src.kind == VK_PTR) { mismatch(at, ctx, dst.disp, src.disp); return; }
+    if (dst.kind == VK_PTR && src.kind == VK_INT && src.lit) return;
+    if (dst.kind == VK_PTR && src.kind == VK_INT) { mismatch(at, ctx, dst.disp, src.disp); return; }
+    if (dst.kind == VK_PTR && src.kind == VK_PTR) {
+        if (!ptr_compat(dst.disp, src.disp)) mismatch(at, ctx, dst.disp, src.disp);
+        return;
+    }
+}
+
+// *i8 and *u8 are the same byte pointer. Signedness is not a distinct pointee
+// for an 8-bit element; *u8 versus *Point, or *i32 versus *i64, still disagree.
+static int ptr_compat(const char* a, const char* b) {
+    if (!a || !b) return 0;
+    if (!strcmp(a, b)) return 1;
+    if ((!strcmp(a, "*i8") && !strcmp(b, "*u8")) || (!strcmp(a, "*u8") && !strcmp(b, "*i8")))
+        return 1;
+    return 0;
+}
+
+static void check_arg(Codegen* cg, AstNode* arg, int idx, const char* fname, VTy dst) {
+    char ctx[128];
+    if (!arg) return;
+    snprintf(ctx, sizeof ctx, "argument %d of '%s'", idx + 1, fname ? fname : "(call)");
+    check_types(arg, ctx, dst, expr_ty(cg, arg));
+}
+
+static void check_user_args(Codegen* cg, AstNode* n, AstNode* fn) {
+    int argc = n->child_count;
+    int want = fn->child_count - 1;
+    int narg = argc < want ? argc : want;
+    for (int i = 0; i < narg; i++) {
+        AstNode* par = fn->children[i];
+        if (!par) continue;
+        VTy dst = ty_decl(cg, 0, par->is_pointer, par->value);
+        check_arg(cg, n->children[i], i, n->name, dst);
+    }
+}
+
+static void check_builtin_args(Codegen* cg, AstNode* n) {
+    const char* f;
+    int c;
+    if (!n || !n->name) return;
+    f = n->name;
+    c = n->child_count;
+    if (!strcmp(f, "print") || !strcmp(f, "println") || !strcmp(f, "strlen")) {
+        if (c >= 1) check_arg(cg, n->children[0], 0, f, ty_from_spelled(cg, "*u8"));
+        return;
+    }
+    if (!strcmp(f, "strcmp") || !strcmp(f, "strcpy")) {
+        if (c >= 2) {
+            check_arg(cg, n->children[0], 0, f, ty_from_spelled(cg, "*u8"));
+            check_arg(cg, n->children[1], 1, f, ty_from_spelled(cg, "*u8"));
+        }
+        return;
+    }
+    if (!strcmp(f, "open")) {
+        if (c >= 2) {
+            check_arg(cg, n->children[0], 0, f, ty_from_spelled(cg, "*u8"));
+            check_arg(cg, n->children[1], 1, f, ty_i64());
+            if (c >= 3) check_arg(cg, n->children[2], 2, f, ty_i64());
+        }
+        return;
+    }
+    if (!strcmp(f, "read") || !strcmp(f, "write")) {
+        if (c >= 3) {
+            check_arg(cg, n->children[0], 0, f, ty_i64());
+            check_arg(cg, n->children[1], 1, f, ty_mem());
+            check_arg(cg, n->children[2], 2, f, ty_i64());
+        }
+        return;
+    }
+    if (!strcmp(f, "free") || !strcmp(f, "lidt") || !strcmp(f, "lgdt") || !strcmp(f, "invlpg")) {
+        if (c == 1) check_arg(cg, n->children[0], 0, f, ty_mem());
+        return;
+    }
+    if (!strcmp(f, "print_int") || !strcmp(f, "exit") || !strcmp(f, "malloc") ||
+        !strcmp(f, "close") || !strcmp(f, "inb") || !strcmp(f, "inw") || !strcmp(f, "inl") ||
+        !strcmp(f, "rdmsr") || !strcmp(f, "ltr") || !strcmp(f, "set_syscall_stack") ||
+        !strcmp(f, "write_cr0") || !strcmp(f, "write_cr3") || !strcmp(f, "write_cr4")) {
+        if ((!strcmp(f, "print_int") || !strcmp(f, "exit") || !strcmp(f, "malloc") || !strcmp(f, "close")) ? c >= 1 : c == 1)
+            check_arg(cg, n->children[0], 0, f, ty_i64());
+        return;
+    }
+    if (!strcmp(f, "outb") || !strcmp(f, "outw") || !strcmp(f, "outl") || !strcmp(f, "wrmsr")) {
+        if (c == 2) {
+            check_arg(cg, n->children[0], 0, f, ty_i64());
+            check_arg(cg, n->children[1], 1, f, ty_i64());
+        }
+        return;
+    }
+    // syscall registers are raw values: an integer or any pointer.
+    if (!strcmp(f, "syscall") || !strcmp(f, "syscall6")) {
+        for (int i = 0; i < c && i < 7; i++) check_arg(cg, n->children[i], i, f, ty_mem());
+        return;
+    }
+}
+
+static void emit_width_trunc(Codegen* cg, int bits, int sg) {
+    if (bits >= 64) return;
+    if (sg) {
+        if (bits <= 8) emit(cg, "    movsx rax, al\n");
+        else if (bits <= 16) emit(cg, "    movsx rax, ax\n");
+        else emit(cg, "    movsxd rax, eax\n");
+    } else {
+        if (bits <= 8) emit(cg, "    movzx rax, al\n");
+        else if (bits <= 16) emit(cg, "    movzx rax, ax\n");
+        else emit(cg, "    mov eax, eax\n");
+    }
+}
+
+static int is_numeral(AstNode* n, long long* v) {
+    if (!n) return 0;
+    if (n->type == AST_NUMBER && n->value) { *v = atoll(n->value); return 1; }
+    if (n->type == AST_UNARY && n->op && n->op[0] == '-' && n->child_count == 1 &&
+        n->children[0] && n->children[0]->type == AST_NUMBER && n->children[0]->value) {
+        *v = -atoll(n->children[0]->value);
+        return 1;
+    }
+    return 0;
+}
+
+static void emit_store_trunc(Codegen* cg, const char* tname, AstNode* rhs) {
+    int bits = 64, sg = 1;
+    long long v = 0;
+    if (!int_name(tname, &bits, &sg) || bits >= 64) return;
+    if (is_numeral(rhs, &v) && lit_fits(bits, sg, v)) return;
+    emit_width_trunc(cg, bits, sg);
+}
+
+static void trunc_rcx_named(Codegen* cg, const char* tname) {
+    int bits = 64, sg = 1;
+    if (!tname || tname[0] == '*') return;
+    if (!int_name(tname, &bits, &sg) || bits >= 64) return;
+    emit(cg, "    mov rax, rcx\n");
+    emit_width_trunc(cg, bits, sg);
+    emit(cg, "    mov rcx, rax\n");
+}
+
+static void trunc_rax_field(Codegen* cg, const char* stype, const char* field) {
+    char* ft;
+    int bits = 64, sg = 1;
+    if (!stype || !field || !cg->types) return;
+    ft = typetab_field_type(cg->types, (char*)stype, (char*)field);
+    if (ft && int_name(ft, &bits, &sg)) emit_width_trunc(cg, bits, sg);
+}
+
+
 static int is_struct_value_arg(Codegen* cg, AstNode* a) {
     if (!a || a->type != AST_IDENT) return 0;
     Symbol* asym = symtab_lookup_symbol(cg->symtab, a->name);
@@ -2072,6 +2639,8 @@ static void gen_user_call(Codegen* cg, AstNode* n, int indirect) {
             if (argc != want) {
                 diag_error(n->line, n->col, "function '%s' takes %d argument%s, not %d",
                            n->name, want, want == 1 ? "" : "s", argc);
+            } else {
+                check_user_args(cg, n, fn);
             }
         }
     }
@@ -2309,6 +2878,7 @@ static void gen_print_arg(Codegen* cg, AstNode* arg) {
 }
 
 void gen_builtin_call(Codegen* cg, AstNode* n) {
+    check_builtin_args(cg, n);
     if (gen_core_builtin(cg, n)) return;
     if (g_freestanding) {
         for (int i = 0; hosted_only_builtins[i]; i++) {
@@ -3425,6 +3995,14 @@ void gen_expr(Codegen* cg, AstNode* n) {
                 emit(cg, "    not rax\n");
             }
         }
+    } else if (n->type == AST_CAST) {
+        // Pointer and 64-bit casts are a type change only. A narrower integer
+        // cast keeps the low bits (signed: sign-extend, unsigned: zero-extend).
+        if (n->child_count > 0) gen_expr(cg, n->children[0]);
+        if (!(n->is_pointer & 1)) {
+            int bits = 64, sg = 1;
+            if (int_name(n->value, &bits, &sg)) emit_width_trunc(cg, bits, sg);
+        }
     } else if (n->type == AST_ASSIGN) {
         if (n->name) {
             AstNode dst;
@@ -3438,17 +4016,27 @@ void gen_expr(Codegen* cg, AstNode* n) {
                 return;
             }
         }
+        {
+            Symbol* asym = n->name ? symtab_lookup_symbol(cg->symtab, n->name) : NULL;
+            GlobalVar* ag = (!asym && n->name) ? global_symtab_lookup(cg->global_symtab, n->name) : NULL;
+            VTy dst_ty = asym && !asym->is_array ? sym_vty(cg, asym) : (ag ? global_vty(cg, ag) : ty_unk());
+            if (n->child_count > 0) check_types(n->children[0], "", dst_ty, expr_ty(cg, n->children[0]));
+        }
         gen_expr(cg, n->children[0]);
         // Try local variable first
         int off = symtab_lookup(cg->symtab, n->name);
         if (off) {
             Symbol* sym = symtab_lookup_symbol(cg->symtab, n->name);
+            if (sym && !sym->is_pointer && !sym->is_array)
+                emit_store_trunc(cg, sym->type_name, n->children[0]);
             if (sym && local_reg(sym)) emit(cg, "    mov %s, rax\n", local_reg(sym));
             else emit(cg, "    mov [rbp%d], rax\n", off);
         } else {
             // Try global variable
             GlobalVar* gvar = global_symtab_lookup(cg->global_symtab, n->name);
             if (gvar) {
+                if (!gvar->is_pointer && !gvar->is_array)
+                    emit_store_trunc(cg, gvar->type_name, n->children[0]);
                 if (gvar->is_volatile) emit(cg, "    mov [%s], rax  ; volatile\n", gvar->name);
                 else emit(cg, "    mov [%s], rax\n", gvar->name);
             } else if (n->name) {
@@ -3781,6 +4369,7 @@ void gen_expr(Codegen* cg, AstNode* n) {
                 gen_struct_assign(cg, &idx, value_expr);
                 return;
             }
+            if (et) check_types(value_expr, "", ty_from_spelled(cg, et), expr_ty(cg, value_expr));
         }
 
         // Evaluate value expression and save it
@@ -3933,6 +4522,8 @@ void gen_expr(Codegen* cg, AstNode* n) {
         {
             char* rec = obj_record_type(cg, obj);
             char* ft = rec ? typetab_field_type(cg->types, rec, field_name) : NULL;
+            if (ft && (ft[0] == '*' || !is_record(cg, ft)))
+                check_types(value_expr, "", ty_from_spelled(cg, ft), expr_ty(cg, value_expr));
             if (ft && ft[0] != '*' && is_record(cg, ft)) {
                 AstNode fld;
                 AstNode* fk[1];
@@ -4005,8 +4596,10 @@ void gen_expr(Codegen* cg, AstNode* n) {
                         int psz = 8, psg = 0, poff = field_off, pvol = 0;
                         if (field_mem_info(cg, struct_type, field_name, &poff, &psz, &psg, &pvol))
                             emit_sized_store_mark(cg, "rcx", psz, 0, pvol);
-                        else
+                        else {
+                            trunc_rax_field(cg, struct_type, field_name);
                             emit(cg, "    mov [rcx], rax\n");  // Store value at field location
+                        }
                     }
                 }
             } else {
@@ -4025,8 +4618,10 @@ void gen_expr(Codegen* cg, AstNode* n) {
                         int psz = 8, psg = 0, poff = field_off, pvol = 0;
                         if (field_mem_info(cg, gv->elem_type, field_name, &poff, &psz, &psg, &pvol))
                             emit_sized_store_mark(cg, "rcx", psz, 0, pvol);
-                        else
+                        else {
+                            trunc_rax_field(cg, gv->elem_type, field_name);
                             emit(cg, "    mov [rcx], rax\n");
+                        }
                     } else {
                         emit(cg, "    pop rbx\n    pop rax\n");
                     }
@@ -4054,7 +4649,9 @@ void gen_expr(Codegen* cg, AstNode* n) {
                     emit(cg, "    mov rcx, rax\n    pop rax\n");
                     emit_sized_store_mark(cg, mem, psz, 0, pvol);
                 } else {
-                    emit(cg, "    mov rcx, rax\n    pop rax\n    mov [rcx+%d], rax\n", field_off);
+                    emit(cg, "    mov rcx, rax\n    pop rax\n");
+                    trunc_rax_field(cg, stype, field_name);
+                    emit(cg, "    mov [rcx+%d], rax\n", field_off);
                 }
             } else {
                 emit(cg, "    pop rax\n");
@@ -4069,7 +4666,10 @@ void gen_expr(Codegen* cg, AstNode* n) {
                 int sized = field_mem_info(cg, rec, field_name, &poff, &psz, &psg, &pvol);
                 emit(cg, "    mov rcx, rax\n    pop rax\n");
                 if (sized) emit_sized_store_mark(cg, "rcx", psz, 0, pvol);
-                else emit(cg, "    mov [rcx], rax\n");
+                else {
+                    trunc_rax_field(cg, rec, field_name);
+                    emit(cg, "    mov [rcx], rax\n");
+                }
             } else {
                 emit(cg, "    pop rax\n");
                 if (rec && field_off < 0)
@@ -4104,8 +4704,10 @@ void gen_expr(Codegen* cg, AstNode* n) {
                             mem_base_disp(mem, 64, "rbx", poff);
                             emit_sized_store_mark(cg, mem, psz, 1, pvol);
                         } else if (field_off == 0) {
+                            trunc_rcx_named(cg, typetab_field_type(cg->types, struct_type, field_name));
                             emit(cg, "    mov [rbx], rcx\n");  // Store through pointer (no offset)
                         } else {
+                            trunc_rcx_named(cg, typetab_field_type(cg->types, struct_type, field_name));
                             emit(cg, "    mov [rbx+%d], rcx\n", field_off);  // Store through pointer with offset
                         }
                     } else if (packed) {
@@ -4113,7 +4715,9 @@ void gen_expr(Codegen* cg, AstNode* n) {
                         snprintf(mem, sizeof(mem), "rbp%+d", sym->offset + poff);
                         emit_sized_store_mark(cg, mem, psz, 1, pvol);
                     } else {
-                        // For direct structs: store directly
+                        // For direct structs: store directly. An 8-byte slot still
+                        // keeps only the field's declared width.
+                        trunc_rcx_named(cg, typetab_field_type(cg->types, struct_type, field_name));
                         emit(cg, "    mov [rbp%d], rcx\n", sym->offset + field_off);
                     }
                 }
@@ -4130,7 +4734,10 @@ void gen_expr(Codegen* cg, AstNode* n) {
                         char mem[96];
                         mem_base_disp(mem, sizeof(mem), gvar->name, packed ? poff : field_off);
                         if (packed) emit_sized_store_mark(cg, mem, psz, 1, pvol);
-                        else emit(cg, "    mov [%s], rcx\n", mem);
+                        else {
+                            trunc_rcx_named(cg, typetab_field_type(cg->types, gvar->type_name, field_name));
+                            emit(cg, "    mov [%s], rcx\n", mem);
+                        }
                     } else {
                         emit(cg, "    pop rax\n");
                     }
@@ -4257,8 +4864,13 @@ void gen_stmt(Codegen* cg, AstNode* n) {
         return;
     }
     if (n->type == AST_RETURN) {
-        if (n->child_count > 0) gen_expr(cg, n->children[0]);
-        else emit(cg, "    xor rax, rax\n");
+        if (n->child_count > 0) {
+            if (g_cur_fn && !(g_cur_fn->struct_type && !strcmp(g_cur_fn->struct_type, "__array__"))) {
+                VTy dst_ty = ty_decl(cg, 1, g_cur_fn->is_pointer, g_cur_fn->value);
+                check_types(n->children[0], "return value", dst_ty, expr_ty(cg, n->children[0]));
+            }
+            gen_expr(cg, n->children[0]);
+        } else emit(cg, "    xor rax, rax\n");
         if (g_fn_flags & (AF_INTERRUPT | AF_SYSCALL))
             emit(cg, "    jmp .Lret_%s\n", g_fn_name);
         else if (g_fn_flags & AF_NAKED)
@@ -4375,6 +4987,8 @@ void gen_stmt(Codegen* cg, AstNode* n) {
                 cg->symtab->symbols[cg->symtab->count - 1].volatile_pointee = 1;
 
             if (n->child_count > 0) {
+                VTy dst_ty = ty_decl(cg, 0, n->is_pointer, n->value);
+                check_types(n->children[0], "", dst_ty, expr_ty(cg, n->children[0]));
                 gen_expr(cg, n->children[0]);
                 emit(cg, "    mov [rbp%d], rax\n", off);
             }
@@ -4384,10 +4998,24 @@ void gen_stmt(Codegen* cg, AstNode* n) {
         int off = symtab_add(cg->symtab, n->name, size);
         if (n->child_count > 0 && n->children[0]->type == AST_ARRAY_LITERAL)
             cg->symtab->symbols[cg->symtab->count - 1].is_array = 1;
+        if (n->value && cg->symtab && cg->symtab->count > 0)
+            cg->symtab->symbols[cg->symtab->count - 1].type_name = strdup(n->value);
         if (n->child_count > 0) {
+            VTy src_ty = expr_ty(cg, n->children[0]);
+            if (n->value)
+                check_types(n->children[0], "", ty_decl(cg, 0, 0, n->value), src_ty);
+            else if (cg->symtab && cg->symtab->count > 0 && src_ty.kind != VK_STRUCT) {
+                // An untyped integer is i64. Inferring u8 from a byte load would
+                // mask the slot and change code that only stored the widened value.
+                // A struct is not inferred onto this 8-byte slot.
+                if (src_ty.kind == VK_INT) src_ty = ty_i64();
+                bind_vty(&cg->symtab->symbols[cg->symtab->count - 1], src_ty);
+            }
             gen_expr(cg, n->children[0]);
             if (n->children[0]->type != AST_ARRAY_LITERAL) {
                 Symbol* sym = &cg->symtab->symbols[cg->symtab->count - 1];
+                if (!sym->is_pointer && !sym->is_array)
+                    emit_store_trunc(cg, sym->type_name, n->children[0]);
                 if (local_reg(sym)) emit(cg, "    mov %s, rax\n", local_reg(sym));
                 else emit(cg, "    mov [rbp%d], rax\n", off);
             }
@@ -4477,6 +5105,18 @@ static void bind_param(Codegen* cg, AstNode* par, const char* src_reg, int stack
     }
     Symbol* bound = &cg->symtab->symbols[cg->symtab->count - 1];
     const char* rr = local_reg(bound);
+    {
+        int bits = 64, sg = 1;
+        int narrow = par->value && !(par->is_pointer) && int_name(par->value, &bits, &sg) && bits < 64;
+        if (narrow) {
+            if (from_stack) emit(cg, "    mov rax, [rbp+%d]\n", stack_disp);
+            else emit(cg, "    mov rax, %s\n", src_reg);
+            emit_width_trunc(cg, bits, sg);
+            if (rr) emit(cg, "    mov %s, rax\n", rr);
+            else emit(cg, "    mov [rbp%d], rax\n", off);
+            return;
+        }
+    }
     if (rr) {
         if (from_stack) emit(cg, "    mov %s, [rbp+%d]\n", rr, stack_disp);
         else if (strcmp(rr, src_reg)) emit(cg, "    mov %s, %s\n", rr, src_reg);
@@ -4529,6 +5169,7 @@ void gen_func(Codegen* cg, AstNode* n) {
     }
 
     g_fn_flags = n->flags;
+    g_cur_fn = n;
     snprintf(g_fn_name, sizeof(g_fn_name), "%s", n->name);
 
     if (bits) emit(cg, "\nbits %d\n%s:\n", bits, n->name);
@@ -4845,6 +5486,10 @@ void codegen(AstNode* ast, const char* file, StringTable* strtab, TypeTable* typ
             }
             global_symtab_add_full(&global_symtab, gvar->name, type_name, 0, is_initialized, init_value,
                                    is_array, array_count, is_pointer, is_mutable);
+            if (is_initialized && !is_array && gvar->child_count > 0) {
+                VTy dst_ty = ty_decl(&cg, 0, gvar->is_pointer, gvar->value);
+                check_types(gvar->children[0], "", dst_ty, expr_ty(&cg, gvar->children[0]));
+            }
             {
                 GlobalVar* added = global_symtab_lookup(&global_symtab, gvar->name);
                 if (added && (gvar->flags & AF_VOLATILE))
