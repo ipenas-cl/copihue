@@ -1,0 +1,31 @@
+// bits 16: if/while must not write ebx. The countdown hangs if the
+// condition zeros ebx, because `ebx = ebx - 1` then sees -1. The letters
+// are ebx after a false condition, including `&` which would otherwise
+// use ebx as scratch. QEMU checks COPIHUE. -O0 and -O2 are the same image.
+
+bits 16 naked fn _start() {
+    ebx = 4;
+    while (ebx != 0) {
+        ebx = ebx - 1;
+    }
+
+    ebx = 67;
+    if ((ebx & 1) == 0) { ebx = 88; }
+    outb(0x3F8, ebx);
+
+    ebx = 79;
+    while ((ebx & 1) == 0) { ebx = 88; }
+    outb(0x3F8, ebx);
+
+    ebx = 80;
+    while (ebx != 0) {
+        outb(0x3F8, ebx);
+        ebx = 0;
+    }
+
+    outb(0x3F8, 73);
+    outb(0x3F8, 72);
+    outb(0x3F8, 85);
+    outb(0x3F8, 69);
+    while (1) { hlt(); }
+}
