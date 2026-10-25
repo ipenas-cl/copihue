@@ -1,0 +1,4 @@
+tests/errors/volatile_struct.lap:4:18: error: volatile cannot apply to struct 'Point'; mark fields volatile or use '*volatile Point'
+      4 |     let volatile s: Point;
+        |                  ^
+1 error, compilation failed

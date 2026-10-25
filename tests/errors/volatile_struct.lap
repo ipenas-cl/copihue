@@ -1,0 +1,6 @@
+struct Point { x: i64, y: i64 }
+
+fn main() -> i32 {
+    let volatile s: Point;
+    return 0;
+}

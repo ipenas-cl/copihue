@@ -25,6 +25,25 @@ let hp: i64 = 0;
 let heap: [u8; 128];
 let idt: [IdtEntry; 32];
 let kstack: [u8; 256];
+let regs: [u32; 2];
+
+packed struct Rec { a: u8, b: u8, c: u8 }
+
+fn exercise() -> i64 {
+    let tmp: [i64; 2];
+    tmp[0] = 1;
+    tmp[1] = 2;
+    let s: Rec;
+    s.a = 1;
+    s.b = 2;
+    s.c = 3;
+    let t: Rec;
+    t = s;
+    let p: *volatile u32 = regs;
+    p[0] = t.a;
+    p[1] = read_cr2();
+    return tmp[0] + tmp[1] + p[0];
+}
 
 fn alloc(n: i64) -> i64 {
     if (hp + n > 128) { return 0; }
@@ -73,6 +92,7 @@ fn _start() -> i64 {
         bss[i] = 0;
         i = i + 1;
     }
+    exercise();
     set_syscall_stack(kstack + 256);
     set_gate(32, &timer);
     let idtr: DescPtr;

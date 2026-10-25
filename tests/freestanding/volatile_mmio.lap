@@ -1,0 +1,18 @@
+// also-o2
+// Volatile pointer and volatile field. Both loads stay inside the loop.
+packed struct Dev {
+    volatile cmd: u32,
+    volatile dat: u32
+}
+
+fn poll(p: *volatile u32) -> i64 {
+    while (p[0] == 0) { pause(); }
+    p[0] = 1;
+    p[0] = 2;
+    return p[0];
+}
+
+fn spin_dev(d: *Dev) -> i64 {
+    while (d->cmd == 0) { pause(); }
+    return d->dat;
+}
