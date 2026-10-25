@@ -1,4 +1,4 @@
-# Copihue Language Reference (v0.20.1)
+# Copihue Language Reference (v0.21.0)
 
 This document describes the language that `copihue` accepts today. Anything not listed here is not supported.
 Planned features are in the README roadmap.
@@ -71,13 +71,23 @@ Scalar fields use 1, 2, 4, or 8 bytes and the next field starts immediately afte
 
 A global array of structs can be indexed and its fields assigned (`idt[n].sel = 8`). Packed stores use the field's width, so a `u8` store does not overwrite the next field. Uninitialized global structs and arrays of structs are reserved with `resb` for their real size.
 
+### Struct assignment
+
+`a = b` copies one struct value onto another of the same type. The copy is exactly the struct's size: whole qwords, then a byte tail, so a packed record does not spill into the next field or array element. It works for locals, globals, array elements (`table[i] = other`), and nested fields (`box.point = p`). A different struct type is a compile error. Nested scalar access (`box.point.x`) addresses that field, not the first eight bytes of the parent.
+
+Passing a struct to a function is still a copy into the callee's frame. There is no move, and the two objects are independent after the assignment.
+
 ### Volatile globals
 
 ```copihue
 let volatile ticks: i64 = 0;
 ```
 
-Every read and every write of a volatile global is a memory operand. The compiler does not fold it or lift it out of a loop, at `-O0` or `-O2`. Use this for a counter that an interrupt handler updates. `*volatile T` and `*mut volatile T` are accepted and mark the pointer variable; they do not change the instruction used to load the pointee. This is not a general memory model.
+Every read and every write of a volatile global is a memory operand. The compiler does not fold it or lift it out of a loop, at `-O0` or `-O2`. Use this for a counter that an interrupt handler updates.
+
+`*volatile T`, `*volatile mut T`, and `*mut volatile T` make accesses through that pointer volatile. `p[i] = v`, `*p = v`, and `*p` load or store the pointee's real width (`u8`/`u16`/`u32`/`u64`) and the assembly is marked `  ; volatile`. A struct field may be declared `volatile name: T`; reads and writes of that field use the same mark and the field's width, including `ptr->field`. `let volatile` on a struct or an array is a compile error: mark the fields, or point at the object with `*volatile T`.
+
+What is guaranteed: each source-level read or write of a volatile global, a `*volatile` pointee, or a volatile field emits a memory instruction of that width. `-O2` does not delete it, fold it, or lift it out of a loop. The compiler has no other reordering pass. What is not guaranteed: this is not a C memory model. There are no atomics and no fence stronger than the instruction itself. A non-volatile access next to it can still be simplified. `let volatile` on a local scalar (not a `*volatile` pointer) does not change codegen.
 
 ### Function pointers
 
@@ -165,19 +175,25 @@ Hosted built-ins are a compile error. These built-ins are available:
 
 `read_cr*` and `write_cr*` are a compile error without `--freestanding` or `--flat`. The regression suite assembles them with `nasm` and does not execute them: those instructions fault in Linux user mode, the same way `iretq` and `sysret` do.
 
-Memory-mapped I/O uses typed pointers, for example `let vga: *u16 = 0xB8000; vga[i] = 0x0F00 | 'A';`.
+Memory-mapped I/O uses typed pointers. A device register should be `*volatile`, so the access is not removed:
+
+```copihue
+let dev: *volatile u32 = 0xFE000000;
+dev[0] = 1;
+while (dev[1] == 0) { pause(); }
+```
 
 ## Flat binaries
 
 `copihue --flat ADDR -o out.bin file.lap` implies `--freestanding` and produces a raw binary (assembled with `nasm -f bin`, `org ADDR`) instead of assembly. Execution starts at the first byte, and the compiler always emits `fn _start` first, wherever it appears in the source; without `_start` compilation fails. `bss_start()` and `bss_end()` bound the zero-initialized globals so `_start` can clear them before calling anything else. `-S` writes the assembly instead of the binary.
 
-`tests/flat/min_kernel.lap` is one such image, loaded at `0x10000`. Its IDT gates use code selector `0x18`, the 64-bit code segment of the AtomicOS bootloader GDT. Selector `0x08` on that loader is a 32-bit code segment; a gate that names it leaves long mode and the image hangs. The binary assumes that GDT is already loaded. It is not a generic bootable kernel.
+`tests/flat/min_kernel.lap` is one such image, loaded at `0x10000`. Its IDT gates use code selector `0x18`, the 64-bit code segment of the AtomicOS bootloader GDT. Selector `0x08` on that loader is a 32-bit code segment; a gate that names it leaves long mode and the image hangs. The binary assumes that GDT is already loaded. It is not a generic bootable kernel. The image also indexes a local array, copies a packed struct, writes a `*volatile u32`, and reads CR2. Indexing a local array in `--freestanding` or `--flat` does not insert the hosted bounds trap.
 
 ## Known limitations
 
 - Integer arithmetic is 64-bit two's complement and wraps. Narrow types only affect memory accesses.
 - Direct calls check the function name and the argument count. Assignments, argument types, and indirect calls are not type-checked. There is no bounds checking on pointer indexing.
-- Struct assignment `a = b` is not supported. Copy fields individually or pass structs by value. Ordinary structs are not packed; nested field access through an ordinary struct still addresses the first 8 bytes of a nested value.
-- Indexing a local array inserts a hosted bounds check, so freestanding programs should index globals or pointers.
+- Ordinary struct fields still occupy 8 bytes each. Only `packed struct` uses the real width of `u8`/`u16`/`u32`. There is no padding or alignment attribute beyond packed-or-not. Struct assignment copies the whole value; it does not assign field by field in the source. Nested fields (`r.b.x`) use the real offset.
+- Indexing a local array in hosted mode inserts a bounds check that exits the process. `--freestanding` and `--flat` omit that check. Pointer indexing is never checked.
 - There are no modules or imports, no relocatable objects, and no 16-bit or 32-bit codegen. A program is a single file. `interrupt fn`, `syscall fn`, and the `read_cr*` / `write_cr*` builtins can be assembled; running `iretq`, `sysret`, or a move to or from a control register requires a CPU already in ring 0, which the hosted test suite does not do.
-- `syscall fn` does not program the syscall MSRs or a TSS. `volatile` covers global scalars only.
+- `syscall fn` does not program the syscall MSRs or a TSS. `volatile` is per access, as described above. It is not a memory model, and `let volatile` on a local scalar does not change codegen.
