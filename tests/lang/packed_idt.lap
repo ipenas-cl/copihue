@@ -1,5 +1,5 @@
 // Packed structs keep hardware records contiguous. An x86-64 IDT gate is 16 bytes:
-// u16, u16, u8, u8, u16, u32, u32. Ordinary structs still use 8-byte slots.
+// u16, u16, u8, u8, u16, u32, u32. Packed layout has no padding.
 packed struct IdtEntry {
     off_lo: u16,
     sel: u16,
