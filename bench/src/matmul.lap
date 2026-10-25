@@ -1,0 +1,46 @@
+// BENCH: matmul N=384
+// Integer matrix product, flat row-major i64 arrays of N*N = 147456.
+fn main() -> i32 {
+    let n = 384;
+    let a: [i64; 147456];
+    let b: [i64; 147456];
+    let c: [i64; 147456];
+    let i = 0;
+    let j = 0;
+    let k = 0;
+    let s = 0;
+    let sum = 0;
+    while (i < n) {
+        j = 0;
+        while (j < n) {
+            a[i * n + j] = (i + j) & 7;
+            b[i * n + j] = (i * 3 + j) & 7;
+            c[i * n + j] = 0;
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    i = 0;
+    while (i < n) {
+        j = 0;
+        while (j < n) {
+            s = 0;
+            k = 0;
+            while (k < n) {
+                s = s + a[i * n + k] * b[k * n + j];
+                k = k + 1;
+            }
+            c[i * n + j] = s;
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    i = 0;
+    while (i < n * n) {
+        sum = sum + c[i];
+        i = i + 1;
+    }
+    print_int(sum);
+    println("");
+    return 0;
+}

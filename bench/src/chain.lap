@@ -1,0 +1,16 @@
+// BENCH: chain n=80000000
+// One dependent integer chain (add, multiply, xor, shift, mask).
+fn main() -> i32 {
+    let n = 80000000;
+    let x = 1;
+    let i = 0;
+    while (i < n) {
+        x = (x + i) & 2147483647;
+        x = (x * 13) & 2147483647;
+        x = x ^ (x >> 7);
+        i = i + 1;
+    }
+    print_int(x);
+    println("");
+    return 0;
+}

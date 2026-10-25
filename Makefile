@@ -2,6 +2,7 @@
 #   make                 build ./copihue
 #   make test            regression suite (tests/run_tests.sh)
 #   make net-test        HTTP server/client integration test (needs curl)
+#   make bench           timed comparison in bench/ (not part of make test)
 #   make install         install to $(PREFIX)/bin (default ~/.local)
 PREFIX ?= $(HOME)/.local
 CC     ?= gcc
@@ -16,6 +17,9 @@ test:
 net-test:
 	tests/net_test.sh
 
+bench: copihue
+	bench/run.sh
+
 install: copihue
 	install -d $(PREFIX)/bin
 	install -m 755 copihue $(PREFIX)/bin/copihue
@@ -26,4 +30,4 @@ uninstall:
 clean:
 	rm -f copihue a.out output.asm output.o
 
-.PHONY: test net-test install uninstall clean
+.PHONY: test net-test bench install uninstall clean

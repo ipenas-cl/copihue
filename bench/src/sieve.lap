@@ -1,0 +1,44 @@
+// BENCH: sieve limit=400000 reps=80
+// Sieve of Eratosthenes. Sum of primes below `limit`, repeated `reps` times.
+// Locals are declared once: redeclaring let inside a loop is unsafe in this compiler.
+fn main() -> i32 {
+    let limit = 400000;
+    let reps = 80;
+    let flags: [u8; 400000];
+    let i = 0;
+    let j = 0;
+    let sum = 0;
+    let r = 0;
+    while (r < reps) {
+        i = 0;
+        while (i < limit) {
+            flags[i] = 1;
+            i = i + 1;
+        }
+        flags[0] = 0;
+        flags[1] = 0;
+        i = 2;
+        while (i * i < limit) {
+            if (flags[i] != 0) {
+                j = i * i;
+                while (j < limit) {
+                    flags[j] = 0;
+                    j = j + i;
+                }
+            }
+            i = i + 1;
+        }
+        sum = 0;
+        i = 2;
+        while (i < limit) {
+            if (flags[i] != 0) {
+                sum = sum + i;
+            }
+            i = i + 1;
+        }
+        r = r + 1;
+    }
+    print_int(sum);
+    println("");
+    return 0;
+}

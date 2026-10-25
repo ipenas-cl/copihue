@@ -160,6 +160,12 @@ fn set_gate(n: i64, handler: i64) -> i64 {
 - `compiler/asm/`: an experimental second compiler in pure x86-64 assembly for a minimal declarative syntax. It is an early self-hosting experiment and still uses its old `chronos` names.
 - `archive/`, `docs/history/`, `docs/archive/`, `compiler/bootstrap-c/archive/`: historical material from the Chronos era, kept unchanged
 
+## Benchmarks
+
+[`make bench`](bench/RESULTS.md) is not part of `make test`. It compiles the same small programs with Copihue (`-O2`), C (`gcc -O2`), Rust (`rustc -O`) and OCaml (`ocamlopt -O3`), checks that they print the same line, and records compile time, file size and run time. The measured numbers and the limits of that comparison are in [bench/RESULTS.md](bench/RESULTS.md).
+
+[docs/DESIGN_TWO_LEVELS.md](docs/DESIGN_TWO_LEVELS.md) is a design proposal for a two-level syntax (an easy mode and an explicit mode). It is not a feature of the compiler in this tree.
+
 ## Roadmap
 
 Correctness and tooling come before new features. All items below are **planned**.
