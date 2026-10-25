@@ -2,6 +2,18 @@
 
 Todos los cambios importantes del proyecto.
 
+## [0.25.1] - 2026-10-25
+
+### Added
+- Hosted `-O2` evaluates `+ - & | ^ *` and an immediate shift directly in the destination register when the operands are scalars, immediates, or scalar memory. `*` by a power of two is still `shl`. `/` and `%` stay on the `rax`/`rdx` path. A narrow integer still truncates in `rax` before the value is stored. `bits 16` and `bits 32` keep the `eax`/`ebx` stream.
+- Two more scalar locals may live in caller-saved `r10` and `r11` when no call falls inside the live range. Names that are live across a call still use only callee-saved `r12`–`r15`; a further one stays in its stack slot. `let volatile`, address-taken names, arrays, pointers, structs, a name declared twice, and any function that contains `asm()` stay on the stack.
+- A local or global array whose element is 1, 2, 4, or 8 bytes is loaded and stored with `base+index*scale` in one instruction. Pointer indexing is unchanged.
+- When a hosted `-O2` function starts with `if (param <op> leaf) { return param; }` and `leaf` is an immediate or another register parameter, the compare uses the incoming register and returns before the frame is built. The base case does not spill a callee-saved register.
+- `tests/lang/o2_alu.lap` checks that this matches `-O0`, including six scalars, a value live across a call, a fifth parameter that does not fit in `r12`–`r15`, scaled array loads and stores, `a[j+1]`, short-circuit `&&`, and a `let volatile` local.
+
+### Changed
+- Language version is 0.25.1. `-O0`, `--freestanding`, `--flat`, and `--boot` generate the same code as 0.25.0.
+
 ## [0.25.0] - 2026-10-25
 
 ### Added
