@@ -1,0 +1,4 @@
+tests/errors/push_bits.lap:3:10: error: register 'rax' cannot be pushed in bits 16
+      3 |     push(rax);
+        |          ^
+1 error, compilation failed
