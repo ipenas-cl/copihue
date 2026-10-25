@@ -1,0 +1,5 @@
+import "parts/import_dup_other.lap";
+
+fn main() -> i64 {
+    return 0;
+}

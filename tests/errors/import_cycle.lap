@@ -1,0 +1,5 @@
+import "parts/cycle_a.lap";
+
+fn main() -> i64 {
+    return 0;
+}

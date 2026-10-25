@@ -10,11 +10,12 @@
 #include <string.h>
 #include <stdarg.h>
 #include <ctype.h>
+#include <errno.h>
 #include <math.h>
 
 // ==== NAMING (single place to change when the language is renamed) ====
 #define LANG_NAME     "Copihue"
-#define LANG_VERSION  "0.24.2"
+#define LANG_VERSION  "0.25.2"
 #define COMPILER_BIN  "copihue"
 #define SRC_EXT       ".lap"   /* Lapageria rosea, the copihue */
 #define OLD_SRC_EXT   ".cph"   /* v0.18.x extension, still accepted with a warning */
@@ -43,6 +44,24 @@ static void print_source_line(int line, int col) {
     fprintf(stderr, "        | ");
     for (int i = 1; i < col; i++) fputc(p[i - 1] == '\t' ? '\t' : ' ', stderr);
     fprintf(stderr, "^\n");
+}
+
+#define MAX_LOADED 64
+typedef struct { char* name; char* text; } LoadedSrc;
+static LoadedSrc g_loaded[MAX_LOADED];
+static int g_nloaded = 0;
+static char* g_import_stack[MAX_LOADED];
+static int g_import_depth = 0;
+
+static void focus_file(const char* file) {
+    if (!file) return;
+    for (int i = 0; i < g_nloaded; i++) {
+        if (g_loaded[i].name == file) {
+            g_src_file = g_loaded[i].name;
+            g_src_text = g_loaded[i].text;
+            return;
+        }
+    }
 }
 
 // Report an error at line:col in "file:line:col: error: message" form
@@ -152,6 +171,7 @@ typedef struct AstNode {
     int flags;            // AF_PACKED, AF_VOLATILE, AF_INTERRUPT, AF_SYSCALL, AF_NAKED
     int bits;             // 0 = default 64 (no directive); else 16, 32, or 64
     int line, col;        // Source position (for diagnostics)
+    const char* file;     // Source file (several files share one program)
 } AstNode;
 
 #define AF_PACKED     1
@@ -172,7 +192,7 @@ typedef struct {
     int is_volatile;
     int volatile_pointee; // *volatile T: loads/stores through this pointer are volatile
     int array_len;        // Declared element count when is_array (0 if unknown)
-    int reg;              // -1 stack slot; 0..3 = r12..r15 at hosted -O2
+    int reg;              // -1 stack; 0..3 callee-saved r12..r15; 4..5 caller-saved r10, r11
     int as_int;           // Pointer value that may also be used as an integer
     char* mem;            // Naked local: label of its slot. NULL means [rbp+offset]
 } Symbol;
@@ -388,12 +408,18 @@ char* strtab_add(StringTable* st, char* value, int len) {
     return label;
 }
 
-// Hosted -O2 keeps the hottest scalar locals in callee-saved registers.
-// r12 is also scratch inside malloc, so malloc must not use these names.
-#define MAX_REG_LOCAL 4
-static const char *g_reg_local_name[MAX_REG_LOCAL] = {"r12", "r13", "r14", "r15"};
+// Hosted -O2. The first four names are callee-saved and survive a call.
+// r10 and r11 are caller-saved: only a local whose live range contains no
+// call goes there. malloc uses r10 as a syscall argument, so a local in r10
+// must not be live across that call. rbx stays scratch.
+#define MAX_REG_CALLEE 4
+#define MAX_REG_LOCAL 6
+static const char *g_reg_local_name[MAX_REG_LOCAL] = {
+    "r12", "r13", "r14", "r15", "r10", "r11"
+};
 static char g_reg_local_var[MAX_REG_LOCAL][96];
 static int g_reg_local_n = 0;
+static int g_reg_callee_n = 0;
 
 static void symbol_assign_reg(Symbol *s) {
     s->reg = -1;
@@ -407,6 +433,54 @@ static void symbol_assign_reg(Symbol *s) {
 static const char *local_reg(Symbol *s) {
     if (!s || s->reg < 0 || s->reg >= g_reg_local_n) return NULL;
     return g_reg_local_name[s->reg];
+}
+
+static int o2_hosted(void) {
+    // bits 16/32 keep the eax/ebx stream. These opts are 64-bit hosted only.
+    return optimization_level >= 2 && !g_freestanding && !legacy_bits();
+}
+
+// x86 scale is only 1, 2, 4 or 8. Other element sizes stay on the imul path.
+static int scale_ok(int elem) {
+    return elem == 1 || elem == 2 || elem == 4 || elem == 8;
+}
+
+void emit(Codegen* cg, const char* fmt, ...);
+
+// When an index load is the RHS of `reg = a[i]`, the final scaled load
+// writes that register. Cleared before the index expression itself runs,
+// so a nested a[b[i]] still loads the inner element into rax.
+static const char* g_index_dest;
+static int g_index_hit;
+
+static const char* reg_dword(const char* reg) {
+    if (!strcmp(reg, "rax")) return "eax";
+    if (!strcmp(reg, "rbx")) return "ebx";
+    if (!strcmp(reg, "rcx")) return "ecx";
+    if (!strcmp(reg, "rdx")) return "edx";
+    if (!strcmp(reg, "r10")) return "r10d";
+    if (!strcmp(reg, "r11")) return "r11d";
+    if (!strcmp(reg, "r12")) return "r12d";
+    if (!strcmp(reg, "r13")) return "r13d";
+    if (!strcmp(reg, "r14")) return "r14d";
+    if (!strcmp(reg, "r15")) return "r15d";
+    return "eax";
+}
+
+static void emit_scaled_load(Codegen* cg, const char* mem, int elem, int is_struct, const char* dest) {
+    if (!dest) dest = "rax";
+    if (is_struct) emit(cg, "    lea %s, [%s]\n", dest, mem);
+    else if (elem == 1) emit(cg, "    movzx %s, byte [%s]\n", dest, mem);
+    else if (elem == 2) emit(cg, "    movzx %s, word [%s]\n", dest, mem);
+    else if (elem == 4) emit(cg, "    mov %s, [%s]\n", reg_dword(dest), mem);
+    else emit(cg, "    mov %s, [%s]\n", dest, mem);
+}
+
+static void emit_scaled_store(Codegen* cg, const char* mem, int elem, const char* src) {
+    if (elem == 1) emit(cg, "    mov byte [%s], %s\n", mem, src[0] == 'r' && src[1] == 'a' ? "al" : "bl");
+    else if (elem == 2) emit(cg, "    mov word [%s], %s\n", mem, !strcmp(src, "rax") ? "ax" : "bx");
+    else if (elem == 4) emit(cg, "    mov dword [%s], %s\n", mem, !strcmp(src, "rax") ? "eax" : "ebx");
+    else emit(cg, "    mov qword [%s], %s\n", mem, src);
 }
 
 // ==== SYMBOL TABLE ====
@@ -749,6 +823,7 @@ AstNode* ast_new(AstType type) {
     n->type = type;
     n->line = g_cur_line;
     n->col = g_cur_col;
+    n->file = g_src_file;
     return n;
 }
 
@@ -1951,38 +2026,190 @@ static AstNode* parse_bits_naked_fn(Parser* p) {
     return fn;
 }
 
-AstNode* parse(Parser* p) {
-    AstNode* prog = ast_new(AST_PROGRAM);
+typedef struct {
+    char* name;
+    const char* file;
+    int line, col;
+    int forward;
+} DeclSite;
+static DeclSite* g_decls = NULL;
+static int g_ndecls = 0, g_decl_cap = 0;
+
+static void note_top(AstNode* n) {
+    if (!n || !n->name) return;
+    const char* what = NULL;
+    int fwd = 0;
+    if (n->type == AST_FUNCTION) { what = "function"; fwd = n->is_forward_decl; }
+    else if (n->type == AST_GLOBAL_VAR) what = "global";
+    else if (n->type == AST_STRUCT_DEF) what = "struct";
+    else if (n->type == AST_DATA) what = "data";
+    else return;
+    for (int i = 0; i < g_ndecls; i++) {
+        if (strcmp(g_decls[i].name, n->name)) continue;
+        if (fwd) return;
+        if (g_decls[i].forward) {
+            g_decls[i].forward = 0;
+            g_decls[i].file = g_src_file;
+            g_decls[i].line = n->line;
+            g_decls[i].col = n->col;
+            return;
+        }
+        diag_error(n->line, n->col, "%s '%s' is already defined at %s:%d:%d",
+                   what, n->name, g_decls[i].file, g_decls[i].line, g_decls[i].col);
+        return;
+    }
+    if (g_ndecls >= g_decl_cap) {
+        g_decl_cap = g_decl_cap ? g_decl_cap * 2 : 64;
+        g_decls = safe_realloc(g_decls, sizeof(DeclSite) * g_decl_cap);
+    }
+    g_decls[g_ndecls].name = strdup(n->name);
+    g_decls[g_ndecls].file = g_src_file;
+    g_decls[g_ndecls].line = n->line;
+    g_decls[g_ndecls].col = n->col;
+    g_decls[g_ndecls].forward = fwd;
+    g_ndecls++;
+}
+
+static void parse_into(Parser* p, AstNode* prog);
+
+static char* path_dir(const char* path) {
+    const char* slash = strrchr(path, '/');
+    if (!slash) return strdup(".");
+    if (slash == path) return strdup("/");
+    size_t n = (size_t)(slash - path);
+    char* d = malloc(n + 1);
+    memcpy(d, path, n);
+    d[n] = '\0';
+    return d;
+}
+
+static char* path_join(const char* dir, const char* rel) {
+    if (rel[0] == '/') return strdup(rel);
+    size_t nd = strlen(dir), nr = strlen(rel);
+    char* s = malloc(nd + nr + 2);
+    memcpy(s, dir, nd);
+    s[nd] = '/';
+    memcpy(s + nd + 1, rel, nr + 1);
+    return s;
+}
+
+static int import_active(const char* path) {
+    for (int i = 0; i < g_import_depth; i++)
+        if (!strcmp(g_import_stack[i], path)) return 1;
+    return 0;
+}
+
+static int import_done(const char* path) {
+    for (int i = 0; i < g_nloaded; i++)
+        if (!strcmp(g_loaded[i].name, path)) return 1;
+    return 0;
+}
+
+static int parse_file_into(AstNode* prog, const char* path, int from_import, int line, int col) {
+    if (import_active(path)) {
+        diag_error(line, col, "import of '%s' is a cycle", path);
+        return 0;
+    }
+    if (import_done(path)) return 1;
+    FILE* f = fopen(path, "r");
+    if (!f) {
+        if (from_import) diag_error(line, col, "cannot open import '%s'", path);
+        else fprintf(stderr, COMPILER_BIN ": error: cannot open '%s'\n", path);
+        return 0;
+    }
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (sz < 0) sz = 0;
+    char* src = malloc((size_t)sz + 1);
+    size_t got = fread(src, 1, (size_t)sz, f);
+    src[got] = '\0';
+    fclose(f);
+    if (g_nloaded >= MAX_LOADED) {
+        diag_error(line, col, "too many source files (maximum %d)", MAX_LOADED);
+        free(src);
+        return 0;
+    }
+    g_loaded[g_nloaded].name = strdup(path);
+    g_loaded[g_nloaded].text = src;
+    const char* saved_file = g_src_file;
+    const char* saved_text = g_src_text;
+    g_src_file = g_loaded[g_nloaded].name;
+    g_src_text = src;
+    g_import_stack[g_import_depth++] = g_loaded[g_nloaded].name;
+    g_nloaded++;
+    int count = 0;
+    Tok* toks = tokenize(src, &count);
+    Parser parser = {toks, 0, count};
+    parse_into(&parser, prog);
+    g_import_depth--;
+    g_src_file = saved_file;
+    g_src_text = saved_text;
+    return 1;
+}
+
+static void parse_import(Parser* p, AstNode* prog) {
+    Tok kw = advance_tok(p);
+    Tok str = advance_tok(p);
+    if (str.t != T_STR || str.len < 2) {
+        diag_error(kw.line, kw.col, "import needs a string path");
+        return;
+    }
+    char* rel = decode_string_literal(str.s + 1, str.len - 2);
+    char* dir = path_dir(g_src_file);
+    char* full = path_join(dir, rel);
+    expect(p, T_SEMI);
+    parse_file_into(prog, full, 1, str.line, str.col);
+    free(rel);
+    free(dir);
+    free(full);
+}
+
+static void parse_into(Parser* p, AstNode* prog) {
     while (!check_tok(p, T_EOF)) {
         // Contextual words, so `syscall(...)` and a variable named `packed` still parse.
-        if (peek_word(p, "packed") && peek_tok_at(p, 1, T_STRUCT)) {
+        if (peek_word(p, "import") && peek_tok_at(p, 1, T_STR)) {
+            parse_import(p, prog);
+        } else if (peek_word(p, "packed") && peek_tok_at(p, 1, T_STRUCT)) {
             advance_tok(p);
             AstNode* sd = parse_struct_def(p);
             sd->flags |= AF_PACKED;
+            note_top(sd);
             ast_add(prog, sd);
         } else if (peek_word(p, "interrupt") && peek_tok_at(p, 1, T_FN)) {
             advance_tok(p);
             AstNode* fn = parse_func(p);
             fn->flags |= AF_INTERRUPT;
+            note_top(fn);
             ast_add(prog, fn);
         } else if (peek_word(p, "syscall") && peek_tok_at(p, 1, T_FN)) {
             advance_tok(p);
             AstNode* fn = parse_func(p);
             fn->flags |= AF_SYSCALL;
+            note_top(fn);
             ast_add(prog, fn);
         } else if (peek_word(p, "data") && peek_tok_at(p, 1, T_IDENT)) {
-            ast_add(prog, parse_data(p));
+            AstNode* d = parse_data(p);
+            note_top(d);
+            ast_add(prog, d);
         } else if (peek_word(p, "bits") || peek_word(p, "naked")) {
-            ast_add(prog, parse_bits_naked_fn(p));
+            AstNode* fn = parse_bits_naked_fn(p);
+            note_top(fn);
+            ast_add(prog, fn);
         } else if (check_tok(p, T_STRUCT)) {
-            ast_add(prog, parse_struct_def(p));
+            AstNode* sd = parse_struct_def(p);
+            note_top(sd);
+            ast_add(prog, sd);
         } else if (check_tok(p, T_LET)) {
-            ast_add(prog, parse_global_var(p));
+            AstNode* g = parse_global_var(p);
+            note_top(g);
+            ast_add(prog, g);
         } else {
-            ast_add(prog, parse_func(p));
+            AstNode* fn = parse_func(p);
+            note_top(fn);
+            ast_add(prog, fn);
         }
     }
-    return prog;
 }
 
 // ==== CODEGEN ====
@@ -3339,6 +3566,8 @@ static void check_indexable(Codegen* cg, AstNode* arr) {
 }
 
 void gen_array_index(Codegen* cg, AstNode* n) {
+    const char* want = g_index_dest;
+    g_index_dest = NULL;
     AstNode* arr = n->children[0];
     check_indexable(cg, arr);
 
@@ -3472,7 +3701,28 @@ void gen_array_index(Codegen* cg, AstNode* n) {
 
     // Try local array/pointer first
     if (sym) {
-        gen_expr(cg, n->children[1]);  // Index in rax
+        // Hosted -O2: a scalar index that already lives in a register is the
+        // SIB index. The pointer path still wants the index in rax.
+        const char* idxreg = NULL;
+        if (!sym->is_pointer && o2_hosted() && n->children[1] &&
+            n->children[1]->type == AST_IDENT) {
+            int el = 8;
+            if (sym->type_name) {
+                if (!strcmp(sym->type_name, "i8") || !strcmp(sym->type_name, "u8")) el = 1;
+                else if (!strcmp(sym->type_name, "i16") || !strcmp(sym->type_name, "u16")) el = 2;
+                else if (!strcmp(sym->type_name, "i32") || !strcmp(sym->type_name, "u32")) el = 4;
+                else if (!strcmp(sym->type_name, "i64") || !strcmp(sym->type_name, "u64")) el = 8;
+                else {
+                    StructType* st = typetab_lookup(cg->types, sym->type_name);
+                    if (st) el = st->size;
+                }
+            }
+            if (scale_ok(el)) {
+                Symbol* isym = symtab_lookup_symbol(cg->symtab, n->children[1]->name);
+                idxreg = local_reg(isym);
+            }
+        }
+        if (!idxreg) gen_expr(cg, n->children[1]);  // Index in rax
 
         // Check if this is a pointer parameter (not an array)
         if (sym->is_pointer) {
@@ -3562,14 +3812,16 @@ void gen_array_index(Codegen* cg, AstNode* n) {
             array_count = sym->size;
         }
 
-        // Bounds checking
+        // Bounds checking. idxreg is non-NULL only at hosted -O2; the rax
+        // text is what -O0 and freestanding already emit.
+        const char* breg = idxreg ? idxreg : "rax";
         if (sym->size > 0 && !g_freestanding) {
             int ok_label = new_label(cg);
 
-            emit(cg, "    test rax, rax\n");
+            emit(cg, "    test %s, %s\n", breg, breg);
             emit(cg, "    js .Lbounds_error_%d\n", ok_label);
 
-            emit(cg, "    cmp rax, %d\n", array_count);
+            emit(cg, "    cmp %s, %d\n", breg, array_count);
             emit(cg, "    jge .Lbounds_error_%d\n", ok_label);
             emit(cg, "    jmp .Lbounds_ok_%d\n", ok_label);
 
@@ -3587,18 +3839,21 @@ void gen_array_index(Codegen* cg, AstNode* n) {
             emit(cg, ".Lbounds_ok_%d:\n", ok_label);
         }
 
-        // Calculate offset: index * elem_size
-        if (elem_size > 1) {
-            emit(cg, "    imul rax, %d\n", elem_size);
-        }
-        emit(cg, "    mov rbx, rax\n");
-
-        // For structs, return address; for primitives, load value
-        if (is_struct) {
-            emit(cg, "    lea rax, [rbp%d+rbx]\n", sym->offset);
+        // base + index*scale in one instruction when the element size is a
+        // legal SIB scale. Otherwise the historical imul/rbx sequence.
+        if (o2_hosted() && scale_ok(elem_size)) {
+            char mem[96];
+            snprintf(mem, sizeof mem, "rbp%d+%s*%d", sym->offset, breg, elem_size);
+            emit_scaled_load(cg, mem, elem_size, is_struct, want ? want : "rax");
+            if (want) g_index_hit = 1;
         } else {
-            // Load value with correct width
-            if (elem_size == 1) {
+            if (elem_size > 1) {
+                emit(cg, "    imul rax, %d\n", elem_size);
+            }
+            emit(cg, "    mov rbx, rax\n");
+            if (is_struct) {
+                emit(cg, "    lea rax, [rbp%d+rbx]\n", sym->offset);
+            } else if (elem_size == 1) {
                 emit(cg, "    movzx rax, byte [rbp%d+rbx]\n", sym->offset);
             } else if (elem_size == 2) {
                 emit(cg, "    movzx rax, word [rbp%d+rbx]\n", sym->offset);
@@ -3612,8 +3867,6 @@ void gen_array_index(Codegen* cg, AstNode* n) {
         // Try global array
         GlobalVar* gvar = global_symtab_lookup(cg->global_symtab, arr->name);
         if (gvar && gvar->is_array) {
-            gen_expr(cg, n->children[1]);  // Index in rax
-
             // For i8 arrays, element size is 1 byte
             // For i32/i64, element size is 4/8 bytes
             int elem_size = 1;  // Default to byte for i8
@@ -3627,27 +3880,36 @@ void gen_array_index(Codegen* cg, AstNode* n) {
                     if (est && est->size > 0) { elem_size = est->size; is_struct_elem = 1; }
                 }
             }
-
-            // Calculate offset: index * elem_size
-            if (elem_size > 1) {
-                emit(cg, "    imul rax, %d\n", elem_size);
+            const char* idxreg = NULL;
+            if (o2_hosted() && scale_ok(elem_size) && n->children[1] &&
+                n->children[1]->type == AST_IDENT) {
+                Symbol* isym = symtab_lookup_symbol(cg->symtab, n->children[1]->name);
+                idxreg = local_reg(isym);
             }
+            if (!idxreg) gen_expr(cg, n->children[1]);  // Index in rax
 
-            // Load from global array: array_name + offset
-            emit(cg, "    lea rbx, [%s]\n", gvar->name);
-            emit(cg, "    add rbx, rax\n");
-
-            // Struct elements yield their address (for .field). Primitives load.
-            if (is_struct_elem) {
-                emit(cg, "    mov rax, rbx\n");
-            } else if (elem_size == 1) {
-                emit(cg, "    movzx rax, byte [rbx]\n");
-            } else if (elem_size == 2) {
-                emit(cg, "    movzx rax, word [rbx]\n");
-            } else if (elem_size == 4) {
-                emit(cg, "    mov eax, [rbx]\n");
+            if (o2_hosted() && scale_ok(elem_size)) {
+                char mem[128];
+                snprintf(mem, sizeof mem, "%s+%s*%d", gvar->name, idxreg ? idxreg : "rax", elem_size);
+                emit_scaled_load(cg, mem, elem_size, is_struct_elem, want ? want : "rax");
+                if (want) g_index_hit = 1;
             } else {
-                emit(cg, "    mov rax, [rbx]\n");
+                if (elem_size > 1) {
+                    emit(cg, "    imul rax, %d\n", elem_size);
+                }
+                emit(cg, "    lea rbx, [%s]\n", gvar->name);
+                emit(cg, "    add rbx, rax\n");
+                if (is_struct_elem) {
+                    emit(cg, "    mov rax, rbx\n");
+                } else if (elem_size == 1) {
+                    emit(cg, "    movzx rax, byte [rbx]\n");
+                } else if (elem_size == 2) {
+                    emit(cg, "    movzx rax, word [rbx]\n");
+                } else if (elem_size == 4) {
+                    emit(cg, "    mov eax, [rbx]\n");
+                } else {
+                    emit(cg, "    mov rax, [rbx]\n");
+                }
             }
         } else if (gvar && gvar->is_pointer) {
             gen_expr(cg, n->children[1]);
@@ -4070,6 +4332,400 @@ static void emit_binop_legacy(Codegen* cg, const char* op) {
     }
 }
 
+// Hosted -O2. A binary op whose operands are registers, immediates, or
+// scalar memory can land directly in `dest` (add r15, r12) instead of
+// moving through rax and rbx. / and % stay on the rax/rdx path: idiv needs
+// them, and so does the signed power-of-two bias. can_place is decided
+// before anything is emitted.
+typedef struct {
+    int kind;          // 1 register, 2 memory, 3 imm32
+    const char* reg;
+    char mem[96];
+    int vol;
+    long long imm;
+} OpLeaf;
+
+static int parse_i64(const char* s, long long* out) {
+    if (!s || !s[0]) return 0;
+    errno = 0;
+    char* end = NULL;
+    long long v = strtoll(s, &end, 10);
+    if (errno == ERANGE || end == s || (end && *end)) return 0;
+    *out = v;
+    return 1;
+}
+
+static int fits_imm32_val(long long v) {
+    return v >= -2147483648LL && v <= 2147483647LL;
+}
+
+static int scalar_leaf(Codegen* cg, AstNode* n, OpLeaf* L) {
+    memset(L, 0, sizeof *L);
+    if (!n) return 0;
+    if (n->type == AST_NUMBER) {
+        long long v;
+        if (!parse_i64(n->value, &v) || !fits_imm32_val(v)) return 0;
+        L->kind = 3;
+        L->imm = v;
+        return 1;
+    }
+    if (n->type != AST_IDENT || !n->name) return 0;
+    Symbol* sym = symtab_lookup_symbol(cg->symtab, n->name);
+    if (sym) {
+        if (sym->is_array) return 0;
+        if (sym->size > 1 && !sym->is_pointer) return 0;
+        const char* r = local_reg(sym);
+        if (r) { L->kind = 1; L->reg = r; return 1; }
+        L->kind = 2;
+        snprintf(L->mem, sizeof L->mem, "rbp%d", sym->offset);
+        return 1;
+    }
+    GlobalVar* gv = global_symtab_lookup(cg->global_symtab, n->name);
+    if (!gv || gv->is_array) return 0;
+    L->kind = 2;
+    snprintf(L->mem, sizeof L->mem, "%s", gv->name);
+    L->vol = gv->is_volatile;
+    return 1;
+}
+
+static int ident_is_dest(Codegen* cg, AstNode* n, const char* dest) {
+    OpLeaf L;
+    if (!scalar_leaf(cg, n, &L) || L.kind != 1) return 0;
+    return strcmp(L.reg, dest) == 0;
+}
+
+static int alu_op(const char* op) {
+    if (!op || !op[0]) return 0;
+    if (!strcmp(op, "<<") || !strcmp(op, ">>")) return 1;
+    char c = op[0];
+    return c == '+' || c == '-' || c == '*' || c == '&' || c == '|' || c == '^';
+}
+
+static int is_shift_op(const char* op) {
+    return op && (!strcmp(op, "<<") || !strcmp(op, ">>"));
+}
+
+static int is_comm_op(const char* op) {
+    if (!op) return 0;
+    char c = op[0];
+    return c == '+' || c == '*' || c == '&' || c == '|' || c == '^';
+}
+
+static int pow2_shift_amt(AstNode* n, int* sh) {
+    if (!n || n->type != AST_NUMBER || !n->value) return 0;
+    long rv = atol(n->value);
+    if (rv > 1 && is_power_of_2(rv)) { *sh = get_log2(rv); return 1; }
+    return 0;
+}
+
+static const char* reg_low(const char* reg) {
+    if (!strcmp(reg, "rax")) return "al";
+    if (!strcmp(reg, "rbx")) return "bl";
+    if (!strcmp(reg, "rcx")) return "cl";
+    if (!strcmp(reg, "rdx")) return "dl";
+    if (!strcmp(reg, "r10")) return "r10b";
+    if (!strcmp(reg, "r11")) return "r11b";
+    if (!strcmp(reg, "r12")) return "r12b";
+    if (!strcmp(reg, "r13")) return "r13b";
+    if (!strcmp(reg, "r14")) return "r14b";
+    if (!strcmp(reg, "r15")) return "r15b";
+    return "al";
+}
+
+static void emit_alu(Codegen* cg, const char* dest, const char* op, const char* src, int is_imm, long long imm) {
+    if (!strcmp(op, "<<")) { emit(cg, "    shl %s, %lld\n", dest, imm); return; }
+    if (!strcmp(op, ">>")) { emit(cg, "    sar %s, %lld\n", dest, imm); return; }
+    if (op[0] == '*') {
+        if (is_imm) emit(cg, "    imul %s, %s, %lld\n", dest, dest, imm);
+        else emit(cg, "    imul %s, %s\n", dest, src);
+        return;
+    }
+    const char* m = "add";
+    if (op[0] == '-') m = "sub";
+    else if (op[0] == '&') m = "and";
+    else if (op[0] == '|') m = "or";
+    else if (op[0] == '^') m = "xor";
+    if (is_imm) emit(cg, "    %s %s, %lld\n", m, dest, imm);
+    else emit(cg, "    %s %s, %s\n", m, dest, src);
+}
+
+static void emit_alu_leaf(Codegen* cg, const char* dest, const char* op, OpLeaf* S) {
+    if (S->kind == 3) emit_alu(cg, dest, op, NULL, 1, S->imm);
+    else if (S->kind == 1) emit_alu(cg, dest, op, S->reg, 0, 0);
+    else {
+        char buf[128];
+        snprintf(buf, sizeof buf, "[%s]%s", S->mem, S->vol ? "  ; volatile" : "");
+        emit_alu(cg, dest, op, buf, 0, 0);
+    }
+}
+
+static int can_place_k(Codegen* cg, AstNode* n, const char* dest, int allow);
+static void place_k(Codegen* cg, AstNode* n, const char* dest, int allow);
+
+// rax is the scratch, unless the result itself is rax: then rbx is scratch.
+// Neither register holds a local.
+static const char* scratch_reg(const char* dest) {
+    return strcmp(dest, "rax") == 0 ? "rbx" : "rax";
+}
+
+static int can_place(Codegen* cg, AstNode* n, const char* dest) {
+    return can_place_k(cg, n, dest, 1);
+}
+
+static void place_in(Codegen* cg, AstNode* n, const char* dest) {
+    place_k(cg, n, dest, 1);
+}
+
+// `left OP right` into dest. A leaf right is applied after left is placed.
+// Otherwise right is computed into the scratch first (it may still read dest)
+// and left must be placeable without that scratch. allow==0 forbids the scratch.
+static int can_ordered_k(Codegen* cg, AstNode* left, AstNode* right, const char* dest, int allow) {
+    OpLeaf R;
+    if (scalar_leaf(cg, right, &R) && !ident_is_dest(cg, right, dest) &&
+        can_place_k(cg, left, dest, allow))
+        return 1;
+    if (!allow) return 0;
+    const char* sc = scratch_reg(dest);
+    if (can_place_k(cg, right, sc, 1) && can_place_k(cg, left, dest, 0)) return 1;
+    return 0;
+}
+
+static int can_place_k(Codegen* cg, AstNode* n, const char* dest, int allow) {
+    if (!n || !dest) return 0;
+    if (n->type == AST_NUMBER) {
+        long long v;
+        return parse_i64(n->value, &v);
+    }
+    if (n->type == AST_IDENT) {
+        OpLeaf L;
+        return scalar_leaf(cg, n, &L);
+    }
+    if (n->type == AST_UNARY && n->op && n->child_count == 1 &&
+        (n->op[0] == '-' || n->op[0] == '!' || n->op[0] == '~'))
+        return can_place_k(cg, n->children[0], dest, allow);
+    if (n->type != AST_BINOP || !n->op || n->child_count != 2 || !alu_op(n->op)) return 0;
+    AstNode* L = n->children[0];
+    AstNode* R = n->children[1];
+    if (is_shift_op(n->op)) {
+        OpLeaf S;
+        if (!scalar_leaf(cg, R, &S) || S.kind != 3 || S.imm < 0 || S.imm > 63) return 0;
+        return can_place_k(cg, L, dest, allow);
+    }
+    int sh = 0;
+    if (n->op[0] == '*' && pow2_shift_amt(R, &sh)) return can_place_k(cg, L, dest, allow);
+    if (ident_is_dest(cg, L, dest) && ident_is_dest(cg, R, dest)) return 1;
+    if (can_ordered_k(cg, L, R, dest, allow)) return 1;
+    if (is_comm_op(n->op) && can_ordered_k(cg, R, L, dest, allow)) return 1;
+    return 0;
+}
+
+static void place_ordered_k(Codegen* cg, const char* op, AstNode* left, AstNode* right,
+                            const char* dest, int allow) {
+    OpLeaf R;
+    if (scalar_leaf(cg, right, &R) && !ident_is_dest(cg, right, dest) &&
+        can_place_k(cg, left, dest, allow)) {
+        // imul dest, src, imm32 is one instruction. A power of two never
+        // reaches here: place_k already turned it into shl.
+        OpLeaf Ls;
+        if (op[0] == '*' && R.kind == 3 && scalar_leaf(cg, left, &Ls) && Ls.kind == 1) {
+            emit(cg, "    imul %s, %s, %lld\n", dest, Ls.reg, R.imm);
+            return;
+        }
+        place_k(cg, left, dest, allow);
+        emit_alu_leaf(cg, dest, op, &R);
+        return;
+    }
+    if (!allow) return;
+    const char* sc = scratch_reg(dest);
+    if (can_place_k(cg, right, sc, 1) && can_place_k(cg, left, dest, 0)) {
+        place_k(cg, right, sc, 1);
+        if (!ident_is_dest(cg, left, dest)) place_k(cg, left, dest, 0);
+        emit_alu(cg, dest, op, sc, 0, 0);
+    }
+}
+
+static void place_k(Codegen* cg, AstNode* n, const char* dest, int allow) {
+    if (n->type == AST_NUMBER) {
+        emit(cg, "    mov %s, %s\n", dest, n->value);
+        return;
+    }
+    if (n->type == AST_IDENT) {
+        if (ident_is_dest(cg, n, dest)) return;
+        OpLeaf L;
+        if (!scalar_leaf(cg, n, &L)) return;
+        if (L.kind == 1) emit(cg, "    mov %s, %s\n", dest, L.reg);
+        else emit(cg, "    mov %s, [%s]%s\n", dest, L.mem, L.vol ? "  ; volatile" : "");
+        return;
+    }
+    if (n->type == AST_UNARY) {
+        place_k(cg, n->children[0], dest, allow);
+        if (n->op[0] == '-') emit(cg, "    neg %s\n", dest);
+        else if (n->op[0] == '~') emit(cg, "    not %s\n", dest);
+        else {
+            const char* lo = reg_low(dest);
+            emit(cg, "    test %s, %s\n    setz %s\n    movzx %s, %s\n", dest, dest, lo, dest, lo);
+        }
+        return;
+    }
+    if (n->type != AST_BINOP) return;
+    AstNode* L = n->children[0];
+    AstNode* R = n->children[1];
+    const char* op = n->op;
+    if (is_shift_op(op)) {
+        OpLeaf S;
+        scalar_leaf(cg, R, &S);
+        place_k(cg, L, dest, allow);
+        emit(cg, "    %s %s, %lld\n", op[0] == '>' ? "sar" : "shl", dest, S.imm);
+        return;
+    }
+    int sh = 0;
+    if (op[0] == '*' && pow2_shift_amt(R, &sh)) {
+        place_k(cg, L, dest, allow);
+        emit(cg, "    shl %s, %d\n", dest, sh);
+        return;
+    }
+    if (ident_is_dest(cg, L, dest) && ident_is_dest(cg, R, dest)) {
+        emit_alu(cg, dest, op, dest, 0, 0);
+        return;
+    }
+    // Swap a commutative op only when that puts a leaf on the right and the
+    // written order does not (`a = b + a` -> add a, b). Keep `i & 7` as an
+    // immediate; swapping it would move the 7 into the register.
+    OpLeaf side;
+    int direct_leaf = scalar_leaf(cg, R, &side) && !ident_is_dest(cg, R, dest) &&
+        can_place_k(cg, L, dest, allow);
+    int swap_leaf = is_comm_op(op) && scalar_leaf(cg, L, &side) && !ident_is_dest(cg, L, dest) &&
+        can_place_k(cg, R, dest, allow);
+    if (swap_leaf && !direct_leaf) {
+        place_ordered_k(cg, op, R, L, dest, allow);
+        return;
+    }
+    if (can_ordered_k(cg, L, R, dest, allow)) {
+        place_ordered_k(cg, op, L, R, dest, allow);
+        return;
+    }
+    if (is_comm_op(op) && can_ordered_k(cg, R, L, dest, allow))
+        place_ordered_k(cg, op, R, L, dest, allow);
+}
+
+static const char* cmp_setcc(const char* op) {
+    if (!op) return NULL;
+    if (!strcmp(op, "==")) return "sete";
+    if (!strcmp(op, "!=")) return "setne";
+    if (!strcmp(op, "<")) return "setl";
+    if (!strcmp(op, ">")) return "setg";
+    if (!strcmp(op, "<=")) return "setle";
+    if (!strcmp(op, ">=")) return "setge";
+    return NULL;
+}
+
+static const char* cmp_fail_jcc(const char* op) {
+    if (!op) return NULL;
+    if (!strcmp(op, "==")) return "jne";
+    if (!strcmp(op, "!=")) return "je";
+    if (!strcmp(op, "<")) return "jge";
+    if (!strcmp(op, ">")) return "jle";
+    if (!strcmp(op, "<=")) return "jg";
+    if (!strcmp(op, ">=")) return "jl";
+    return NULL;
+}
+
+static void emit_cmp_operand(Codegen* cg, OpLeaf* S) {
+    if (S->kind == 3) emit(cg, "%lld", S->imm);
+    else if (S->kind == 1) emit(cg, "%s", S->reg);
+    else emit(cg, "[%s]%s", S->mem, S->vol ? "  ; volatile" : "");
+}
+
+// cmp of two leaves. Emits nothing and returns 0 if the form is not direct.
+static int emit_cmp_raw(Codegen* cg, AstNode* n) {
+    if (!n || n->type != AST_COMPARE || !cmp_setcc(n->op) || n->child_count != 2) return 0;
+    OpLeaf L, R;
+    if (!scalar_leaf(cg, n->children[0], &L) || !scalar_leaf(cg, n->children[1], &R)) return 0;
+    if (L.kind == 1) {
+        emit(cg, "    cmp %s, ", L.reg);
+        emit_cmp_operand(cg, &R);
+        emit(cg, "\n");
+        return 1;
+    }
+    if (L.kind == 2 && R.kind != 2) {
+        // A memory destination has no register to imply the width.
+        emit(cg, "    cmp qword [%s], ", L.mem);
+        emit_cmp_operand(cg, &R);
+        if (L.vol) emit(cg, "  ; volatile");
+        emit(cg, "\n");
+        return 1;
+    }
+    if (L.kind == 2 && R.kind == 2) {
+        emit(cg, "    mov rax, [%s]%s\n", L.mem, L.vol ? "  ; volatile" : "");
+        emit(cg, "    cmp rax, ");
+        emit_cmp_operand(cg, &R);
+        emit(cg, "\n");
+        return 1;
+    }
+    emit(cg, "    mov rax, %lld\n", L.imm);
+    emit(cg, "    cmp rax, ");
+    emit_cmp_operand(cg, &R);
+    emit(cg, "\n");
+    return 1;
+}
+
+// A narrow integer must be truncated in rax. The direct register path skips that.
+static int sym_narrow_int(Symbol* sym) {
+    int bits = 64, sg = 1;
+    if (!sym || sym->is_pointer || sym->is_array || !sym->type_name) return 0;
+    if (!int_name(sym->type_name, &bits, &sg)) return 0;
+    return bits < 64;
+}
+
+static int assign_dest_narrow(Codegen* cg, AstNode* n) {
+    if (!n || !n->name || !cg->symtab) return 0;
+    return sym_narrow_int(symtab_lookup_symbol(cg->symtab, n->name));
+}
+
+static void check_assign_types(Codegen* cg, AstNode* n) {
+    if (!n || n->child_count < 1 || !n->children[0]) return;
+    Symbol* asym = n->name ? symtab_lookup_symbol(cg->symtab, n->name) : NULL;
+    GlobalVar* ag = (!asym && n->name) ? global_symtab_lookup(cg->global_symtab, n->name) : NULL;
+    VTy dst_ty = asym && !asym->is_array ? sym_vty(cg, asym) : (ag ? global_vty(cg, ag) : ty_unk());
+    check_types(n->children[0], "", dst_ty, expr_ty(cg, n->children[0]));
+}
+
+// `reg = a[i]` with a scaled index: one load into reg, not mov rax / mov reg.
+static int assign_index(Codegen* cg, AstNode* n) {
+    if (!o2_hosted() || !n || n->type != AST_ASSIGN || !n->name) return 0;
+    if (!n->children || n->child_count < 1 || !n->children[0] || n->children[0]->type != AST_INDEX)
+        return 0;
+    Symbol* sym = symtab_lookup_symbol(cg->symtab, n->name);
+    const char* rr = local_reg(sym);
+    if (!rr) return 0;
+    check_assign_types(cg, n);
+    g_index_dest = rr;
+    g_index_hit = 0;
+    gen_array_index(cg, n->children[0]);
+    g_index_dest = NULL;
+    if (!g_index_hit) emit(cg, "    mov %s, rax\n", rr);
+    return 1;
+}
+
+// Place the RHS into the local's register. 0 if the assignment is not that form.
+static int assign_direct(Codegen* cg, AstNode* n) {
+    if (!o2_hosted() || !n || n->type != AST_ASSIGN || !n->name) return 0;
+    if (!n->children || n->child_count < 1 || !n->children[0]) return 0;
+    AstNode dst;
+    memset(&dst, 0, sizeof dst);
+    dst.type = AST_IDENT;
+    dst.name = n->name;
+    dst.line = n->line;
+    dst.col = n->col;
+    if (expr_struct_type(cg, &dst)) return 0;
+    Symbol* sym = symtab_lookup_symbol(cg->symtab, n->name);
+    const char* rr = local_reg(sym);
+    if (!rr || !can_place(cg, n->children[0], rr)) return 0;
+    check_assign_types(cg, n);
+    place_in(cg, n->children[0], rr);
+    return 1;
+}
+
 static void emit_binop_rax_rbx(Codegen* cg, const char* op) {
     if (legacy_bits()) { emit_binop_legacy(cg, op); return; }
     if (!strcmp(op, "<<")) emit(cg, "    mov rcx, rbx\n    shl rax, cl\n");
@@ -4106,6 +4762,7 @@ static void emit_binop_rax_rbx(Codegen* cg, const char* op) {
 
 void gen_expr(Codegen* cg, AstNode* n) {
     if (!n) return;  // Null safety guard
+    if (n->file) focus_file(n->file);
     if (n->type == AST_NUMBER) {
         if (legacy_bits()) emit(cg, "    mov eax, %s\n", n->value);
         else emit(cg, "    mov rax, %s\n", n->value);
@@ -4217,12 +4874,13 @@ void gen_expr(Codegen* cg, AstNode* n) {
                 return;
             }
         }
-        {
-            Symbol* asym = n->name ? symtab_lookup_symbol(cg->symtab, n->name) : NULL;
-            GlobalVar* ag = (!asym && n->name) ? global_symtab_lookup(cg->global_symtab, n->name) : NULL;
-            VTy dst_ty = asym && !asym->is_array ? sym_vty(cg, asym) : (ag ? global_vty(cg, ag) : ty_unk());
-            if (n->child_count > 0) check_types(n->children[0], "", dst_ty, expr_ty(cg, n->children[0]));
+        if (!assign_dest_narrow(cg, n) && (assign_direct(cg, n) || assign_index(cg, n))) {
+            Symbol* sym = n->name ? symtab_lookup_symbol(cg->symtab, n->name) : NULL;
+            const char* rr = local_reg(sym);
+            if (rr && strcmp(rr, "rax") != 0) emit(cg, "    mov rax, %s\n", rr);
+            return;
         }
+        check_assign_types(cg, n);
         gen_expr(cg, n->children[0]);
         // Try local variable first
         int off = symtab_lookup(cg->symtab, n->name);
@@ -4247,6 +4905,10 @@ void gen_expr(Codegen* cg, AstNode* n) {
             }
         }
     } else if (n->type == AST_BINOP) {
+        if (o2_hosted() && can_place(cg, n, "rax")) {
+            place_in(cg, n, "rax");
+            return;
+        }
         // Strength reduction optimization (O2+): Check if right operand is power of 2
         AstNode* right = n->children[1];
         int use_shift = 0;
@@ -4297,6 +4959,11 @@ void gen_expr(Codegen* cg, AstNode* n) {
             emit_binop_rax_rbx(cg, n->op);
         }
     } else if (n->type == AST_COMPARE) {
+        if (o2_hosted() && emit_cmp_raw(cg, n)) {
+            emit(cg, "    %s al\n", cmp_setcc(n->op));
+            emit(cg, "    movzx rax, al\n");
+            return;
+        }
         gen_expr(cg, n->children[0]);
         if (legacy_bits()) {
             emit(cg, "    push eax\n    push edx\n");
@@ -4595,6 +5262,49 @@ void gen_expr(Codegen* cg, AstNode* n) {
             if (et) check_types(value_expr, "", ty_from_spelled(cg, et), expr_ty(cg, value_expr));
         }
 
+        // Hosted -O2: arr[i] = expr with i already in a register is one
+        // store, base+index*scale. The value is computed first, so an index
+        // that the value also reads is still the index afterwards.
+        if (o2_hosted() && index_expr && index_expr->type == AST_IDENT) {
+            Symbol* isym = symtab_lookup_symbol(cg->symtab, index_expr->name);
+            const char* ireg = local_reg(isym);
+            Symbol* asym = symtab_lookup_symbol(cg->symtab, arr->name);
+            if (ireg && asym && !asym->is_pointer) {
+                int el = 8;
+                if (asym->type_name) {
+                    if (!strcmp(asym->type_name, "i8") || !strcmp(asym->type_name, "u8")) el = 1;
+                    else if (!strcmp(asym->type_name, "i16") || !strcmp(asym->type_name, "u16")) el = 2;
+                    else if (!strcmp(asym->type_name, "i32") || !strcmp(asym->type_name, "u32")) el = 4;
+                    else if (!strcmp(asym->type_name, "i64") || !strcmp(asym->type_name, "u64")) el = 8;
+                }
+                if (scale_ok(el)) {
+                    gen_expr(cg, value_expr);
+                    char mem[96];
+                    snprintf(mem, sizeof mem, "rbp%d+%s*%d", asym->offset, ireg, el);
+                    emit_scaled_store(cg, mem, el, "rax");
+                    return;
+                }
+            }
+            if (ireg) {
+                GlobalVar* gv = global_symtab_lookup(cg->global_symtab, arr->name);
+                if (gv && gv->is_array) {
+                    int el = 1;
+                    if (gv->elem_type) {
+                        if (!strcmp(gv->elem_type, "i32") || !strcmp(gv->elem_type, "u32")) el = 4;
+                        else if (!strcmp(gv->elem_type, "i64") || !strcmp(gv->elem_type, "u64")) el = 8;
+                        else if (!strcmp(gv->elem_type, "i16") || !strcmp(gv->elem_type, "u16")) el = 2;
+                    }
+                    if (scale_ok(el)) {
+                        gen_expr(cg, value_expr);
+                        char mem[128];
+                        snprintf(mem, sizeof mem, "%s+%s*%d", gv->name, ireg, el);
+                        emit_scaled_store(cg, mem, el, "rax");
+                        return;
+                    }
+                }
+            }
+        }
+
         // Evaluate value expression and save it
         gen_expr(cg, value_expr);
         emit(cg, "    push rax\n");  // Save value
@@ -4654,22 +5364,26 @@ void gen_expr(Codegen* cg, AstNode* n) {
                     else if (!strcmp(sym->type_name, "i64") || !strcmp(sym->type_name, "u64")) elem_size = 8;
                 }
 
-                // Local array assignment with correct element size
-                if (elem_size > 1) {
-                    emit(cg, "    imul rax, %d\n", elem_size);
-                }
-                emit(cg, "    mov rbx, rax\n");
-                emit(cg, "    pop rax\n");  // Restore value
-
-                // Store with correct width
-                if (elem_size == 1) {
-                    emit(cg, "    mov byte [rbp%d+rbx], al\n", sym->offset);
-                } else if (elem_size == 2) {
-                    emit(cg, "    mov word [rbp%d+rbx], ax\n", sym->offset);
-                } else if (elem_size == 4) {
-                    emit(cg, "    mov dword [rbp%d+rbx], eax\n", sym->offset);
+                if (o2_hosted() && scale_ok(elem_size)) {
+                    emit(cg, "    pop rbx\n");
+                    char mem[96];
+                    snprintf(mem, sizeof mem, "rbp%d+rax*%d", sym->offset, elem_size);
+                    emit_scaled_store(cg, mem, elem_size, "rbx");
                 } else {
-                    emit(cg, "    mov qword [rbp%d+rbx], rax\n", sym->offset);
+                    if (elem_size > 1) {
+                        emit(cg, "    imul rax, %d\n", elem_size);
+                    }
+                    emit(cg, "    mov rbx, rax\n");
+                    emit(cg, "    pop rax\n");  // Restore value
+                    if (elem_size == 1) {
+                        emit(cg, "    mov byte [rbp%d+rbx], al\n", sym->offset);
+                    } else if (elem_size == 2) {
+                        emit(cg, "    mov word [rbp%d+rbx], ax\n", sym->offset);
+                    } else if (elem_size == 4) {
+                        emit(cg, "    mov dword [rbp%d+rbx], eax\n", sym->offset);
+                    } else {
+                        emit(cg, "    mov qword [rbp%d+rbx], rax\n", sym->offset);
+                    }
                 }
             }
         } else {
@@ -4684,23 +5398,27 @@ void gen_expr(Codegen* cg, AstNode* n) {
                     else if ((!strcmp(gvar->elem_type, "i16") || !strcmp(gvar->elem_type, "u16"))) elem_size = 2;
                 }
 
-                // Calculate offset
-                if (elem_size > 1) {
-                    emit(cg, "    imul rax, %d\n", elem_size);
-                }
-                emit(cg, "    lea rbx, [%s]\n", gvar->name);
-                emit(cg, "    add rbx, rax\n");
-                emit(cg, "    pop rax\n");  // Restore value
-
-                // Store with correct width
-                if (elem_size == 1) {
-                    emit(cg, "    mov byte [rbx], al\n");
-                } else if (elem_size == 2) {
-                    emit(cg, "    mov word [rbx], ax\n");
-                } else if (elem_size == 4) {
-                    emit(cg, "    mov dword [rbx], eax\n");
+                if (o2_hosted() && scale_ok(elem_size)) {
+                    emit(cg, "    pop rbx\n");
+                    char mem[128];
+                    snprintf(mem, sizeof mem, "%s+rax*%d", gvar->name, elem_size);
+                    emit_scaled_store(cg, mem, elem_size, "rbx");
                 } else {
-                    emit(cg, "    mov qword [rbx], rax\n");
+                    if (elem_size > 1) {
+                        emit(cg, "    imul rax, %d\n", elem_size);
+                    }
+                    emit(cg, "    lea rbx, [%s]\n", gvar->name);
+                    emit(cg, "    add rbx, rax\n");
+                    emit(cg, "    pop rax\n");  // Restore value
+                    if (elem_size == 1) {
+                        emit(cg, "    mov byte [rbx], al\n");
+                    } else if (elem_size == 2) {
+                        emit(cg, "    mov word [rbx], ax\n");
+                    } else if (elem_size == 4) {
+                        emit(cg, "    mov dword [rbx], eax\n");
+                    } else {
+                        emit(cg, "    mov qword [rbx], rax\n");
+                    }
                 }
             } else if (gvar && gvar->is_pointer) {
                 const char* base = gvar->pointee_type;
@@ -4970,15 +5688,23 @@ void gen_expr(Codegen* cg, AstNode* n) {
     }
 }
 
-// ---- hosted -O2: which scalar locals live in r12-r15 --------------------
+// ---- hosted -O2: scalar locals in r12-r15 and, if no call is inside the
+// live range, r10-r11. A call tick strictly between the first and last
+// touch means the name crosses that call.
 #define MAX_REG_CAND 128
+#define MAX_CALL_TICK 512
 typedef struct {
     char name[96];
     int decls, uses, bad, ord;
+    int lo, hi;
 } RegCand;
 static RegCand g_reg_cand[MAX_REG_CAND];
 static int g_reg_ncand;
 static int g_reg_asm;
+static int g_tick;
+static int g_call_tick[MAX_CALL_TICK];
+static int g_ncall_tick;
+static int g_call_overflow;
 
 static RegCand* reg_cand(const char* name) {
     if (!name || strlen(name) >= sizeof g_reg_cand[0].name) return NULL;
@@ -4989,7 +5715,22 @@ static RegCand* reg_cand(const char* name) {
     memset(c, 0, sizeof *c);
     memcpy(c->name, name, strlen(name) + 1);
     c->ord = g_reg_ncand;
+    c->lo = 0x7fffffff;
+    c->hi = -1;
     return c;
+}
+
+static void reg_touch(const char* name) {
+    RegCand* c = reg_cand(name);
+    if (!c) return;
+    if (g_tick < c->lo) c->lo = g_tick;
+    if (g_tick > c->hi) c->hi = g_tick;
+    g_tick++;
+}
+
+static void reg_note_call(void) {
+    if (g_ncall_tick >= MAX_CALL_TICK) { g_call_overflow = 1; return; }
+    g_call_tick[g_ncall_tick++] = g_tick++;
 }
 
 static void reg_note_decl(const char* name, int bad) {
@@ -5008,6 +5749,7 @@ static void reg_walk(Codegen* cg, AstNode* n) {
     if (!n || n->type == AST_FUNCTION) return;
     if (n->type == AST_CALL && n->name && !strcmp(n->name, "asm")) g_reg_asm = 1;
     if (n->type == AST_LET && n->name) {
+        for (int i = 0; i < n->child_count; i++) reg_walk(cg, n->children[i]);
         int bad = (n->flags & AF_VOLATILE) || n->is_pointer;
         if (n->struct_type && !strcmp(n->struct_type, "__array__")) bad = 1;
         else if (n->struct_type && typetab_lookup(cg->types, n->struct_type)) bad = 1;
@@ -5016,22 +5758,71 @@ static void reg_walk(Codegen* cg, AstNode* n) {
              n->children[0]->type == AST_STRUCT_LITERAL))
             bad = 1;
         reg_note_decl(n->name, bad);
+        reg_touch(n->name);
+        return;
     }
     if (n->type == AST_ADDR_OF && n->child_count > 0 && n->children[0] &&
         n->children[0]->type == AST_IDENT)
         reg_note_decl(n->children[0]->name, 1);
-    if (n->type == AST_IDENT && n->name) reg_note_use(n->name);
-    if ((n->type == AST_ASSIGN || n->type == AST_ARRAY_ASSIGN) && n->name) reg_note_use(n->name);
+    if ((n->type == AST_ASSIGN || n->type == AST_ARRAY_ASSIGN) && n->name) {
+        for (int i = 0; i < n->child_count; i++) reg_walk(cg, n->children[i]);
+        reg_note_use(n->name);
+        reg_touch(n->name);
+        return;
+    }
+    if (n->type == AST_IDENT && n->name) {
+        reg_note_use(n->name);
+        reg_touch(n->name);
+        return;
+    }
     for (int i = 0; i < n->child_count; i++) reg_walk(cg, n->children[i]);
+    if (n->type == AST_CALL) reg_note_call();
 }
 
-// Pick the four most-used scalars. A name declared twice (shadowing) stays
-// on the stack, and so does anything whose address is taken or that asm()
-// might name as [rbp-N].
+static int reg_crosses(RegCand* c) {
+    if (g_call_overflow) return 1;
+    if (c->lo > c->hi) return 0;
+    for (int i = 0; i < g_ncall_tick; i++) {
+        int t = g_call_tick[i];
+        if (c->lo < t && t < c->hi) return 1;
+    }
+    return 0;
+}
+
+static int reg_eligible(RegCand* c) {
+    return !c->bad && c->decls == 1 && c->uses > 0;
+}
+
+// cross_mode: 1 only names live across a call, 0 only names that are not, -1 either.
+static int reg_pick(int* taken, int cross_mode) {
+    int best = -1;
+    for (int i = 0; i < g_reg_ncand; i++) {
+        if (taken[i]) continue;
+        RegCand* c = &g_reg_cand[i];
+        if (!reg_eligible(c)) continue;
+        int cr = reg_crosses(c);
+        if (cross_mode == 1 && !cr) continue;
+        if (cross_mode == 0 && cr) continue;
+        if (best < 0 || c->uses > g_reg_cand[best].uses ||
+            (c->uses == g_reg_cand[best].uses && c->ord < g_reg_cand[best].ord))
+            best = i;
+    }
+    return best;
+}
+
+// Callee-saved r12-r15 first, preferring names that cross a call. r10 and r11
+// only for names that do not. A fifth crosser stays on the stack: there is
+// no spill around the call. asm() disables the whole plan. Too many calls
+// to remember is treated as every name crossing.
 static void plan_reg_locals(Codegen* cg, AstNode* fn) {
     g_reg_local_n = 0;
+    g_reg_callee_n = 0;
     g_reg_ncand = 0;
     g_reg_asm = 0;
+    g_tick = 0;
+    g_ncall_tick = 0;
+    g_call_overflow = 0;
+    for (int i = 0; i < MAX_REG_LOCAL; i++) g_reg_local_var[i][0] = '\0';
     if (!fn || fn->child_count < 1) return;
     int pc = fn->child_count - 1;
     for (int i = 0; i < pc; i++) {
@@ -5040,30 +5831,37 @@ static void plan_reg_locals(Codegen* cg, AstNode* fn) {
         int bad = par->is_pointer != 0;
         if (par->value && typetab_lookup(cg->types, par->value)) bad = 1;
         reg_note_decl(par->name, bad);
+        reg_touch(par->name);
     }
     reg_walk(cg, fn->children[pc]);
     if (g_reg_asm) return;
     int taken[MAX_REG_CAND];
     memset(taken, 0, sizeof taken);
-    for (int k = 0; k < MAX_REG_LOCAL; k++) {
-        int best = -1;
-        for (int i = 0; i < g_reg_ncand; i++) {
-            if (taken[i]) continue;
-            RegCand* c = &g_reg_cand[i];
-            if (c->bad || c->decls != 1 || c->uses <= 0) continue;
-            if (best < 0 || c->uses > g_reg_cand[best].uses ||
-                (c->uses == g_reg_cand[best].uses && c->ord < g_reg_cand[best].ord))
-                best = i;
+    int slot = 0;
+    for (int pass = 0; pass < 2 && slot < MAX_REG_CALLEE; pass++) {
+        int mode = pass == 0 ? 1 : -1;
+        while (slot < MAX_REG_CALLEE) {
+            int best = reg_pick(taken, mode);
+            if (best < 0) break;
+            taken[best] = 1;
+            snprintf(g_reg_local_var[slot], sizeof g_reg_local_var[0], "%s", g_reg_cand[best].name);
+            slot++;
         }
+    }
+    g_reg_callee_n = slot;
+    int extra = 0;
+    while (extra < MAX_REG_LOCAL - MAX_REG_CALLEE) {
+        int best = reg_pick(taken, 0);
         if (best < 0) break;
         taken[best] = 1;
-        snprintf(g_reg_local_var[g_reg_local_n], sizeof g_reg_local_var[0], "%s", g_reg_cand[best].name);
-        g_reg_local_n++;
+        snprintf(g_reg_local_var[MAX_REG_CALLEE + extra], sizeof g_reg_local_var[0], "%s", g_reg_cand[best].name);
+        extra++;
     }
+    g_reg_local_n = extra ? MAX_REG_CALLEE + extra : g_reg_callee_n;
 }
 
 static void emit_reg_restore(Codegen* cg) {
-    for (int i = 0; i < g_reg_local_n; i++)
+    for (int i = 0; i < g_reg_callee_n; i++)
         emit(cg, "    mov %s, [rbp - __frame_%s + %d]\n",
              g_reg_local_name[i], g_fn_name, 8 * (i + 1));
 }
@@ -5088,10 +5886,123 @@ static void naked_take_slot(Symbol* sym, int bytes, int line, int col) {
     g_naked_slot_bytes += bytes;
 }
 
+// A parameter that arrives in a register, not a struct passed by pointer.
+static const char* param_in_reg(Codegen* cg, AstNode* fn, const char* name) {
+    static const char* regs[] = {"rdi", "rsi", "rdx", "rcx", "r8", "r9"};
+    int pc = fn->child_count - 1;
+    if (pc < 1 || !name) return NULL;
+    int nreg = pc < 6 ? pc : 6;
+    for (int i = 0; i < nreg; i++) {
+        AstNode* p = fn->children[i];
+        if (!p || !p->name || strcmp(p->name, name)) continue;
+        if (!p->is_pointer && p->value && typetab_lookup(cg->types, p->value)) return NULL;
+        return regs[i];
+    }
+    return NULL;
+}
+
+static const char* jcc_when_true(const char* op, int swapped) {
+    if (!op) return NULL;
+    if (!strcmp(op, "==")) return "je";
+    if (!strcmp(op, "!=")) return "jne";
+    if (!swapped) {
+        if (!strcmp(op, "<")) return "jl";
+        if (!strcmp(op, ">")) return "jg";
+        if (!strcmp(op, "<=")) return "jle";
+        if (!strcmp(op, ">=")) return "jge";
+    } else {
+        if (!strcmp(op, "<")) return "jg";
+        if (!strcmp(op, ">")) return "jl";
+        if (!strcmp(op, "<=")) return "jge";
+        if (!strcmp(op, ">=")) return "jle";
+    }
+    return NULL;
+}
+
+// Hosted -O2: `if (param <op> leaf) { return param; }` as the first statement.
+// The compare uses the incoming register and returns before the frame exists,
+// so the base case does not store and reload a callee-saved register.
+typedef struct {
+    int ok;
+    const char* ret_reg;
+    const char* lhs;
+    const char* rhs;
+    long long imm;
+    int imm_rhs;
+    const char* jcc;
+} EarlyRet;
+
+static int early_leaf(Codegen* cg, AstNode* fn, AstNode* n, const char** reg, long long* imm, int* is_imm) {
+    if (!n) return 0;
+    if (n->type == AST_NUMBER) {
+        long long v;
+        if (!parse_i64(n->value, &v) || !fits_imm32_val(v)) return 0;
+        *is_imm = 1;
+        *imm = v;
+        return 1;
+    }
+    if (n->type == AST_IDENT && n->name) {
+        const char* r = param_in_reg(cg, fn, n->name);
+        if (!r) return 0;
+        *is_imm = 0;
+        *reg = r;
+        return 1;
+    }
+    return 0;
+}
+
+static EarlyRet match_early_ret(Codegen* cg, AstNode* fn) {
+    EarlyRet e;
+    memset(&e, 0, sizeof e);
+    if (!o2_hosted() || !fn || !fn->name) return e;
+    if (fn->flags & (AF_INTERRUPT | AF_SYSCALL | AF_NAKED)) return e;
+    int pc = fn->child_count - 1;
+    if (pc < 1) return e;
+    AstNode* body = fn->children[pc];
+    if (!body || body->type != AST_BLOCK || body->child_count < 1) return e;
+    AstNode* st = body->children[0];
+    if (!st || st->type != AST_IF || st->child_count != 2) return e;
+    AstNode* cond = st->children[0];
+    AstNode* thenb = st->children[1];
+    if (!cond || cond->type != AST_COMPARE || cond->child_count != 2 || !cond->op) return e;
+    if (!thenb || thenb->type != AST_BLOCK || thenb->child_count != 1) return e;
+    AstNode* ret = thenb->children[0];
+    if (!ret || ret->type != AST_RETURN || ret->child_count != 1) return e;
+    AstNode* rv = ret->children[0];
+    if (!rv || rv->type != AST_IDENT || !rv->name) return e;
+    const char* ret_reg = param_in_reg(cg, fn, rv->name);
+    if (!ret_reg) return e;
+    const char* lr = NULL;
+    const char* rr = NULL;
+    long long li = 0, ri = 0;
+    int li_imm = 0, ri_imm = 0;
+    if (!early_leaf(cg, fn, cond->children[0], &lr, &li, &li_imm)) return e;
+    if (!early_leaf(cg, fn, cond->children[1], &rr, &ri, &ri_imm)) return e;
+    if (li_imm && ri_imm) return e;
+    const char* jcc = NULL;
+    if (!li_imm) {
+        jcc = jcc_when_true(cond->op, 0);
+        e.lhs = lr;
+        if (ri_imm) { e.imm_rhs = 1; e.imm = ri; }
+        else e.rhs = rr;
+    } else {
+        jcc = jcc_when_true(cond->op, 1);
+        e.lhs = rr;
+        e.imm_rhs = 1;
+        e.imm = li;
+    }
+    if (!jcc) return e;
+    e.ok = 1;
+    e.ret_reg = ret_reg;
+    e.jcc = jcc;
+    return e;
+}
+
 void gen_stmt(Codegen* cg, AstNode* n);
 
 void gen_stmt(Codegen* cg, AstNode* n) {
     if (!n) return;  // Null safety
+    if (n->file) focus_file(n->file);
     if (n->type == AST_BLOCK) {
         // Names declared here hide outer ones and disappear at the closing brace.
         symtab_enter(cg->symtab);
@@ -5260,15 +6171,21 @@ void gen_stmt(Codegen* cg, AstNode* n) {
                 if (src_ty.kind == VK_INT) src_ty = ty_i64();
                 bind_vty(&cg->symtab->symbols[cg->symtab->count - 1], src_ty);
             }
-            gen_expr(cg, n->children[0]);
-            if (n->children[0]->type != AST_ARRAY_LITERAL) {
-                Symbol* sym = &cg->symtab->symbols[cg->symtab->count - 1];
-                if (!sym->is_pointer && !sym->is_array)
-                    emit_store_trunc(cg, sym->type_name, n->children[0]);
-                if (local_reg(sym)) emit(cg, "    mov %s, rax\n", local_reg(sym));
-                else if (sym->mem && legacy_bits()) emit(cg, "    mov [%s], eax\n", sym->mem);
-                else if (sym->mem) emit(cg, "    mov [%s], rax\n", sym->mem);
-                else emit(cg, "    mov [rbp%d], rax\n", off);
+            Symbol* sym = &cg->symtab->symbols[cg->symtab->count - 1];
+            const char* rr = local_reg(sym);
+            if (!sym_narrow_int(sym) && rr && n->children[0]->type != AST_ARRAY_LITERAL &&
+                o2_hosted() && can_place(cg, n->children[0], rr)) {
+                place_in(cg, n->children[0], rr);
+            } else {
+                gen_expr(cg, n->children[0]);
+                if (n->children[0]->type != AST_ARRAY_LITERAL) {
+                    if (!sym->is_pointer && !sym->is_array)
+                        emit_store_trunc(cg, sym->type_name, n->children[0]);
+                    if (rr) emit(cg, "    mov %s, rax\n", rr);
+                    else if (sym->mem && legacy_bits()) emit(cg, "    mov [%s], eax\n", sym->mem);
+                    else if (sym->mem) emit(cg, "    mov [%s], rax\n", sym->mem);
+                    else emit(cg, "    mov [rbp%d], rax\n", off);
+                }
             }
         }
     } else if (n->type == AST_IF) {
@@ -5296,9 +6213,19 @@ void gen_stmt(Codegen* cg, AstNode* n) {
         int end_lab = new_label(cg);
         int cont_lab = new_label(cg);
         emit(cg, ".L%d:\n", start_lab);
-        gen_expr(cg, n->children[0]);
-        if (legacy_bits()) emit(cg, "    test eax, eax\n    jz .L%d\n", end_lab);
-        else emit(cg, "    test rax, rax\n    jz .L%d\n", end_lab);
+        if (legacy_bits()) {
+            gen_expr(cg, n->children[0]);
+            emit(cg, "    test eax, eax\n    jz .L%d\n", end_lab);
+        } else {
+            const char* jcc = NULL;
+            int direct = o2_hosted() && n->children[0] && n->children[0]->type == AST_COMPARE &&
+                (jcc = cmp_fail_jcc(n->children[0]->op)) && emit_cmp_raw(cg, n->children[0]);
+            if (direct) emit(cg, "    %s .L%d\n", jcc, end_lab);
+            else {
+                gen_expr(cg, n->children[0]);
+                emit(cg, "    test rax, rax\n    jz .L%d\n", end_lab);
+            }
+        }
         if (g_loop_depth >= MAX_LOOP_DEPTH) { diag_error(n->line, n->col, "loops nested too deeply"); return; }
         g_loop_break[g_loop_depth] = end_lab;
         g_loop_cont[g_loop_depth] = cont_lab;
@@ -5316,6 +6243,8 @@ void gen_stmt(Codegen* cg, AstNode* n) {
         }
         emit(cg, "    jmp .L%d\n", n->type == AST_BREAK ? g_loop_break[g_loop_depth - 1] : g_loop_cont[g_loop_depth - 1]);
     } else if (n->type == AST_CALL || n->type == AST_ASSIGN || n->type == AST_ARRAY_ASSIGN || n->type == AST_FIELD_ASSIGN) {
+        if (n->type == AST_ASSIGN && !assign_dest_narrow(cg, n) &&
+            (assign_direct(cg, n) || assign_index(cg, n))) return;
         gen_expr(cg, n);
     }
 }
@@ -5392,7 +6321,9 @@ static void bind_param(Codegen* cg, AstNode* par, const char* src_reg, int stack
 
 void gen_func(Codegen* cg, AstNode* n) {
     g_reg_local_n = 0;
+    g_reg_callee_n = 0;
     if (!n || !n->name) return;  // Null safety
+    if (n->file) focus_file(n->file);
     int param_count = n->child_count - 1;
     int is_int = (n->flags & AF_INTERRUPT) != 0;
     int is_sys = (n->flags & AF_SYSCALL) != 0;
@@ -5477,12 +6408,20 @@ void gen_func(Codegen* cg, AstNode* n) {
     } else {
         if (optimization_level >= 2 && !g_freestanding)
             plan_reg_locals(cg, n);
+        EarlyRet early = match_early_ret(cg, n);
+        if (early.ok) {
+            if (early.imm_rhs) emit(cg, "    cmp %s, %lld\n", early.lhs, early.imm);
+            else emit(cg, "    cmp %s, %s\n", early.lhs, early.rhs);
+            emit(cg, "    %s .Lbase_%s\n", early.jcc, n->name);
+        }
         emit(cg, "    push rbp\n    mov rbp, rsp\n");
         // Frame size is only known after the body is generated: use a NASM
         // forward-referenced constant defined after the function.
         emit(cg, "    sub rsp, __frame_%s\n", n->name);
-        // Caller-saved r12-r15 live in the frame's spare bytes, below the locals.
-        for (int i = 0; i < g_reg_local_n; i++)
+        // Callee-saved r12-r15 live in the frame's spare bytes, below the locals.
+        // r10 and r11 are not saved: a local is placed there only when no
+        // call falls inside its live range.
+        for (int i = 0; i < g_reg_callee_n; i++)
             emit(cg, "    mov [rbp - __frame_%s + %d], %s\n",
                  n->name, 8 * (i + 1), g_reg_local_name[i]);
     }
@@ -5514,7 +6453,15 @@ void gen_func(Codegen* cg, AstNode* n) {
     }
 
     AstNode* body = n->children[param_count];
-    for (int i = 0; i < body->child_count; i++)
+    EarlyRet early_body = match_early_ret(cg, n);
+    int body_from = early_body.ok ? 1 : 0;
+    if (early_body.ok && g_cur_fn &&
+        !(g_cur_fn->struct_type && !strcmp(g_cur_fn->struct_type, "__array__"))) {
+        AstNode* ret = body->children[0]->children[1]->children[0];
+        VTy dst_ty = ty_decl(cg, 1, g_cur_fn->is_pointer, g_cur_fn->value);
+        check_types(ret->children[0], "return value", dst_ty, expr_ty(cg, ret->children[0]));
+    }
+    for (int i = body_from; i < body->child_count; i++)
         gen_stmt(cg, body->children[i]);
     symtab_leave(cg->symtab);
 
@@ -5553,8 +6500,14 @@ void gen_func(Codegen* cg, AstNode* n) {
     } else {
         emit(cg, "    xor rax, rax\n");
         emit_hosted_epilogue(cg);
+        EarlyRet early_tail = match_early_ret(cg, n);
+        if (early_tail.ok) {
+            emit(cg, ".Lbase_%s:\n", n->name);
+            emit(cg, "    mov rax, %s\n    ret\n", early_tail.ret_reg);
+        }
     }
     g_reg_local_n = 0;
+    g_reg_callee_n = 0;
 
     // All locals (including nested-scope ones) are now known.
     if (!naked) {
@@ -5972,7 +6925,7 @@ void codegen(AstNode* ast, const char* file, StringTable* strtab, TypeTable* typ
 
 static void usage(FILE* o) {
     fprintf(o,
-        "Usage: " COMPILER_BIN " [options] <file" SRC_EXT ">\n"
+        "Usage: " COMPILER_BIN " [options] <file" SRC_EXT "> [file" SRC_EXT " ...]\n"
         "\n"
         "Options:\n"
         "  -O0 | -O1 | -O2     optimization level (default -O0)\n"
@@ -5997,7 +6950,8 @@ static int run_cmd(const char* fmt, const char* a, const char* b) {
 }
 
 int main(int argc, char** argv) {
-    const char* input = NULL;
+    const char* inputs[MAX_LOADED];
+    int ninputs = 0;
     const char* out = NULL;
     int only_asm = 0, verbose = 0;
 
@@ -6025,11 +6979,14 @@ int main(int argc, char** argv) {
             out = argv[++i];
         }
         else if (a[0] == '-') { fprintf(stderr, COMPILER_BIN ": error: unknown option '%s'\n", a); usage(stderr); return 2; }
-        else if (!input) input = a;
-        else { fprintf(stderr, COMPILER_BIN ": error: more than one input file\n"); return 2; }
+        else if (ninputs >= MAX_LOADED) {
+            fprintf(stderr, COMPILER_BIN ": error: too many input files (maximum %d)\n", MAX_LOADED);
+            return 2;
+        } else inputs[ninputs++] = a;
     }
-    if (!input) { usage(stderr); return 2; }
-    {
+    if (ninputs == 0) { usage(stderr); return 2; }
+    for (int i = 0; i < ninputs; i++) {
+        const char* input = inputs[i];
         size_t il = strlen(input), ol = strlen(OLD_SRC_EXT), ol2 = strlen(OLDER_SRC_EXT);
         if (il > ol && !strcmp(input + il - ol, OLD_SRC_EXT))
             fprintf(stderr, "%s: warning: the '" OLD_SRC_EXT "' extension is deprecated; rename the file to '" SRC_EXT "'\n", input);
@@ -6037,28 +6994,30 @@ int main(int argc, char** argv) {
             fprintf(stderr, "%s: warning: the '" OLDER_SRC_EXT "' extension is deprecated (the language was renamed from Chronos); use '" SRC_EXT "'\n", input);
     }
 
-    FILE* f = fopen(input, "r");
-    if (!f) { fprintf(stderr, COMPILER_BIN ": error: cannot open '%s'\n", input); return 1; }
-    fseek(f, 0, SEEK_END);
-    long size = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    char* src = malloc(size + 1);
-    size_t got = fread(src, 1, size, f);
-    src[got] = '\0';
-    fclose(f);
-    g_src_file = input;
-    g_src_text = src;
-
     const char* asm_out = only_asm ? (out ? out : "output.asm") : "output.asm";
     const char* exe_out = out ? out : "a.out";
 
-    if (verbose) fprintf(stderr, LANG_NAME " " LANG_VERSION ": compiling %s (-O%d%s)\n",
-                         input, optimization_level, g_freestanding ? ", freestanding" : "");
+    if (verbose) {
+        fprintf(stderr, LANG_NAME " " LANG_VERSION ": compiling %s (-O%d%s)\n",
+                inputs[0], optimization_level, g_freestanding ? ", freestanding" : "");
+        for (int i = 1; i < ninputs; i++)
+            fprintf(stderr, "  + %s\n", inputs[i]);
+    }
 
-    int count;
-    Tok* toks = tokenize(src, &count);
-    Parser parser = {toks, 0, count};
-    AstNode* ast = parse(&parser);
+    AstNode* ast = ast_new(AST_PROGRAM);
+    for (int i = 0; i < ninputs; i++) {
+        if (!parse_file_into(ast, inputs[i], 0, 1, 1)) {
+            if (g_error_count > 0)
+                fprintf(stderr, "%d error%s, compilation failed\n", g_error_count, g_error_count == 1 ? "" : "s");
+            return 1;
+        }
+    }
+    // parse_file_into restores the previous buffer. Program-level errors
+    // (a missing _start) name the first file, the same as a one-file compile.
+    if (g_nloaded > 0) {
+        g_src_file = g_loaded[0].name;
+        g_src_text = g_loaded[0].text;
+    }
 
     TypeTable* types = typetab_new();
     build_type_table(types, ast);
