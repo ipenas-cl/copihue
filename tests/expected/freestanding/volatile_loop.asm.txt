@@ -1,0 +1,29 @@
+section .data
+ticks: dq 0
+section .text
+spin:
+    push rbp
+    mov rbp, rsp
+    sub rsp, __frame_spin
+.L0:
+    mov rax, [ticks]  ; volatile
+    push rax
+    mov rax, 0
+    mov rbx, rax
+    pop rax
+    cmp rax, rbx
+    sete al
+    movzx rax, al
+    test rax, rax
+    jz .L1
+    pause
+.L2:
+    jmp .L0
+.L1:
+    mov rax, [ticks]  ; volatile
+    leave
+    ret
+    xor rax, rax
+    leave
+    ret
+__frame_spin equ 64

@@ -1,0 +1,116 @@
+section .data
+ticks: dq 0
+section .text
+timer:
+    push rax
+    push rcx
+    push rdx
+    push rbx
+    push rbp
+    push rsi
+    push rdi
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    push r13
+    push r14
+    push r15
+    mov rbp, rsp
+    sub rsp, __frame_timer
+    mov rax, [ticks]  ; volatile
+    push rax
+    mov rax, 1
+    mov rbx, rax
+    pop rax
+    add rax, rbx
+    mov [ticks], rax  ; volatile
+    mov rax, 32
+    push rax
+    mov rax, 32
+    pop rdx
+    out dx, al
+.Lret_timer:
+    mov rsp, rbp
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rbp
+    pop rbx
+    pop rdx
+    pop rcx
+    pop rax
+    iretq
+__frame_timer equ 64
+fault:
+    push rax
+    push rcx
+    push rdx
+    push rbx
+    push rbp
+    push rsi
+    push rdi
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    push r13
+    push r14
+    push r15
+    push rax
+    mov rbp, rsp
+    sub rsp, __frame_fault
+    mov rax, [rbp+128]
+    mov [rbp-8], rax
+    mov rax, [rbp-8]
+    mov [ticks], rax  ; volatile
+.Lret_fault:
+    mov rsp, rbp
+    pop rax
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rbp
+    pop rbx
+    pop rdx
+    pop rcx
+    pop rax
+    add rsp, 8
+    iretq
+__frame_fault equ 80
+kmain:
+    push rbp
+    mov rbp, rsp
+    sub rsp, __frame_kmain
+    lea rax, [timer]
+    mov [rbp-8], rax
+    lea rax, [fault]
+    mov [rbp-16], rax
+    mov rax, [rbp-8]
+    push rax
+    mov rax, [rbp-16]
+    mov rbx, rax
+    pop rax
+    add rax, rbx
+    leave
+    ret
+    xor rax, rax
+    leave
+    ret
+__frame_kmain equ 80

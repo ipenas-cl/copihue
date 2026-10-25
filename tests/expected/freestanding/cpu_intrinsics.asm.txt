@@ -1,0 +1,37 @@
+section .data
+section .text
+program_cpu:
+    push rbp
+    mov rbp, rsp
+    sub rsp, __frame_program_cpu
+    mov [rbp-8], rdi
+    mov [rbp-16], rsi
+    mov [rbp-24], rdx
+    mov [rbp-32], rcx
+    mov [rbp-40], r8
+    mov rax, [rbp-8]
+    lidt [rax]
+    mov rax, [rbp-16]
+    lgdt [rax]
+    mov rax, [rbp-24]
+    invlpg [rax]
+    mov rax, [rbp-32]
+    push rax
+    mov rax, [rbp-40]
+    pop rdx
+    mov rcx, rdx
+    mov rdx, rax
+    shr rdx, 32
+    wrmsr
+    swapgs
+    mov rax, [rbp-32]
+    mov rcx, rax
+    rdmsr
+    shl rdx, 32
+    or rax, rdx
+    leave
+    ret
+    xor rax, rax
+    leave
+    ret
+__frame_program_cpu equ 112

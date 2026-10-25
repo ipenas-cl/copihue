@@ -1,0 +1,13 @@
+// syscall fn is the SYSCALL entry: switch to the kernel stack, map the
+// Linux register convention onto the body, and return with sysret.
+let kstack: [u8; 256];
+
+syscall fn sys_write(nr: i64, a1: i64, a2: i64, a3: i64, a4: i64, a5: i64, a6: i64) -> i64 {
+    if (nr == 1) { return a1 + a6; }
+    return 0;
+}
+
+fn kmain() -> i64 {
+    set_syscall_stack(kstack + 256);
+    return 0;
+}
