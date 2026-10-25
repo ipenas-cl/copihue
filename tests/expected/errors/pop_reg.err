@@ -1,0 +1,4 @@
+tests/errors/pop_reg.lap:3:5: error: pop() takes a register name
+      3 |     pop(1);
+        |     ^
+1 error, compilation failed

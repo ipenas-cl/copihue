@@ -15,7 +15,7 @@
 
 // ==== NAMING (single place to change when the language is renamed) ====
 #define LANG_NAME     "Copihue"
-#define LANG_VERSION  "0.26.1"
+#define LANG_VERSION  "0.26.2"
 #define COMPILER_BIN  "copihue"
 #define SRC_EXT       ".lap"   /* Lapageria rosea, the copihue */
 #define OLD_SRC_EXT   ".cph"   /* v0.18.x extension, still accepted with a warning */
@@ -181,6 +181,7 @@ typedef struct AstNode {
 #define AF_SYSCALL    8
 #define AF_NAKED      16
 #define AF_CARRY      32   // `if carry`: branch on CF, no accumulator load
+#define AF_EXTERN     64   // `extern name`: a qword defined outside this let
 
 // Symbol table
 typedef struct {
@@ -229,6 +230,7 @@ typedef struct {
     int is_pointer;
     int is_mutable;     // For *mut T
     int is_volatile;    // Reloaded/stored on every use; never folded or hoisted
+    int is_extern;      // Declared with extern. No dq/resq is emitted for it
     int volatile_pointee; // *volatile T: the pointee access is volatile, not the pointer slot
     char* pointee_type; // Type being pointed to
 } GlobalVar;
@@ -311,6 +313,10 @@ static const MachReg* mach_reg(const char* n) {
         {"ax", 16, 0, 0}, {"sp", 16, 0, 0}, {"si", 16, 0, 0}, {"di", 16, 0, 0},
         {"eax", 32, 0, 0}, {"ecx", 32, 0, 0}, {"edx", 32, 0, 0}, {"esp", 32, 0, 0},
         {"rax", 64, 0, 0}, {"rbx", 64, 0, 0}, {"rsp", 64, 0, 0}, {"rbp", 64, 0, 0},
+        // rdi/rsi/rdx are also the first naked parameters. A bare assignment
+        // overwrites that parameter. They exist so ring-3 code can fill
+        // syscall() without a move the compiler inserts.
+        {"rdi", 64, 0, 0}, {"rsi", 64, 0, 0}, {"rdx", 64, 0, 0},
     };
     if (!n) return NULL;
     for (unsigned i = 0; i < sizeof regs / sizeof regs[0]; i++)
@@ -736,6 +742,7 @@ void global_symtab_add_full(GlobalSymbolTable* gst, char* name, char* type_name,
     gv->is_pointer = is_pointer;
     gv->is_mutable = is_mutable;
     gv->is_volatile = 0;
+    gv->is_extern = 0;
     gv->volatile_pointee = 0;
     gv->pointee_type = is_pointer ? strdup(type_name) : NULL;
 
@@ -2160,6 +2167,7 @@ typedef struct {
     const char* file;
     int line, col;
     int forward;
+    const char* kind;
 } DeclSite;
 static DeclSite* g_decls = NULL;
 static int g_ndecls = 0, g_decl_cap = 0;
@@ -2169,6 +2177,7 @@ static void note_top(AstNode* n) {
     const char* what = NULL;
     int fwd = 0;
     if (n->type == AST_FUNCTION) { what = "function"; fwd = n->is_forward_decl; }
+    else if (n->type == AST_GLOBAL_VAR && (n->flags & AF_EXTERN)) what = "extern";
     else if (n->type == AST_GLOBAL_VAR) what = "global";
     else if (n->type == AST_STRUCT_DEF) what = "struct";
     else if (n->type == AST_DATA) what = "data";
@@ -2183,6 +2192,12 @@ static void note_top(AstNode* n) {
             g_decls[i].col = n->col;
             return;
         }
+        // `extern scratch` names a qword. `data scratch` is its bytes.
+        // Either order is one symbol, not two definitions.
+        if (g_decls[i].kind &&
+            ((!strcmp(what, "extern") && !strcmp(g_decls[i].kind, "data")) ||
+             (!strcmp(what, "data") && !strcmp(g_decls[i].kind, "extern"))))
+            return;
         diag_error(n->line, n->col, "%s '%s' is already defined at %s:%d:%d",
                    what, n->name, g_decls[i].file, g_decls[i].line, g_decls[i].col);
         return;
@@ -2196,7 +2211,26 @@ static void note_top(AstNode* n) {
     g_decls[g_ndecls].line = n->line;
     g_decls[g_ndecls].col = n->col;
     g_decls[g_ndecls].forward = fwd;
+    g_decls[g_ndecls].kind = what;
     g_ndecls++;
+}
+
+// A qword whose storage Copihue does not allocate. `data name` in this file,
+// or a symbol the compiler emits (`__syscall_rsp`), is the definition.
+static void parse_extern(Parser* p, AstNode* prog) {
+    advance_tok(p);
+    Tok name = advance_tok(p);
+    if (name.t != T_IDENT) {
+        diag_error(name.line, name.col, "extern needs a name");
+        return;
+    }
+    AstNode* g = ast_new(AST_GLOBAL_VAR);
+    g->name = strndup(name.s, name.len);
+    g->value = strdup("i64");
+    g->flags |= AF_EXTERN;
+    expect(p, T_SEMI);
+    note_top(g);
+    ast_add(prog, g);
 }
 
 static void parse_into(Parser* p, AstNode* prog);
@@ -2317,10 +2351,12 @@ static void parse_into(Parser* p, AstNode* prog) {
             fn->flags |= AF_SYSCALL;
             note_top(fn);
             ast_add(prog, fn);
-        } else if (peek_word(p, "data") && peek_tok_at(p, 1, T_IDENT)) {
+        } else         if (peek_word(p, "data") && peek_tok_at(p, 1, T_IDENT)) {
             AstNode* d = parse_data(p);
             note_top(d);
             ast_add(prog, d);
+        } else if (peek_word(p, "extern") && peek_tok_at(p, 1, T_IDENT)) {
+            parse_extern(p, prog);
         } else if (peek_word(p, "bits") || peek_word(p, "naked")) {
             AstNode* fn = parse_bits_naked_fn(p);
             note_top(fn);
@@ -2783,7 +2819,12 @@ static int builtin_ret_ty(const char* f, VTy* out) {
         !strcmp(f, "lidt") || !strcmp(f, "lgdt") || !strcmp(f, "invlpg") ||
         !strcmp(f, "hlt") || !strcmp(f, "cli") || !strcmp(f, "sti") || !strcmp(f, "pause") ||
         !strcmp(f, "swapgs") || !strcmp(f, "iretq") || !strcmp(f, "sysretq") ||
-        !strcmp(f, "set_syscall_stack") || !strcmp(f, "ljmp") || !strcmp(f, "int") || !strcmp(f, "asm")) {
+        !strcmp(f, "set_syscall_stack") || !strcmp(f, "ljmp") || !strcmp(f, "int") || !strcmp(f, "asm") ||
+        !strcmp(f, "lodsb") || !strcmp(f, "stosb") || !strcmp(f, "stosd") ||
+        !strcmp(f, "pushfd") || !strcmp(f, "popfd") || !strcmp(f, "push") || !strcmp(f, "pop") ||
+        !strcmp(f, "stc") || !strcmp(f, "clc") || !strcmp(f, "ud2") ||
+        !strcmp(f, "rep_stosb") || !strcmp(f, "rep_stosw") || !strcmp(f, "rep_stosd") || !strcmp(f, "rep_stosq") ||
+        !strcmp(f, "rep_movsb") || !strcmp(f, "rep_movsw") || !strcmp(f, "rep_movsd") || !strcmp(f, "rep_movsq")) {
         *out = ty_i64();
         return 1;
     }
@@ -3215,6 +3256,52 @@ static void gen_two_args(Codegen* cg, AstNode* n) {
 
 static const char* addr_data_label(Codegen* cg, AstNode* e);
 
+// push/pop accept a wider set than the naked lvalues. Saving rax does not
+// assign it, so a normal function may push it. 0 = not a register.
+// 1 = segment, 2 = 16-bit, 3 = 32-bit, 4 = 64-bit.
+static int stack_reg_class(const char* n) {
+    if (!n) return 0;
+    static const char* seg[] = {"ds", "es", "ss", "fs", "gs", NULL};
+    static const char* r16[] = {"ax", "bx", "cx", "dx", "si", "di", "bp", "sp", NULL};
+    static const char* r32[] = {"eax", "ebx", "ecx", "edx", "esi", "edi", "ebp", "esp", NULL};
+    static const char* r64[] = {
+        "rax", "rbx", "rcx", "rdx", "rsi", "rdi", "rbp", "rsp",
+        "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15", NULL
+    };
+    for (int i = 0; seg[i]; i++) if (!strcmp(n, seg[i])) return 1;
+    for (int i = 0; r16[i]; i++) if (!strcmp(n, r16[i])) return 2;
+    for (int i = 0; r32[i]; i++) if (!strcmp(n, r32[i])) return 3;
+    for (int i = 0; r64[i]; i++) if (!strcmp(n, r64[i])) return 4;
+    return 0;
+}
+
+// bits 64 pushes 64-bit registers and segments. bits 16 and bits 32 push
+// 16-bit and 32-bit registers (pushfd is popped into eax in real mode)
+// and segments. `push rax` has no encoding in bits 16.
+static int stack_reg_here(int cls) {
+    if (cls == 1) return 1;
+    if (cls == 4) return !legacy_bits();
+    if (cls == 2 || cls == 3) return legacy_bits();
+    return 0;
+}
+
+static int rep_insn(const char* f, const char** mnem, int* wide) {
+    static const char* tab[] = {
+        "rep_stosb", "rep stosb", "rep_stosw", "rep stosw",
+        "rep_stosd", "rep stosd", "rep_stosq", "rep stosq",
+        "rep_movsb", "rep movsb", "rep_movsw", "rep movsw",
+        "rep_movsd", "rep movsd", "rep_movsq", "rep movsq",
+    };
+    for (unsigned i = 0; i < sizeof tab / sizeof tab[0]; i += 2) {
+        if (!strcmp(f, tab[i])) {
+            *mnem = tab[i + 1];
+            *wide = tab[i + 1][strlen(tab[i + 1]) - 1] == 'q';
+            return 1;
+        }
+    }
+    return 0;
+}
+
 // Builtins that work everywhere, including --freestanding (kernel) code.
 // Returns 1 if handled.
 static int gen_core_builtin(Codegen* cg, AstNode* n) {
@@ -3234,8 +3321,76 @@ static int gen_core_builtin(Codegen* cg, AstNode* n) {
         return 1;
     }
     if (!strcmp(f, "hlt") || !strcmp(f, "cli") || !strcmp(f, "sti") || !strcmp(f, "pause") ||
-        !strcmp(f, "swapgs")) {
+        !strcmp(f, "swapgs") || !strcmp(f, "lodsb") || !strcmp(f, "stosb") || !strcmp(f, "stosd") ||
+        !strcmp(f, "stc") || !strcmp(f, "clc") || !strcmp(f, "ud2")) {
+        if (n->child_count != 0) {
+            diag_error(n->line, n->col, "%s() takes no arguments", f);
+            return 1;
+        }
         emit(cg, "    %s\n", f);
+        return 1;
+    }
+    if (!strcmp(f, "pushfd") || !strcmp(f, "popfd")) {
+        if (n->child_count != 0) {
+            diag_error(n->line, n->col, "%s() takes no arguments", f);
+            return 1;
+        }
+        // bits 64 has no 32-bit push of EFLAGS. The mnemonic is pushfq.
+        emit(cg, "    %s%s\n", f[0] == 'p' && f[1] == 'u' ? "pushf" : "popf",
+             legacy_bits() ? "d" : "q");
+        return 1;
+    }
+    {
+        const char* mnem = NULL;
+        int wide = 0;
+        if (rep_insn(f, &mnem, &wide)) {
+            if (n->child_count != 0) {
+                diag_error(n->line, n->col, "%s() takes no arguments", f);
+                return 1;
+            }
+            if (wide && legacy_bits()) {
+                diag_error(n->line, n->col, "%s() is not available in bits %d", f, g_fn_bits);
+                return 1;
+            }
+            emit(cg, "    %s\n", mnem);
+            return 1;
+        }
+    }
+    if (!strcmp(f, "push")) {
+        if (n->child_count != 1) {
+            diag_error(n->line, n->col, "push() takes 1 argument");
+            return 1;
+        }
+        AstNode* a = n->children[0];
+        if (a && a->type == AST_IDENT && a->name) {
+            int cls = stack_reg_class(a->name);
+            if (cls) {
+                if (!stack_reg_here(cls))
+                    diag_error(a->line, a->col, "register '%s' cannot be pushed in bits %d",
+                               a->name, g_fn_bits ? g_fn_bits : 64);
+                else emit(cg, "    push %s\n", a->name);
+                return 1;
+            }
+        }
+        if (a && a->type == AST_NUMBER && a->value) {
+            emit(cg, "    push %s\n", a->value);
+            return 1;
+        }
+        if (a) gen_expr(cg, a);
+        emit(cg, "    push %s\n", legacy_bits() ? "eax" : "rax");
+        return 1;
+    }
+    if (!strcmp(f, "pop")) {
+        if (n->child_count != 1 || !n->children[0] || n->children[0]->type != AST_IDENT ||
+            !n->children[0]->name || !stack_reg_class(n->children[0]->name)) {
+            diag_error(n->line, n->col, "pop() takes a register name");
+            return 1;
+        }
+        const char* rn = n->children[0]->name;
+        if (!stack_reg_here(stack_reg_class(rn)))
+            diag_error(n->children[0]->line, n->children[0]->col,
+                       "register '%s' cannot be popped in bits %d", rn, g_fn_bits ? g_fn_bits : 64);
+        else emit(cg, "    pop %s\n", rn);
         return 1;
     }
     if (!strcmp(f, "lidt") || !strcmp(f, "lgdt") || !strcmp(f, "invlpg")) {
@@ -3397,6 +3552,22 @@ static int gen_core_builtin(Codegen* cg, AstNode* n) {
         if (n->child_count != 0) { diag_error(n->line, n->col, "retfq() takes no arguments"); return 1; }
         if (legacy_bits()) emit(cg, "    retf\n");
         else emit(cg, "    retfq\n");
+        return 1;
+    }
+    if (!strcmp(f, "syscall") && g_freestanding) {
+        // One instruction. The caller already put the number in rax and the
+        // arguments in rdi, rsi, rdx. The hosted syscall(n, a1, ...) helper
+        // is the runtime and stays unavailable here.
+        if (n->child_count != 0) {
+            diag_error(n->line, n->col,
+                       "syscall() takes no arguments with --freestanding; set rax, rdi, rsi and rdx first");
+            return 1;
+        }
+        if (legacy_bits()) {
+            diag_error(n->line, n->col, "syscall() is a 64-bit instruction");
+            return 1;
+        }
+        emit(cg, "    syscall\n");
         return 1;
     }
     if (!strcmp(f, "int")) {
@@ -7977,6 +8148,15 @@ void codegen(AstNode* ast, const char* file, StringTable* strtab, TypeTable* typ
                 GlobalVar* added = global_symtab_lookup(&global_symtab, gvar->name);
                 if (added && (gvar->flags & AF_VOLATILE))
                     added->is_volatile = 1;
+                if (added && (gvar->flags & AF_EXTERN)) {
+                    added->is_extern = 1;
+                    // These two are defined next to set_syscall_stack. Mentioning
+                    // them is enough to emit that definition.
+                    if (gvar->name &&
+                        (!strcmp(gvar->name, "__syscall_rsp") ||
+                         !strcmp(gvar->name, "__syscall_user_rsp")))
+                        cg.need_syscall_data = 1;
+                }
                 if (added && (gvar->is_pointer & 4))
                     added->volatile_pointee = 1;
             }
@@ -8096,6 +8276,7 @@ void codegen(AstNode* ast, const char* file, StringTable* strtab, TypeTable* typ
     // Emit initialized global variables
     for (int i = 0; i < global_symtab.count; i++) {
         GlobalVar* gv = &global_symtab.vars[i];
+        if (gv->is_extern) continue;
         if (gv->is_initialized) {
             // Array with initialization values
             if (gv->is_array && gv->array_init_values && gv->array_init_count > 0) {
@@ -8132,6 +8313,7 @@ void codegen(AstNode* ast, const char* file, StringTable* strtab, TypeTable* typ
     if (g_flat_org) { fprintf(cg.out, "\nsection .bss\n__bss_start:\n"); has_bss = 1; }
     for (int i = 0; i < global_symtab.count; i++) {
         GlobalVar* gv = &global_symtab.vars[i];
+        if (gv->is_extern) continue;
         if (!gv->is_initialized) {
             if (!has_bss) {
                 fprintf(cg.out, "\nsection .bss\n");

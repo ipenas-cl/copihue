@@ -1,0 +1,4 @@
+tests/errors/extern_dup.lap:2:8: error: extern 'x' is already defined at tests/errors/extern_dup.lap:1:5
+      2 | extern x;
+        |        ^
+1 error, compilation failed

@@ -2,7 +2,7 @@
 
 Todos los cambios importantes del proyecto.
 
-## [0.26.1] - 2026-10-25
+## [0.26.2] - 2026-10-25
 
 ### Added
 - Hosted 64-bit `-O2` places the arguments of a direct call in `rdi`, `rsi`, `rdx`, `rcx`, `r8`, and `r9` when every argument is a scalar the compiler can put in that register (at most six). An argument that is itself a call, an indirect call, a struct passed by value, `syscall` / `syscall6`, and the hosted builtins keep the push/pop sequence. A function that never addresses `rbp` and never pushes saves callee-saved registers with `push`/`pop`, so both calls in `fib` stay 16-byte aligned. One callee-saved temporary holds the left-hand side of `f(n - 1) + f(n - 2)` across the call.
@@ -11,7 +11,21 @@ Todos los cambios importantes del proyecto.
 - `tests/lang/o2_flow.lap` checks that this matches `-O0`: register arguments, a call used as an argument, `||`, a value comparison, an insertion-sort shift that stores `a[0]` when `j` is `-1`, a proved bounds-free loop, the matmul running pointers, and a bounds trap when the limit is larger than the array.
 
 ### Changed
-- Language version is 0.26.1. `-O0`, `--freestanding`, `--flat`, and `--boot` generate the same code as 0.26.0. `bits 16` and `bits 32` do not take these paths. On this machine `sort` went from 255.4 ms to 78.3 ms and `matmul` from 78.8 ms to 46.8 ms (medians, `make bench`). `fib` has fewer instructions on the `n >= 2` path and its median did not improve (389.7 ms to 394.3 ms, ranges overlap). `arith`, `chain`, and `fold` are the same binary as 0.25.1.
+- Language version is 0.26.2. `-O0`, `--freestanding`, `--flat`, and `--boot` generate the same code as 0.26.1. `bits 16` and `bits 32` do not take these paths. On this machine `sort` went from 255.4 ms to 78.3 ms and `matmul` from 78.8 ms to 46.8 ms (medians, `make bench`). `fib` has fewer instructions on the `n >= 2` path and its median did not improve (389.7 ms to 394.3 ms, ranges overlap). `arith`, `chain`, and `fold` are the same binary as 0.25.1.
+
+## [0.26.1] - 2026-10-25
+
+### Added
+- `lodsb()`, `stosb()`, `stosd()`, `stc()`, `clc()`, and `ud2()` emit that instruction and take no arguments. `rep_stosb()`, `rep_stosw()`, `rep_stosd()`, `rep_stosq()`, `rep_movsb()`, `rep_movsw()`, `rep_movsd()`, and `rep_movsq()` emit `rep` plus the string instruction. `rep_stosq()` and `rep_movsq()` in `bits 16` or `bits 32` are `rep_stosq() is not available in bits 16`. These instructions use `si`/`rsi`, `di`/`rdi`, `al`/`eax`, `cx`/`rcx`, and the direction flag as they stand. Copihue does not emit `cld`.
+- `pushfd()` and `popfd()` emit `pushfd`/`popfd` in `bits 16` and `bits 32`, and `pushfq`/`popfq` in 64-bit code. A 32-bit push of EFLAGS is not an encoding in long mode.
+- `push(ax)` pushes that register. `push(0x33)` pushes the immediate (`push 51`; expression literals are decimal). Any other argument is evaluated and pushed from the accumulator. `pop(rbx)` pops into that register. The register list is wider than the naked lvalues: the 16 general registers in the width the mode can encode, plus `ds`/`es`/`ss`/`fs`/`gs`. `push(rax)` in `bits 16` is `register 'rax' cannot be pushed in bits 16`. `pop(1)` is `pop() takes a register name`. Push and pop are allowed outside `naked`, because saving a register is not an assignment. Popping `rbp` in a function that has a frame discards the frame.
+- `extern name;` declares a qword and does not emit storage. `data name { dq 42; }` is the bytes, in either order. A `let` of the same name is `extern 'x' is already defined`. `let saved_ksp` already exports the NASM label `saved_ksp`. `extern __syscall_rsp` and `extern __syscall_user_rsp` make the compiler emit those two quads, the same ones `set_syscall_stack` writes.
+- `rdi`, `rsi`, and `rdx` are naked registers, the same names as the first three 64-bit parameters. `rdi = 65` overwrites that parameter. They exist so ring-3 code can fill `syscall()` with one instruction and no inserted moves.
+- `syscall()` with `--freestanding`, `--flat`, or `--boot` emits the `syscall` instruction and nothing else. `rax` is the number, `rdi`/`rsi`/`rdx` are the arguments, and the result stays in `rax`. It takes no arguments: `syscall() takes no arguments with --freestanding; set rax, rdi, rsi and rdx first`. In `bits 16` or `bits 32` it is `syscall() is a 64-bit instruction`. The hosted `syscall(n, a1, ...)` helper is unchanged and still rejected in freestanding code.
+- `tests/boot/stc_carry.lap` sets the carry flag and writes `COPIHUE` to COM1. QEMU checks that string. `tests/freestanding/insns.lap` is the instruction stream at `-O0` and `-O2`. It is assembled, not booted. `tests/lang/extern_data.lap` runs under Linux and prints 42.
+
+### Changed
+- Language version is 0.26.1.
 
 ## [0.26.0] - 2026-10-25
 

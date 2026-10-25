@@ -1,0 +1,4 @@
+// flags: --freestanding
+bits 16 naked fn k() {
+    syscall();
+}
