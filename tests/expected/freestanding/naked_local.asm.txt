@@ -9,6 +9,7 @@ real_mode:
     mov eax, 67
     mov [__loc_real_mode_0], eax
     mov eax, [__loc_real_mode_0]
+    push ebx
     push eax
     push edx
     mov eax, 1
@@ -16,6 +17,7 @@ real_mode:
     pop edx
     pop eax
     add eax, ebx
+    pop ebx
     mov [__loc_real_mode_0], eax
     mov eax, 1016
     push eax

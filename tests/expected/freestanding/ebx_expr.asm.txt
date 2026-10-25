@@ -1,0 +1,210 @@
+section .data
+section .text
+bits 16
+bump16:
+    movzx eax, ax
+    push ebx
+    push eax
+    push edx
+    mov eax, 1
+    mov ebx, eax
+    pop edx
+    pop eax
+    add eax, ebx
+    pop ebx
+    ret
+    ret
+bits 64
+bits 16
+expr16:
+    mov ebx, 7
+    mov ecx, 3
+    mov di, 1
+    movzx eax, di
+    push ebx
+    push eax
+    push edx
+    mov eax, 24
+    mov ebx, eax
+    pop edx
+    pop eax
+    add eax, ebx
+    pop ebx
+    mov di, ax
+    movzx eax, di
+    push ebx
+    push eax
+    push edx
+    mov eax, 3
+    mov ebx, eax
+    pop edx
+    pop eax
+    sub eax, ebx
+    pop ebx
+    mov di, ax
+    movzx eax, di
+    push ebx
+    push eax
+    push edx
+    mov eax, 2
+    mov ebx, eax
+    pop edx
+    pop eax
+    imul eax, ebx
+    pop ebx
+    mov di, ax
+    movzx eax, di
+    push ebx
+    push eax
+    push edx
+    mov eax, 255
+    mov ebx, eax
+    pop edx
+    pop eax
+    and eax, ebx
+    pop ebx
+    mov di, ax
+    movzx eax, di
+    push ebx
+    push eax
+    push edx
+    mov eax, 1
+    mov ebx, eax
+    pop edx
+    pop eax
+    or eax, ebx
+    pop ebx
+    mov di, ax
+    movzx eax, di
+    push ebx
+    push eax
+    push edx
+    mov eax, 1
+    mov ebx, eax
+    pop edx
+    pop eax
+    push ecx
+    mov ecx, ebx
+    shl eax, cl
+    pop ecx
+    pop ebx
+    mov di, ax
+    movzx eax, di
+    push ebx
+    push eax
+    push edx
+    mov eax, 1
+    mov ebx, eax
+    pop edx
+    pop eax
+    push ecx
+    mov ecx, ebx
+    sar eax, cl
+    pop ecx
+    pop ebx
+    mov di, ax
+    movzx eax, di
+    push ebx
+    push eax
+    push edx
+    mov eax, 4
+    mov ebx, eax
+    pop edx
+    pop eax
+    add eax, ebx
+    pop ebx
+    mov di, ax
+    movzx eax, di
+    push ebx
+    push eax
+    push edx
+    mov eax, 8
+    mov ebx, eax
+    pop edx
+    pop eax
+    add eax, ebx
+    pop ebx
+    mov [__loc_expr16_0], eax
+    mov eax, [__loc_expr16_0]
+    push ax
+    pop ax
+    call bump16
+    mov di, ax
+    movzx eax, di
+    push ebx
+    push eax
+    push edx
+    mov eax, 0
+    mov ebx, eax
+    pop edx
+    pop eax
+    cmp eax, ebx
+    pop ebx
+    sete al
+    movzx eax, al
+    mov si, ax
+    mov eax, ebx
+    mov eax, ecx
+    mov bp, ax
+    ret
+__loc_expr16_0: dd 0
+bits 64
+bits 32
+expr32:
+    mov ebx, 7
+    mov ecx, 3
+    mov edi, 1
+    mov eax, edi
+    push ebx
+    push eax
+    push edx
+    mov eax, 24
+    mov ebx, eax
+    pop edx
+    pop eax
+    add eax, ebx
+    pop ebx
+    mov edi, eax
+    mov eax, edi
+    push ebx
+    push eax
+    push edx
+    mov eax, 1
+    mov ebx, eax
+    pop edx
+    pop eax
+    push ecx
+    mov ecx, ebx
+    shl eax, cl
+    pop ecx
+    pop ebx
+    mov edi, eax
+    mov eax, edi
+    push ebx
+    push eax
+    push edx
+    mov eax, 4
+    mov ebx, eax
+    pop edx
+    pop eax
+    add eax, ebx
+    pop ebx
+    mov edi, eax
+    mov eax, edi
+    push ebx
+    push eax
+    push edx
+    mov eax, 0
+    mov ebx, eax
+    pop edx
+    pop eax
+    cmp eax, ebx
+    pop ebx
+    sete al
+    movzx eax, al
+    mov esi, eax
+    mov eax, ebx
+    mov eax, ecx
+    mov edx, eax
+    ret
+bits 64

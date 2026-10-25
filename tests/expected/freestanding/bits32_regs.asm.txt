@@ -19,6 +19,7 @@ real_mode:
     mov edx, eax
     xor eax, eax
     in al, dx
+    push ebx
     push eax
     push edx
     mov eax, 2
@@ -26,10 +27,12 @@ real_mode:
     pop edx
     pop eax
     or eax, ebx
+    pop ebx
     pop edx
     out dx, al
     lgdt [gdtr]
     mov eax, cr0
+    push ebx
     push eax
     push edx
     mov eax, 1
@@ -37,6 +40,7 @@ real_mode:
     pop edx
     pop eax
     or eax, ebx
+    pop ebx
     mov cr0, eax
     stc
     jnc .L0
@@ -57,6 +61,7 @@ bits 64
 bits 32
 protected:
     mov eax, cr4
+    push ebx
     push eax
     push edx
     mov eax, 32
@@ -64,11 +69,13 @@ protected:
     pop edx
     pop eax
     or eax, ebx
+    pop ebx
     mov cr4, eax
     xor edx, edx
     mov eax, 3221225600
     mov ecx, eax
     rdmsr
+    push ebx
     push eax
     push edx
     mov eax, 256
@@ -76,6 +83,7 @@ protected:
     pop edx
     pop eax
     or eax, ebx
+    pop ebx
     push eax
     push edx
     mov eax, 3221225600
@@ -84,6 +92,7 @@ protected:
     pop eax
     wrmsr
     mov eax, cr0
+    push ebx
     push eax
     push edx
     mov eax, 2147483648
@@ -91,6 +100,7 @@ protected:
     pop edx
     pop eax
     or eax, ebx
+    pop ebx
     mov cr0, eax
     mov eax, 2147483648
     cpuid

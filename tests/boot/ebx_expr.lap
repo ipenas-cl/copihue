@@ -1,0 +1,34 @@
+// bits 16: an arithmetic expression outside if/while must not leave the
+// other operand in ebx. ebx stays 7 across + - * & | << >> , a compound
+// assignment, and a call whose body adds. The letters are written only
+// when ebx is still 7. A let and a comparison used as a value are in
+// tests/freestanding/ebx_expr.lap (they do not fit in this sector).
+// QEMU checks COPIHUE. -O0 and -O2 are the same image.
+
+bits 16 naked fn bump(n: i64) -> i64 {
+    return n + 1;
+}
+
+bits 16 naked fn _start() {
+    ebx = 7;
+    di = 1;
+    di = di + 24;
+    di = di - 3;
+    di = di * 2;
+    di = di & 255;
+    di = di | 1;
+    di = di << 1;
+    di = di >> 1;
+    di += 4;
+    di = bump(di);
+    if (ebx == 7) {
+        outb(0x3F8, 67);
+        outb(0x3F8, 79);
+        outb(0x3F8, 80);
+        outb(0x3F8, 73);
+        outb(0x3F8, 72);
+        outb(0x3F8, 85);
+        outb(0x3F8, 69);
+    }
+    while (1) { hlt(); }
+}
