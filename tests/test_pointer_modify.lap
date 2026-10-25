@@ -9,7 +9,7 @@ fn increment(ptr: *i32) -> i32 {
 
 fn main() -> i32 {
     let x = 10;
-    let result = increment(&x);
+    let result = increment(&x as *i32);
 
     print_int(result);
     println("");

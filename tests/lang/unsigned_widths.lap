@@ -12,11 +12,12 @@ fn main() -> i32 {
     r[3] = 4000000000;
     print_int(d[3]); println("");
     let p: *u8 = &b[0];
-    p[0] = 300;
+    let wide = 300;
+    p[0] = wide;
     print_int(b[0]); println("");
     print_int(p[0]); println("");
     let a = 4096;
-    let z: *u8 = a;
-    print_int(z); println("");
+    let z: *u8 = a as *u8;
+    print_int(z as i64); println("");
     return 0;
 }

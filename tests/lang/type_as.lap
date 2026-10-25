@@ -1,0 +1,49 @@
+// Explicit `as`, defined truncation, and the conversions a kernel still needs.
+struct Point { x: i64, y: i64 }
+
+fn take_u8(p: *u8) -> i64 {
+    return p[0];
+}
+
+fn main() -> i32 {
+    let n = 7;
+    let p: *i64 = &n;
+    let q: *u8 = p as *u8;
+    print_int(q[0]);
+    println("");
+    print_int(take_u8(p as *u8));
+    println("");
+
+    let back: *i64 = (p as i64) as *i64;
+    print_int(*back);
+    println("");
+
+    let s: *Point = p as *Point;
+    print_int(s->x);
+    println("");
+
+    let b: u8 = 300 as u8;
+    print_int(b);
+    println("");
+    let c: i8 = 200 as i8;
+    print_int(c);
+    println("");
+    let ok: u8 = 255;
+    print_int(ok);
+    println("");
+
+    let wide = 300;
+    let z: u8 = wide;
+    print_int(z);
+    println("");
+
+    let vga: *u16 = 0xB8000;
+    if (vga == 0) { print_int(1); } else { print_int(0); }
+    println("");
+
+    let bytes: [i8; 2];
+    bytes[0] = 65;
+    print_int(take_u8(bytes));
+    println("");
+    return 0;
+}

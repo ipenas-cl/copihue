@@ -1,0 +1,5 @@
+fn main() -> i32 {
+    let n = 1;
+    let p: *u8 = n;
+    return p[0];
+}

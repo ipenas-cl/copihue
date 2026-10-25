@@ -1,0 +1,15 @@
+fn take_int(n: i64) -> i64 {
+    return n;
+}
+
+fn take_ptr(p: *u8) -> i64 {
+    return p[0];
+}
+
+fn main() -> i32 {
+    let buf: [u8; 1];
+    let n = 1;
+    take_int(buf);
+    take_ptr(n);
+    return 0;
+}

@@ -1,0 +1,4 @@
+tests/errors/arg_count.lap:6:12: error: function 'take' takes 1 argument, not 2
+      6 |     return take(1, 2);
+        |            ^
+1 error, compilation failed

@@ -1,0 +1,7 @@
+tests/errors/arg_ptr_int.lap:12:14: error: argument 1 of 'take_int': expected i64, found *u8
+     12 |     take_int(buf);
+        |              ^
+tests/errors/arg_ptr_int.lap:13:14: error: argument 1 of 'take_ptr': expected *u8, found i64
+     13 |     take_ptr(n);
+        |              ^
+2 errors, compilation failed
