@@ -1,12 +1,12 @@
 // Test 10: Chain of global modifications
 let value = 1;
 
-fn double_it() -> i32 {
+fn double_it() -> i64 {
     value = value + value;
     return value;
 }
 
-fn main() -> i32 {
+fn main() -> i64 {
     double_it();  // 2
     double_it();  // 4
     double_it();  // 8

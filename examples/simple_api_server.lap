@@ -18,13 +18,13 @@ let response: [i8; 2048];
 let request_count = 0;
 let optval: [i32; 1];
 
-fn htons(port: i32) -> i32 {
+fn htons(port: i64) -> i64 {
     let high = port / 256;
     let low = port % 256;
     return (low * 256) + high;
 }
 
-fn setup_sockaddr(port: i32) -> i32 {
+fn setup_sockaddr(port: i64) -> i64 {
     let i = 0;
     while (i < 16) {
         sockaddr[i] = 0;
@@ -33,13 +33,13 @@ fn setup_sockaddr(port: i32) -> i32 {
     sockaddr[0] = 2;  // AF_INET
     // sin_port is stored in network byte order (big-endian):
     // high byte first, then low byte.
-    sockaddr[2] = port / 256;
-    sockaddr[3] = port % 256;
+    sockaddr[2] = (port / 256) as i8;
+    sockaddr[3] = (port % 256) as i8;
     // 0.0.0.0 (bind to all interfaces)
     return 0;
 }
 
-fn int_to_str(num: i32, buf: *i8) -> i32 {
+fn int_to_str(num: i64, buf: *i8) -> i64 {
     if (num == 0) {
         buf[0] = 48;  // '0'
         buf[1] = 0;
@@ -51,7 +51,7 @@ fn int_to_str(num: i32, buf: *i8) -> i32 {
     let n = num;
     
     while (n > 0) {
-        temp[count] = (n % 10) + 48;  // Convert to ASCII
+        temp[count] = ((n % 10) + 48) as i32;  // Convert to ASCII
         n /= 10;
         count++;
     }
@@ -59,14 +59,14 @@ fn int_to_str(num: i32, buf: *i8) -> i32 {
     // Reverse
     let i = 0;
     while (i < count) {
-        buf[i] = temp[count - i - 1];
+        buf[i] = temp[count - i - 1] as i8;
         i++;
     }
     buf[count] = 0;
     return count;
 }
 
-fn build_json_response() -> i32 {
+fn build_json_response() -> i64 {
     let pos = 0;
     
     // HTTP headers
@@ -138,7 +138,7 @@ fn build_json_response() -> i32 {
     return pos;
 }
 
-fn main() -> i32 {
+fn main() -> i64 {
     println("========================================");
     println("  COPIHUE API SERVER");
     println("  Listening on http://127.0.0.1:8000");

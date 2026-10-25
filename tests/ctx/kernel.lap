@@ -113,12 +113,12 @@ fn serial_putc(c: i64) -> i64 {
 }
 
 fn set_gate(n: i64, handler: i64) -> i64 {
-    idt[n].off_lo = handler & 0xFFFF;
+    idt[n].off_lo = (handler & 0xFFFF) as u16;
     idt[n].sel = 0x08;
     idt[n].ist = 0;
     idt[n].typ = 0x8E;
-    idt[n].off_mid = (handler >> 16) & 0xFFFF;
-    idt[n].off_hi = handler >> 32;
+    idt[n].off_mid = ((handler >> 16) & 0xFFFF) as u16;
+    idt[n].off_hi = (handler >> 32) as u32;
     idt[n].zero = 0;
     return 0;
 }

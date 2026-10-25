@@ -10,13 +10,13 @@ let sockaddr: [i8; 16];
 let response_buffer: [i8; 8192];
 let request_buffer: [i8; 512];
 
-fn htons(port: i32) -> i32 {
+fn htons(port: i64) -> i64 {
     let high = port / 256;
     let low = port % 256;
     return (low * 256) + high;
 }
 
-fn setup_sockaddr_ip(a: i32, b: i32, c: i32, d: i32, port: i32) -> i32 {
+fn setup_sockaddr_ip(a: i64, b: i64, c: i64, d: i64, port: i64) -> i64 {
     let i = 0;
     while (i < 16) {
         sockaddr[i] = 0;
@@ -25,19 +25,19 @@ fn setup_sockaddr_ip(a: i32, b: i32, c: i32, d: i32, port: i32) -> i32 {
     sockaddr[0] = 2;  // AF_INET
     
     // sin_port in network byte order (big-endian): high byte, then low byte
-    sockaddr[2] = port / 256;
-    sockaddr[3] = port % 256;
+    sockaddr[2] = (port / 256) as i8;
+    sockaddr[3] = (port % 256) as i8;
     
-    sockaddr[4] = a;
-    sockaddr[5] = b;
-    sockaddr[6] = c;
-    sockaddr[7] = d;
+    sockaddr[4] = a as i8;
+    sockaddr[5] = b as i8;
+    sockaddr[6] = c as i8;
+    sockaddr[7] = d as i8;
     
     return 0;
 }
 
-fn http_get(host_a: i32, host_b: i32, host_c: i32, host_d: i32, 
-            port: i32, path: *u8) -> i32 {
+fn http_get(host_a: i64, host_b: i64, host_c: i64, host_d: i64, 
+            port: i64, path: *u8) -> i64 {
     
     let sockfd = syscall6(SYS_SOCKET, AF_INET, SOCK_STREAM, 0, 0, 0, 0);
     if (sockfd < 0) {
@@ -135,7 +135,7 @@ fn http_get(host_a: i32, host_b: i32, host_c: i32, host_d: i32,
     return total;
 }
 
-fn find_json_value(json: *i8, key: *i8, output: *i8) -> i32 {
+fn find_json_value(json: *i8, key: *i8, output: *i8) -> i64 {
     let key_len = strlen(key);
     let json_len = strlen(json);
     
@@ -175,7 +175,7 @@ fn find_json_value(json: *i8, key: *i8, output: *i8) -> i32 {
                 if (!is_string && (ch == 44 || ch == 125)) {
                     break;
                 }
-                output[out_pos] = ch;
+                output[out_pos] = ch as i8;
                 out_pos++;
                 k++;
             }
@@ -187,12 +187,12 @@ fn find_json_value(json: *i8, key: *i8, output: *i8) -> i32 {
     return 0;
 }
 
-fn print_separator() -> i32 {
+fn print_separator() -> i64 {
     println("========================================");
     return 0;
 }
 
-fn print_header(title: *u8) -> i32 {
+fn print_header(title: *u8) -> i64 {
     print_separator();
     print("  ");
     println(title);
@@ -200,7 +200,7 @@ fn print_header(title: *u8) -> i32 {
     return 0;
 }
 
-fn print_field(label: *u8, value: *i8) -> i32 {
+fn print_field(label: *u8, value: *i8) -> i64 {
     print("  ");
     print(label);
     print(": ");
@@ -210,7 +210,7 @@ fn print_field(label: *u8, value: *i8) -> i32 {
 
 let value_buffer: [i8; 256];
 
-fn fetch_and_display() -> i32 {
+fn fetch_and_display() -> i64 {
     print_header("FETCHING API DATA");
     
     let bytes = http_get(127, 0, 0, 1, 8000, "/api/status");
@@ -257,7 +257,7 @@ fn fetch_and_display() -> i32 {
     return 0;
 }
 
-fn main() -> i32 {
+fn main() -> i64 {
     println("");
     print_header("COPIHUE REALTIME API MONITOR");
     println("");

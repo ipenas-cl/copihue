@@ -1,7 +1,7 @@
 // Fibonacci Sequence Generator
 // Demonstrates: iterative algorithms, variable updates
 
-fn fibonacci(n: i32) -> i32 {
+fn fibonacci(n: i64) -> i64 {
     if (n <= 1) {
         return n;
     }
@@ -20,7 +20,7 @@ fn fibonacci(n: i32) -> i32 {
     return b;
 }
 
-fn main() -> i32 {
+fn main() -> i64 {
     println("Fibonacci sequence (first 20 numbers):");
 
     let i = 0;

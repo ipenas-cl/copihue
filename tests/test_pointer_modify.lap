@@ -1,5 +1,5 @@
 // Test: Pointer modification
-fn increment(ptr: *i32) -> i32 {
+fn increment(ptr: *i32) -> i64 {
     let val = *ptr;
     let new_val = val + 1;
     // Note: *ptr = new_val would require assignment through pointer
@@ -7,7 +7,7 @@ fn increment(ptr: *i32) -> i32 {
     return new_val;
 }
 
-fn main() -> i32 {
+fn main() -> i64 {
     let x = 10;
     let result = increment(&x as *i32);
 

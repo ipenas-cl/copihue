@@ -1,0 +1,46 @@
+// also-o2
+// One image for the three conversions AtomicOS keeps using:
+// an integer literal stored in a pointer, bss_end() - bss_start() as i64,
+// and & of a struct passed to lgdt, lidt, save_context, and restore_context.
+
+packed struct DescPtr { limit: u16, base: u64 }
+
+struct Ctx {
+    rip: i64,
+    rsp: i64,
+    rbp: i64,
+    rbx: i64,
+    r12: i64,
+    r13: i64,
+    r14: i64,
+    r15: i64
+}
+
+let ctx: Ctx;
+
+fn _start() -> i64 {
+    let vga: *u16 = 0xB8000;
+    let e820: *u16 = 0x8000;
+    let kern: *u8 = 0x10000;
+    let high: *u8 = 0x200000;
+    let user: *u8 = 0x400000;
+    let n: i64 = bss_end() - bss_start();
+    let gdtr: DescPtr;
+    let idtr: DescPtr;
+    gdtr.limit = 79;
+    gdtr.base = 0;
+    idtr.limit = 0;
+    idtr.base = 0;
+    lgdt(&gdtr);
+    lidt(&idtr);
+    if (save_context(&ctx) == 1) {
+        restore_context(&ctx);
+    }
+    if (n < 0) { return 1; }
+    if ((vga as i64) != 0xB8000) { return 2; }
+    if ((e820 as i64) != 0x8000) { return 3; }
+    if ((kern as i64) != 0x10000) { return 4; }
+    if ((high as i64) != 0x200000) { return 5; }
+    if ((user as i64) != 0x400000) { return 6; }
+    return 0;
+}

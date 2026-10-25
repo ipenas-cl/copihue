@@ -1,13 +1,13 @@
 // Ejemplo: Trabajo con arrays
 
-fn main() -> i32 {
+fn main() -> i64 {
     // Declarar array
     let arr: [i32; 10];
 
     // Inicializar array
     let i = 0;
     while (i < 10) {
-        arr[i] = i * 2;
+        arr[i] = (i * 2) as i32;
         i++;
     }
 

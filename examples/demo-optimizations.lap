@@ -1,7 +1,7 @@
 // DEMO DE OPTIMIZACIONES COPIHUE v0.17
 // Compila con -O0, -O1, -O2 y compara los resultados
 
-fn test_constant_folding() -> i32 {
+fn test_constant_folding() -> i64 {
     println("=== Test 1: Constant Folding ===");
 
     // Estas expresiones se evalúan en compile-time con -O1 y -O2
@@ -40,7 +40,7 @@ fn test_constant_folding() -> i32 {
     return resultado;
 }
 
-fn test_strength_reduction() -> i32 {
+fn test_strength_reduction() -> i64 {
     println("");
     println("=== Test 2: Strength Reduction ===");
 
@@ -81,7 +81,7 @@ fn test_strength_reduction() -> i32 {
     return resultado;
 }
 
-fn test_array_processing() -> i32 {
+fn test_array_processing() -> i64 {
     println("");
     println("=== Test 3: Procesamiento de Arrays ===");
 
@@ -90,7 +90,7 @@ fn test_array_processing() -> i32 {
     // Inicializar
     let i = 0;
     while (i < 256) {
-        datos[i] = i;
+        datos[i] = i as i32;
         i++;
     }
 
@@ -114,7 +114,7 @@ fn test_array_processing() -> i32 {
     return suma;
 }
 
-fn test_mixed_operations() -> i32 {
+fn test_mixed_operations() -> i64 {
     println("");
     println("=== Test 4: Operaciones Mixtas ===");
 
@@ -156,7 +156,7 @@ fn test_mixed_operations() -> i32 {
     return resultado;
 }
 
-fn main() -> i32 {
+fn main() -> i64 {
     println("========================================");
     println("  COPIHUE v0.17 - DEMO OPTIMIZACIONES");
     println("========================================");

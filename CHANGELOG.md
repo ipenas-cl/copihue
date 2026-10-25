@@ -2,6 +2,36 @@
 
 Todos los cambios importantes del proyecto.
 
+## [0.31.0] - 2026-10-25
+
+### Added
+- An assignment, a direct call, and `return` reject a wider integer. `let wide = 300; let z: u8 = wide` is `expected u8, found i64`. `return n` from `-> u8` is `return value: expected u8, found i64`. `take_u8(n)` is `argument 1 of 'take_u8': expected u8, found i64`. The caret is on the expression, with `file:line:col`. The compiler keeps going and ends with `N errors, compilation failed`.
+- The conversion is `as`. `let z: u8 = wide as u8` stores 44. `as` binds tighter than `+`, `|`, `&`, and the shifts, so the whole right-hand side is parenthesized: `vga[i] = ((attr << 8) | c) as u16`. A cast into a memory slot of that width is the store: it does not add a second mask. A scalar slot truncates through the cast, and the store does not mask again.
+- A narrower integer still promotes. The same width still matches, including a change of sign (`i64` assigned to `u64`, `i8` to `u8`, `i32` to `u32`). A literal that fits is still implicit. A narrow parameter is still truncated on entry. Two untyped literals stay `i64`, so `let x: u8 = 200 + 100` is now `expected u8, found i64` at `-O0` as well as a literal error at `-O1` and `-O2`. Pointer rules are unchanged: `*u8` and `*u16` are `expected *u16, found *u8`; `*i8` and `*u8` match; dropping `volatile` is still an error.
+- `tests/lang/assign_cast.lap` prints `44`, `44`, `-1`, `65` at `-O0` and `-O2`. `tests/errors/narrow_assign.lap` is the five diagnostics above.
+
+- These conversions stay legal, and `tests/flat/ptr_keep.lap` is the automatic check (`// also-o2`, same image at both levels). An integer literal still becomes any pointer: `*u16` at `0xB8000` and `0x8000`, `*u8` at `0x10000`, `0x200000`, and `0x400000`. `bss_end() - bss_start()` is `i64`. `&` of a struct is accepted by `lgdt`, `lidt`, `save_context`, and `restore_context`. `tests/lang/ptr_literal.lap` prints those five addresses at `-O0` and `-O2` (`753664`, `32768`, `65536`, `2097152`, `4194304`).
+
+### Changed
+- Language version is 0.31.0, on top of 0.30.1. The 0.30.1 `-O2` rewrites stay. `tests/lang/o2_mem.lap` stores the byte updates with `as u8`. The `paddb` matcher peels that cast, so the assembly still contains `rep movsb`, `paddb`, and `shl rax, 4`.
+- Programs that declared `-> i32` or an `i32` parameter but computed an untyped `i64` now say `i64`. The return was never truncated, so the instruction stream stays the same. A narrow memory store of a wider integer is `(expr) as T`. `tests/boot/rax_keep.lap`, `tests/freestanding/naked_local.lap`, `tests/freestanding/vga.lap`, `tests/flat/min_kernel.lap`, `tests/usermode/kernel.lap`, and `tests/ctx/kernel.lap` assemble to the same bytes as 0.30.0 aside from the version banner.
+
+### AtomicOS
+Checked read-only. The casts below are the migration; they are not applied in that repository. `as` wraps the whole right-hand side. After those edits, the assembly matches 0.30.0 except the version line.
+
+`src/user/zona.lap` and `src/user/hola.lap` compile unchanged. Their `--flat 0x400000` images are identical on 0.30.0 and 0.31.0. `kernel.lap` itself has no new error.
+
+On `43f5fcf` (`cursor/pin-copihue-v0294-65f7`), the kernel is `kernel.lap` with its imports, `--flat 0x10000`. These right-hand sides need `as`:
+
+- `console.lap` 39 and 56: `vga[i] = ((con_attr << 8) | ' ') as u16`. Line 80: `vga[con_row * 80 + con_col] = ((con_attr << 8) | ' ') as u16`. Line 84: `((con_attr << 8) | c) as u16`. Line 108: `digits[count] = ('0' + n % 10) as u8`.
+- `keyboard.lap` 45: `kbd_buf[kbd_head] = c as u8`.
+- `shell.lap` 30: `line[line_len] = c as u8`.
+- `src/kernel/copihue/zone.lap` (the kernel module, not `src/user/zona.lap`) 269, 313, and 325: the byte store is `c as u8`.
+- The same wrap, with the type the diagnostic names, on `pmm.lap` 51 `u8`, 65 `u8`; `gdt.lap` 53, 54, 58, 59, 67–69, 72–76 `u8`; `idt.lap` 180 `u16`, 184 `u16`, 185 `u32`, 260 `u16` (`idtr.limit = (48 * 16 - 1) as u16`); `ata.lap` 96 and 97 `u8`; `blk.lap` 76 and 77 `u32`, 138 and 168 `u8`; `fs.lap` 180 `u8`, 248, 251, 324, 394, 424, 440, 497, 498, 592, 629, 671 `u32`, 712 `u8`; `net.lap` 169 `u32`, 314–319 and 331–336 `u8`, 446 `u16`, 588, 589, 601, 602, 641, 642, 646, 647 `u8`.
+- `src/bootloader/boot.lap` 41 and 47: `al as u8`. Line 59: `dl as u8`. `stage2.lap` 127 and 133: `al as u8`. Line 181: `eax as u32`.
+
+With those casts the kernel (`-S`), the boot sector, and stage 2 match the 0.30.0 assembly. Default `main` (`7e4ad6c`) has no `zona.lap` and no `keyboard.lap` error. It still needs the five `console.lap` lines and `shell.lap` line 30. Concatenating those four files then fails only on those six sites.
+
 ## [0.30.1] - 2026-10-25
 
 ### Added

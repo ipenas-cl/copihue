@@ -4,7 +4,7 @@
 // Global array (local typed arrays not supported)
 let arr: [i32; 10];
 
-fn binary_search(arr: *i32, len: i32, target: i32) -> i32 {
+fn binary_search(arr: *i32, len: i64, target: i64) -> i64 {
     let left = 0;
     let right = len - 1;
 
@@ -25,7 +25,7 @@ fn binary_search(arr: *i32, len: i32, target: i32) -> i32 {
     return -1;  // Not found
 }
 
-fn main() -> i32 {
+fn main() -> i64 {
     // Sorted array
     arr[0] = 1;
     arr[1] = 3;

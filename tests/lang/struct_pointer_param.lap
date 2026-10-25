@@ -6,7 +6,7 @@ fn step(p: *Pair) -> i64 {
     p->b = t;
     return t;
 }
-fn main() -> i32 {
+fn main() -> i64 {
     let p: Pair = Pair { a: 0, b: 1 };
     let v: i64 = step(&p);
     v = step(&p);

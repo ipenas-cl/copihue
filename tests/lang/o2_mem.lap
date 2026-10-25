@@ -19,7 +19,7 @@ let odds: [Odd; 4];
 fn fill_src() -> i64 {
     let i = 0;
     while (i < 32) {
-        src[i] = i + 1;
+        src[i] = (i + 1) as u8;
         i = i + 1;
     }
     return 0;
@@ -170,7 +170,7 @@ fn copy_local() -> i64 {
     let i = 0;
     let s = 0;
     while (i < 8) {
-        a[i] = i + 3;
+        a[i] = (i + 3) as u8;
         i = i + 1;
     }
     i = 0;
@@ -220,7 +220,7 @@ fn bump16(r: i64) -> i64 {
     zero_buf(n);
     i = 0;
     while (i < n) {
-        buf[i] = (buf[i] + i + r) & 255;
+        buf[i] = ((buf[i] + i + r) & 255) as u8;
         i = i + 1;
     }
     i = 0;
@@ -239,7 +239,7 @@ fn bump256() -> i64 {
     zero_buf(n);
     i = 0;
     while (i < n) {
-        buf[i] = (buf[i] + i + r) & 255;
+        buf[i] = ((buf[i] + i + r) & 255) as u8;
         i = i + 1;
     }
     i = 0;
@@ -258,7 +258,7 @@ fn bump15() -> i64 {
     zero_buf(n);
     i = 0;
     while (i < n) {
-        buf[i] = (buf[i] + i + r) & 255;
+        buf[i] = ((buf[i] + i + r) & 255) as u8;
         i = i + 1;
     }
     i = 0;

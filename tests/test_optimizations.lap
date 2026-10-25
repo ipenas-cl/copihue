@@ -1,6 +1,6 @@
 // Test to demonstrate compiler optimizations
 
-fn test_constant_folding() -> i32 {
+fn test_constant_folding() -> i64 {
     // These should be folded at compile time with -O1
     let a = 10 + 20;           // Should become 30
     let b = 100 - 25;          // Should become 75
@@ -11,7 +11,7 @@ fn test_constant_folding() -> i32 {
     return a + b + c + d + e;  // 30 + 75 + 40 + 25 + 2 = 172
 }
 
-fn test_strength_reduction() -> i32 {
+fn test_strength_reduction() -> i64 {
     let x = 1000;
 
     // These should use shifts/masks with -O2
@@ -23,7 +23,7 @@ fn test_strength_reduction() -> i32 {
     return a + b + c + d;  // 2000 + 4000 + 125 + 8 = 6133
 }
 
-fn main() -> i32 {
+fn main() -> i64 {
     println("Testing Compiler Optimizations");
     println("");
 

@@ -63,7 +63,7 @@ fn demo_i32_array() {
     let data: [i32; 6];
     let i = 0;
     while (i < 6) {
-        data[i] = (i + 1) * 1000;
+        data[i] = ((i + 1) * 1000) as i32;
         i++;
     }
 
@@ -162,7 +162,7 @@ fn demo_multi_dimensional() {
     println("");
 }
 
-fn main() -> i32 {
+fn main() -> i64 {
     println("=== Arrays Locales Tipados en Copihue ===");
     println("");
 
