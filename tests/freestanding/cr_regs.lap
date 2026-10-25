@@ -1,0 +1,12 @@
+// Control registers. The suite assembles these; it does not execute them.
+// mov to or from CRn faults in Linux user mode.
+fn cr_roundtrip(next: i64) -> i64 {
+    let fault = read_cr2();
+    let old = read_cr3();
+    let cr0 = read_cr0();
+    let cr4 = read_cr4();
+    let stored = write_cr3(next);
+    write_cr0(cr0);
+    write_cr4(cr4);
+    return stored + old + fault;
+}

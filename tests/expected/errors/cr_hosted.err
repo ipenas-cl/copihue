@@ -1,0 +1,22 @@
+tests/errors/cr_hosted.lap:2:15: error: read_cr2() is only available with --freestanding or --flat
+      2 |     let cr2 = read_cr2();
+        |               ^
+tests/errors/cr_hosted.lap:3:15: error: read_cr3() is only available with --freestanding or --flat
+      3 |     let cr3 = read_cr3();
+        |               ^
+tests/errors/cr_hosted.lap:4:15: error: read_cr0() is only available with --freestanding or --flat
+      4 |     let cr0 = read_cr0();
+        |               ^
+tests/errors/cr_hosted.lap:5:15: error: read_cr4() is only available with --freestanding or --flat
+      5 |     let cr4 = read_cr4();
+        |               ^
+tests/errors/cr_hosted.lap:6:5: error: write_cr3() is only available with --freestanding or --flat
+      6 |     write_cr3(cr3);
+        |     ^
+tests/errors/cr_hosted.lap:7:5: error: write_cr0() is only available with --freestanding or --flat
+      7 |     write_cr0(cr0);
+        |     ^
+tests/errors/cr_hosted.lap:8:5: error: write_cr4() is only available with --freestanding or --flat
+      8 |     write_cr4(cr4);
+        |     ^
+7 errors, compilation failed
