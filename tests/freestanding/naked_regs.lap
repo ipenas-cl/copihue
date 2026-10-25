@@ -1,0 +1,47 @@
+// also-o2
+// Named registers, absolute and direct jumps, a sized store, and a
+// 64-bit far return. Assembled, not booted.
+
+data msg { db "Z", 0; }
+
+bits 16 naked fn real_mode() {
+    ax = 0;
+    ds = ax;
+    es = ax;
+    ss = ax;
+    fs = ax;
+    gs = ax;
+    ax = ds;
+    sp = 0x7C00;
+    ah = 0x0E;
+    al = 67;
+    dl = 0x80;
+    si = msg;
+    di = 0x8004;
+    eax = 0xE820;
+    ecx = 24;
+    edx = 0x534D4150;
+    esp = 0x90000;
+    *(0x1000 as *u32) = 0x2003;
+    jmp 0x8200;
+}
+
+bits 32 naked fn protected(n: i64) -> i64 {
+    ecx = n;
+    return ecx;
+}
+
+bits 64 naked fn long_mode() {
+    rax = 1;
+    rbx = 2;
+    rsp = 0x90000;
+    rbp = 0x80000;
+    *(rbp + 136) = 7;
+    rax = *(rbp + 128);
+    far_jump(0x18);
+    retfq();
+}
+
+bits 64 naked fn add1(n: i64) -> i64 {
+    return n + 1;
+}

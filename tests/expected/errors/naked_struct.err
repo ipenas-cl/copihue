@@ -1,0 +1,4 @@
+tests/errors/naked_struct.lap:3:12: error: a naked parameter must be an integer or a pointer
+      3 | naked fn f(p: Point) -> i64 {
+        |            ^
+1 error, compilation failed

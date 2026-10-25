@@ -1,0 +1,3 @@
+naked fn f(n: i64) -> i64 {
+    return &n;
+}

@@ -1,0 +1,4 @@
+tests/errors/reg_bits.lap:3:9: error: register 'rax' is not available in bits 16
+      3 |     rax = 1;
+        |         ^
+1 error, compilation failed

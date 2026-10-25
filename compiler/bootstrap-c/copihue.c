@@ -15,7 +15,7 @@
 
 // ==== NAMING (single place to change when the language is renamed) ====
 #define LANG_NAME     "Copihue"
-#define LANG_VERSION  "0.25.2"
+#define LANG_VERSION  "0.26.0"
 #define COMPILER_BIN  "copihue"
 #define SRC_EXT       ".lap"   /* Lapageria rosea, the copihue */
 #define OLD_SRC_EXT   ".cph"   /* v0.18.x extension, still accepted with a warning */
@@ -153,7 +153,8 @@ typedef enum {
     AST_UNARY, AST_DEREF, AST_ADDR_OF, AST_GLOBAL_VAR, AST_ARRAY_ASSIGN, AST_FIELD_ASSIGN,
     AST_LOGICAL,  // && and || operators with short-circuit evaluation
     AST_BREAK, AST_CONTINUE,
-    AST_DATA, AST_DATA_ITEM, AST_CAST
+    AST_DATA, AST_DATA_ITEM, AST_CAST,
+    AST_JMP, AST_MEM_STORE
 } AstType;
 
 typedef struct AstNode {
@@ -195,6 +196,8 @@ typedef struct {
     int reg;              // -1 stack; 0..3 callee-saved r12..r15; 4..5 caller-saved r10, r11
     int as_int;           // Pointer value that may also be used as an integer
     char* mem;            // Naked local: label of its slot. NULL means [rbp+offset]
+    char* hwreg;          // Naked parameter: register that already holds it. NULL otherwise
+    int hwbits;           // Width of hwreg in bits. 0 if hwreg is NULL
 } Symbol;
 
 #define MAX_BLOCK_SCOPE 64
@@ -289,9 +292,45 @@ static int g_naked_slot_bytes = 0;
 
 static int legacy_bits(void) { return g_fn_bits == 16 || g_fn_bits == 32; }
 
-static int seg_reg_name(const char* n) {
-    return n && (!strcmp(n, "ds") || !strcmp(n, "es") || !strcmp(n, "ss")
-                 || !strcmp(n, "fs") || !strcmp(n, "gs"));
+// Named machine registers. A real local or global of the same name wins.
+// 64-bit names are rejected in bits 16 and bits 32: nasm has no encoding
+// there. The accumulator (ax/eax/rax) and the scratch (bx/ebx/rbx) are not
+// in this table as parameter aliases; those are separate names below.
+typedef struct {
+    const char* name;
+    int bits;
+    int seg;
+    int high;   // ah: the byte is not the low byte of the accumulator
+} MachReg;
+
+static const MachReg* mach_reg(const char* n) {
+    static const MachReg regs[] = {
+        {"ds", 16, 1, 0}, {"es", 16, 1, 0}, {"ss", 16, 1, 0},
+        {"fs", 16, 1, 0}, {"gs", 16, 1, 0},
+        {"al", 8, 0, 0}, {"ah", 8, 0, 1}, {"dl", 8, 0, 0},
+        {"ax", 16, 0, 0}, {"sp", 16, 0, 0}, {"si", 16, 0, 0}, {"di", 16, 0, 0},
+        {"eax", 32, 0, 0}, {"ecx", 32, 0, 0}, {"edx", 32, 0, 0}, {"esp", 32, 0, 0},
+        {"rax", 64, 0, 0}, {"rbx", 64, 0, 0}, {"rsp", 64, 0, 0}, {"rbp", 64, 0, 0},
+    };
+    if (!n) return NULL;
+    for (unsigned i = 0; i < sizeof regs / sizeof regs[0]; i++)
+        if (!strcmp(regs[i].name, n)) return &regs[i];
+    return NULL;
+}
+
+// 1 if this naked function may name the register. Diagnoses and returns 0
+// when the name is a register the current function must not use.
+static int mach_here(AstNode* at, const MachReg* r) {
+    if (!r) return 0;
+    if (!(g_fn_flags & AF_NAKED)) {
+        diag_error(at->line, at->col, "register '%s' is only available in a naked function", r->name);
+        return 0;
+    }
+    if (r->bits == 64 && legacy_bits()) {
+        diag_error(at->line, at->col, "register '%s' is not available in bits %d", r->name, g_fn_bits);
+        return 0;
+    }
+    return 1;
 }
 
 // ==== MEMORY HELPERS ====
@@ -506,6 +545,8 @@ int symtab_add(SymbolTable* st, char* name, int size) {
     st->symbols[st->count - 1].array_len = 0;
     st->symbols[st->count - 1].as_int = 0;
     st->symbols[st->count - 1].mem = NULL;
+    st->symbols[st->count - 1].hwreg = NULL;
+    st->symbols[st->count - 1].hwbits = 0;
     symbol_assign_reg(&st->symbols[st->count - 1]);
     return -st->stack_size;
 }
@@ -525,6 +566,8 @@ int symtab_add_struct(SymbolTable* st, char* name, char* type_name, int size_byt
     st->symbols[st->count - 1].array_len = 0;
     st->symbols[st->count - 1].as_int = 0;
     st->symbols[st->count - 1].mem = NULL;
+    st->symbols[st->count - 1].hwreg = NULL;
+    st->symbols[st->count - 1].hwbits = 0;
     symbol_assign_reg(&st->symbols[st->count - 1]);
     return -st->stack_size;
 }
@@ -544,8 +587,33 @@ int symtab_add_pointer(SymbolTable* st, char* name) {
     st->symbols[st->count - 1].array_len = 0;
     st->symbols[st->count - 1].as_int = 0;
     st->symbols[st->count - 1].mem = NULL;
+    st->symbols[st->count - 1].hwreg = NULL;
+    st->symbols[st->count - 1].hwbits = 0;
     symbol_assign_reg(&st->symbols[st->count - 1]);
     return -st->stack_size;
+}
+
+// A naked parameter occupies no stack. The register already holds the value.
+static void symtab_add_hw(SymbolTable* st, char* name, const char* hw, int bits, int is_ptr, const char* type_name) {
+    st->count++;
+    st->symbols = safe_realloc(st->symbols, sizeof(Symbol) * st->count);
+    Symbol* s = &st->symbols[st->count - 1];
+    memset(s, 0, sizeof *s);
+    s->name = name ? strdup(name) : NULL;
+    s->reg = -1;
+    s->hwreg = hw ? strdup(hw) : NULL;
+    s->hwbits = bits;
+    s->is_pointer = is_ptr;
+    s->size = 1;
+    if (type_name) {
+        if (is_ptr) {
+            char* t = malloc(strlen(type_name) + 2);
+            sprintf(t, "*%s", type_name);
+            s->type_name = t;
+        } else {
+            s->type_name = strdup(type_name);
+        }
+    }
 }
 
 // A block pushes the current count. Leaving it hides every name declared
@@ -1497,6 +1565,25 @@ AstNode* parse_stmt(Parser* p) {
             end_simple_stmt(p);
             return jn;
         }
+        // `jmp 0x8200` and `jmp other`. `jmp(...)` stays a call.
+        if (t.len == 3 && !memcmp(t.s, "jmp", 3) &&
+            (peek_tok_at(p, 1, T_NUM) ||
+             (peek_tok_at(p, 1, T_IDENT) && !peek_tok_at(p, 2, T_LPAREN) && !peek_tok_at(p, 2, T_EQ)))) {
+            advance_tok(p);
+            AstNode* jp = ast_new(AST_JMP);
+            if (check_tok(p, T_NUM)) {
+                Tok num = advance_tok(p);
+                jp->value = strndup(num.s, num.len);
+            } else if (check_tok(p, T_IDENT)) {
+                Tok id = advance_tok(p);
+                jp->name = strndup(id.s, id.len);
+            } else {
+                Tok bad = peek_tok(p);
+                diag_error(bad.line, bad.col, "jmp takes an integer address or a function name");
+            }
+            end_simple_stmt(p);
+            return jp;
+        }
     }
     AstNode* expr = parse_expr(p);
 
@@ -1592,6 +1679,16 @@ AstNode* parse_stmt(Parser* p) {
         ast_add(array_assign, parse_expr(p));
         end_simple_stmt(p);
         return array_assign;
+    }
+
+    // *(addr) = value. addr may be a cast (`0x1000 as *u32`) or `rbp + 136`.
+    if (expr && expr->type == AST_DEREF && expr->child_count == 1 && check_tok(p, T_EQ)) {
+        advance_tok(p);
+        AstNode* st = ast_new(AST_MEM_STORE);
+        ast_add(st, expr);
+        ast_add(st, parse_expr(p));
+        end_simple_stmt(p);
+        return st;
     }
 
     // Check for field assignment: struct.field = value
@@ -2651,6 +2748,11 @@ static VTy expr_ty(Codegen* cg, AstNode* n) {
         if (s) return sym_vty(cg, s);
         GlobalVar* g = (cg && cg->global_symtab) ? global_symtab_lookup(cg->global_symtab, n->name) : NULL;
         if (g) return global_vty(cg, g);
+        {
+            const MachReg* mr = mach_reg(n->name);
+            if ((g_fn_flags & AF_NAKED) && mr && !(mr->bits == 64 && legacy_bits()))
+                return ty_i64();
+        }
         return ty_unk();
     }
     if (n->type == AST_ADDR_OF) return ty_addr_of(cg, n);
@@ -3141,6 +3243,36 @@ static int gen_core_builtin(Codegen* cg, AstNode* n) {
         emit(cg, "    jmp %s:%s\n", n->children[0]->value, n->children[1]->name);
         return 1;
     }
+    if (!strcmp(f, "far_jump")) {
+        // bits 64 has no `jmp sel:label`. Push the selector and the address
+        // of the next instruction, then retfq reloads CS and falls through.
+        // The two pushes are popped by retfq, so a frame above them stays.
+        if (!g_freestanding) {
+            diag_error(n->line, n->col, "far_jump() is only available with --freestanding, --flat, or --boot");
+            return 1;
+        }
+        if (legacy_bits()) {
+            diag_error(n->line, n->col, "far_jump() is a 64-bit far return; use ljmp(selector, label) in bits 16 or 32");
+            return 1;
+        }
+        if (n->child_count != 1 || !n->children[0] || n->children[0]->type != AST_NUMBER) {
+            diag_error(n->line, n->col, "far_jump(selector) takes one integer literal");
+            return 1;
+        }
+        int lab = new_label(cg);
+        emit(cg, "    push %s\n", n->children[0]->value);
+        emit(cg, "    lea rax, [.L%d]\n", lab);
+        emit(cg, "    push rax\n");
+        emit(cg, "    retfq\n");
+        emit(cg, ".L%d:\n", lab);
+        return 1;
+    }
+    if (!strcmp(f, "retfq")) {
+        if (n->child_count != 0) { diag_error(n->line, n->col, "retfq() takes no arguments"); return 1; }
+        if (legacy_bits()) emit(cg, "    retf\n");
+        else emit(cg, "    retfq\n");
+        return 1;
+    }
     if (!strcmp(f, "int")) {
         if (!g_freestanding) {
             diag_error(n->line, n->col, "int() is only available with --freestanding, --flat, or --boot");
@@ -3440,6 +3572,11 @@ void gen_addr_of(Codegen* cg, AstNode* n) {
     if (!var) return;
 
     if (var->type == AST_IDENT) {
+        Symbol* hw = var->name ? symtab_lookup_symbol(cg->symtab, var->name) : NULL;
+        if (hw && hw->hwreg) {
+            diag_error(var->line, var->col, "naked parameter '%s' has no address", var->name);
+            return;
+        }
         int off = symtab_lookup(cg->symtab, var->name);
         if (off) {
             // Check if this is already a pointer - if so, just load the value
@@ -4232,6 +4369,7 @@ static int rbx_leaf(Codegen* cg, AstNode* n) {
     if (n->type != AST_IDENT || !n->name) return 0;
     Symbol* sym = symtab_lookup_symbol(cg->symtab, n->name);
     if (sym) {
+        if (sym->hwreg) return 1;
         if (sym->is_array) return 0;
         if (sym->size > 1 && !sym->is_pointer) return 0;
         return 1;
@@ -4269,7 +4407,13 @@ static void emit_leaf_reg(Codegen* cg, AstNode* n, const char* reg) {
     }
     Symbol* sym = symtab_lookup_symbol(cg->symtab, n->name);
     if (sym) {
-        if (local_reg(sym)) emit(cg, "    mov %s, %s\n", reg, local_reg(sym));
+        if (sym->hwreg) {
+            if (sym->hwbits >= 64) emit(cg, "    mov %s, %s\n", reg, sym->hwreg);
+            else if (sym->hwbits == 32) {
+                const char* d = !strcmp(reg, "rbx") ? "ebx" : "ecx";
+                emit(cg, "    mov %s, %s\n", d, sym->hwreg);
+            } else emit(cg, "    movzx %s, %s\n", reg, sym->hwreg);
+        } else if (local_reg(sym)) emit(cg, "    mov %s, %s\n", reg, local_reg(sym));
         else emit(cg, "    mov %s, [rbp%d]\n", reg, sym->offset);
         return;
     }
@@ -4372,6 +4516,7 @@ static int scalar_leaf(Codegen* cg, AstNode* n, OpLeaf* L) {
     if (n->type != AST_IDENT || !n->name) return 0;
     Symbol* sym = symtab_lookup_symbol(cg->symtab, n->name);
     if (sym) {
+        if (sym->hwreg) return 0;
         if (sym->is_array) return 0;
         if (sym->size > 1 && !sym->is_pointer) return 0;
         const char* r = local_reg(sym);
@@ -4760,6 +4905,159 @@ static void emit_binop_rax_rbx(Codegen* cg, const char* op) {
     }
 }
 
+// Read a named register into the accumulator. Zero-extends a narrower
+// register. Reading rax in 64-bit code leaves the accumulator as it is.
+static void emit_reg_read(Codegen* cg, const char* name, int bits) {
+    const MachReg* seg = mach_reg(name);
+    if (seg && seg->seg) {
+        emit(cg, "    mov ax, %s\n", name);
+        if (legacy_bits()) emit(cg, "    movzx eax, ax\n");
+        else emit(cg, "    movzx rax, ax\n");
+        return;
+    }
+    if (bits <= 8 || bits == 16) {
+        if (legacy_bits()) emit(cg, "    movzx eax, %s\n", name);
+        else emit(cg, "    movzx rax, %s\n", name);
+    } else if (bits == 32) {
+        if (strcmp(name, "eax")) emit(cg, "    mov eax, %s\n", name);
+    } else if (strcmp(name, "rax")) {
+        emit(cg, "    mov rax, %s\n", name);
+    }
+}
+
+static void emit_reg_write_acc(Codegen* cg, const char* name, int bits) {
+    if (bits <= 8) {
+        if (strcmp(name, "al")) emit(cg, "    mov %s, al\n", name);
+    } else if (bits == 16) {
+        if (strcmp(name, "ax")) emit(cg, "    mov %s, ax\n", name);
+    } else if (bits == 32) {
+        if (strcmp(name, "eax")) emit(cg, "    mov %s, eax\n", name);
+    } else if (strcmp(name, "rax")) {
+        emit(cg, "    mov %s, rax\n", name);
+    }
+}
+
+// An immediate writes the register directly, so `ah = 0x0E` does not clear
+// al. Any other right-hand side is computed in the accumulator first, and
+// that does clear the other bytes of eax/rax.
+static void emit_reg_write(Codegen* cg, const char* name, int bits, int seg, AstNode* rhs) {
+    if (seg) {
+        if (rhs) gen_expr(cg, rhs);
+        emit(cg, "    mov %s, ax\n", name);
+        return;
+    }
+    if (rhs && rhs->type == AST_NUMBER && rhs->value) {
+        emit(cg, "    mov %s, %s\n", name, rhs->value);
+        return;
+    }
+    if (rhs && rhs->type == AST_IDENT && rhs->name &&
+        (is_data_name(cg, rhs->name) || find_func(cg, rhs->name))) {
+        emit(cg, "    mov %s, %s\n", name, rhs->name);
+        return;
+    }
+    if (rhs) gen_expr(cg, rhs);
+    if (bits == 8) {
+        const MachReg* r = mach_reg(name);
+        if (r && r->high) emit(cg, "    mov %s, al\n", name);
+        else emit_reg_write_acc(cg, name, bits);
+        return;
+    }
+    emit_reg_write_acc(cg, name, bits);
+}
+
+static int cast_pointee_size(AstNode* e, int* sz) {
+    if (!e || e->type != AST_CAST || !(e->is_pointer & 1)) return 0;
+    int bits = 64, sg = 1;
+    if (!e->value || !int_name(e->value, &bits, &sg)) bits = 64;
+    *sz = bits / 8;
+    if (*sz < 1) *sz = 1;
+    return 1;
+}
+
+// A nasm memory operand that does not need the accumulator: a number,
+// a naked register, or `reg+disp` / `reg-disp`.
+static int mem_operand(AstNode* addr, char* buf, int n) {
+    AstNode* e = addr;
+    if (e && e->type == AST_CAST && e->child_count > 0) e = e->children[0];
+    if (!e) return 0;
+    if (e->type == AST_NUMBER && e->value) {
+        snprintf(buf, n, "%s", e->value);
+        return 1;
+    }
+    if (e->type == AST_IDENT && e->name && mach_reg(e->name) &&
+        (g_fn_flags & AF_NAKED) && !(mach_reg(e->name)->bits == 64 && legacy_bits())) {
+        snprintf(buf, n, "%s", e->name);
+        return 1;
+    }
+    if (e->type == AST_BINOP && e->op && e->child_count == 2 &&
+        (e->op[0] == '+' || e->op[0] == '-') && !e->op[1]) {
+        AstNode* a = e->children[0];
+        AstNode* b = e->children[1];
+        if (a && a->type == AST_IDENT && a->name && mach_reg(a->name) &&
+            (g_fn_flags & AF_NAKED) && !(mach_reg(a->name)->bits == 64 && legacy_bits()) &&
+            b && b->type == AST_NUMBER && b->value) {
+            snprintf(buf, n, "%s%s%s", a->name, e->op, b->value);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void emit_acc_store(Codegen* cg, const char* mem, int size, int line, int col) {
+    if (size >= 8 && legacy_bits()) {
+        diag_error(line, col, "an 8-byte store is not available in bits %d", g_fn_bits);
+        return;
+    }
+    if (size <= 1) emit(cg, "    mov byte [%s], al\n", mem);
+    else if (size == 2) emit(cg, "    mov word [%s], ax\n", mem);
+    else if (size == 4) emit(cg, "    mov dword [%s], eax\n", mem);
+    else emit(cg, "    mov [%s], rax\n", mem);
+}
+
+static void emit_acc_load(Codegen* cg, const char* mem, int size, int line, int col) {
+    if (size >= 8 && legacy_bits()) {
+        diag_error(line, col, "an 8-byte load is not available in bits %d", g_fn_bits);
+        return;
+    }
+    if (size <= 1) {
+        if (legacy_bits()) emit(cg, "    movzx eax, byte [%s]\n", mem);
+        else emit(cg, "    movzx rax, byte [%s]\n", mem);
+    } else if (size == 2) {
+        if (legacy_bits()) emit(cg, "    movzx eax, word [%s]\n", mem);
+        else emit(cg, "    movzx rax, word [%s]\n", mem);
+    } else if (size == 4) {
+        emit(cg, "    mov eax, [%s]\n", mem);
+    } else {
+        emit(cg, "    mov rax, [%s]\n", mem);
+    }
+}
+
+static void gen_mem_store(Codegen* cg, AstNode* n) {
+    AstNode* deref = n->children[0];
+    AstNode* val = n->child_count > 1 ? n->children[1] : NULL;
+    AstNode* addr = (deref && deref->child_count > 0) ? deref->children[0] : NULL;
+    int sz = legacy_bits() ? 4 : 8;
+    if (cast_pointee_size(addr, &sz)) {
+        // The cast type is the pointer (`*u8`). The store is checked against
+        // the pointee, so `*(0x1000 as *u8) = 300` is the usual literal error.
+        VTy dst = ty_from_spelled(cg, addr->value);
+        if (val) check_types(val, "", dst, expr_ty(cg, val));
+    }
+    char mem[80];
+    if (addr && mem_operand(addr, mem, sizeof mem)) {
+        if (val) gen_expr(cg, val);
+        emit_acc_store(cg, mem, sz, n->line, n->col);
+        return;
+    }
+    if (addr) gen_expr(cg, addr);
+    if (legacy_bits()) emit(cg, "    push eax\n");
+    else emit(cg, "    push rax\n");
+    if (val) gen_expr(cg, val);
+    if (legacy_bits()) emit(cg, "    pop ebx\n");
+    else emit(cg, "    pop rbx\n");
+    emit_acc_store(cg, legacy_bits() ? "ebx" : "rbx", sz, n->line, n->col);
+}
+
 void gen_expr(Codegen* cg, AstNode* n) {
     if (!n) return;  // Null safety guard
     if (n->file) focus_file(n->file);
@@ -4775,10 +5073,15 @@ void gen_expr(Codegen* cg, AstNode* n) {
         }
     } else if (n->type == AST_IDENT) {
         // Try local variable first
+        Symbol* sym0 = n->name ? symtab_lookup_symbol(cg->symtab, n->name) : NULL;
+        if (sym0 && sym0->hwreg) {
+            emit_reg_read(cg, sym0->hwreg, sym0->hwbits);
+            return;
+        }
         int off = symtab_lookup(cg->symtab, n->name);
         if (off) {
             // Check if this is an array - if so, load address not value
-            Symbol* sym = symtab_lookup_symbol(cg->symtab, n->name);
+            Symbol* sym = sym0;
             if (sym && sym->size > 1 && sym->type_name && !sym->is_pointer) {
                 // This is an array - use lea to get address
                 emit(cg, "    lea rax, [rbp%d]\n", off);
@@ -4808,8 +5111,18 @@ void gen_expr(Codegen* cg, AstNode* n) {
                     emit(cg, "    mov rax, [%s]\n", gvar->name);
                 }
             } else {
-                diag_error(n->line, n->col, "use of undeclared variable '%s'", n->name);
-                emit(cg, "    mov rax, 0  ; unknown var %s\n", n->name);
+                const MachReg* mr = mach_reg(n->name);
+                if (mr) {
+                    if (mach_here(n, mr)) emit_reg_read(cg, mr->name, mr->seg ? 16 : mr->bits);
+                    else if (legacy_bits()) emit(cg, "    xor eax, eax\n");
+                    else emit(cg, "    xor rax, rax\n");
+                } else if (is_data_name(cg, n->name) || find_func(cg, n->name)) {
+                    if (legacy_bits()) emit(cg, "    mov eax, %s\n", n->name);
+                    else emit(cg, "    mov rax, %s\n", n->name);
+                } else {
+                    diag_error(n->line, n->col, "use of undeclared variable '%s'", n->name);
+                    emit(cg, "    mov rax, 0  ; unknown var %s\n", n->name);
+                }
             }
         }
     } else if (n->type == AST_ADDR_OF) {
@@ -4817,11 +5130,20 @@ void gen_expr(Codegen* cg, AstNode* n) {
     } else if (n->type == AST_DEREF) {
         // Dereference: *ptr. A non-volatile pointer stays a 64-bit load.
         // *volatile T loads the pointee's real width and is never folded.
+        // `*(rbp + 136)` and `*(0x1000 as *u32)` are one memory operand.
         int vsz = 8, vsg = 0;
         int vpo = n->child_count > 0 && volatile_pointee_info(cg, n->children[0], &vsz, &vsg);
-        gen_expr(cg, n->children[0]);
-        if (vpo) emit_sized_load_mark(cg, "rax", vsz, vsg, 1);
-        else emit(cg, "    mov rax, [rax]\n");
+        char mem[80];
+        if (!vpo && n->child_count > 0 && mem_operand(n->children[0], mem, sizeof mem)) {
+            int sz = legacy_bits() ? 4 : 8;
+            cast_pointee_size(n->children[0], &sz);
+            emit_acc_load(cg, mem, sz, n->line, n->col);
+        } else {
+            gen_expr(cg, n->children[0]);
+            if (vpo) emit_sized_load_mark(cg, "rax", vsz, vsg, 1);
+            else if (legacy_bits()) emit(cg, "    mov eax, [eax]\n");
+            else emit(cg, "    mov rax, [rax]\n");
+        }
     } else if (n->type == AST_UNARY) {
         // Unary operators: '-' (negation) and '!' (logical NOT)
         if (n->children && n->child_count > 0) {
@@ -4853,14 +5175,22 @@ void gen_expr(Codegen* cg, AstNode* n) {
             if (int_name(n->value, &bits, &sg)) emit_width_trunc(cg, bits, sg);
         }
     } else if (n->type == AST_ASSIGN) {
-        // `ds = 0` is a segment load (`mov ds, ax`), not a variable.
-        // A real local or global of that name still wins.
-        if (n->name && seg_reg_name(n->name) &&
-            !symtab_lookup_symbol(cg->symtab, n->name) &&
-            !global_symtab_lookup(cg->global_symtab, n->name)) {
-            if (n->child_count > 0) gen_expr(cg, n->children[0]);
-            emit(cg, "    mov %s, ax\n", n->name);
+        // A naked parameter is the register itself. A machine-register name
+        // is the same, but only in a naked function, and a real variable wins.
+        Symbol* hw = n->name ? symtab_lookup_symbol(cg->symtab, n->name) : NULL;
+        GlobalVar* hwg = (!hw && n->name) ? global_symtab_lookup(cg->global_symtab, n->name) : NULL;
+        if (hw && hw->hwreg) {
+            emit_reg_write(cg, hw->hwreg, hw->hwbits, 0, n->child_count > 0 ? n->children[0] : NULL);
             return;
+        }
+        if (!hw && !hwg && n->name) {
+            const MachReg* mr = mach_reg(n->name);
+            if (mr) {
+                if (mach_here(n, mr))
+                    emit_reg_write(cg, mr->name, mr->seg ? 16 : mr->bits, mr->seg,
+                                   n->child_count > 0 ? n->children[0] : NULL);
+                return;
+            }
         }
         if (n->name) {
             AstNode dst;
@@ -6242,6 +6572,15 @@ void gen_stmt(Codegen* cg, AstNode* n) {
             return;
         }
         emit(cg, "    jmp .L%d\n", n->type == AST_BREAK ? g_loop_break[g_loop_depth - 1] : g_loop_cont[g_loop_depth - 1]);
+    } else if (n->type == AST_JMP) {
+        if (n->value) emit(cg, "    jmp %s\n", n->value);
+        else if (n->name) {
+            if (!find_func(cg, n->name) && !is_data_name(cg, n->name))
+                diag_error(n->line, n->col, "unknown jump target '%s'", n->name);
+            emit(cg, "    jmp %s\n", n->name);
+        }
+    } else if (n->type == AST_MEM_STORE) {
+        gen_mem_store(cg, n);
     } else if (n->type == AST_CALL || n->type == AST_ASSIGN || n->type == AST_ARRAY_ASSIGN || n->type == AST_FIELD_ASSIGN) {
         if (n->type == AST_ASSIGN && !assign_dest_narrow(cg, n) &&
             (assign_direct(cg, n) || assign_index(cg, n))) return;
@@ -6344,7 +6683,10 @@ void gen_func(Codegen* cg, AstNode* n) {
                    "bits %d functions must be naked; the frame prologue uses 64-bit registers", bits);
     }
     if (naked && param_count > 0) {
-        diag_error(n->line, n->col, "a naked function takes no parameters");
+        int mode = bits ? bits : 64;
+        int maxp = (mode == 16 || mode == 32) ? 4 : 6;
+        if (param_count > maxp)
+            diag_error(n->line, n->col, "a naked function takes at most %d register parameters", maxp);
     }
     if (is_int && param_count > 1) {
         diag_error(n->line, n->col,
@@ -6443,6 +6785,33 @@ void gen_func(Codegen* cg, AstNode* n) {
                 cg->symtab->symbols[cg->symtab->count - 1].type_name = strdup(n->children[0]->value);
             emit(cg, "    mov rax, [rbp+128]\n");
             emit(cg, "    mov [rbp%d], rax\n", off);
+        }
+    } else if (naked) {
+        // No frame and no moves. The name is the incoming register.
+        // bits 64: rdi, rsi, rdx, rcx, r8, r9 (the same registers a Copihue
+        // call already fills). bits 32: eax, ecx, edx, esi. bits 16: ax, cx,
+        // dx, si. ax/eax are the accumulator, so a later expression overwrites
+        // that parameter. bx/ebx/rbx stay scratch and are not parameter registers.
+        int mode = bits ? bits : 64;
+        int maxp = (mode == 16 || mode == 32) ? 4 : 6;
+        static const char* p16[] = {"ax", "cx", "dx", "si"};
+        static const char* p32[] = {"eax", "ecx", "edx", "esi"};
+        static const char* p64[] = {"rdi", "rsi", "rdx", "rcx", "r8", "r9"};
+        const char** pregs = mode == 16 ? p16 : mode == 32 ? p32 : p64;
+        int pw = mode == 16 ? 16 : mode == 32 ? 32 : 64;
+        int nbind = param_count < maxp ? param_count : maxp;
+        for (int i = 0; i < nbind; i++) {
+            AstNode* par = n->children[i];
+            if (!par) continue;
+            if (par->name && symtab_redeclared(cg->symtab, par->name)) {
+                diag_error(par->line, par->col, "redeclaration of '%s' in the same block", par->name);
+                continue;
+            }
+            if (!par->is_pointer && par->value && typetab_lookup(cg->types, par->value)) {
+                diag_error(par->line, par->col, "a naked parameter must be an integer or a pointer");
+                continue;
+            }
+            symtab_add_hw(cg->symtab, par->name, pregs[i], pw, par->is_pointer, par->value);
         }
     } else {
         int nreg = param_count < 6 ? param_count : 6;
