@@ -1,5 +1,5 @@
 // flags: --freestanding
 naked fn k() -> i64 {
-    let x = 1;
-    return x;
+    let a: [u8; 2];
+    return 0;
 }

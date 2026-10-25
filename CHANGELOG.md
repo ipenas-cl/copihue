@@ -2,6 +2,17 @@
 
 Todos los cambios importantes del proyecto.
 
+## [0.25.2] - 2026-10-25
+
+### Added
+- A scalar or pointer `let` inside a `naked` function is a labeled slot in the image (`mov [__loc_fn_N], eax` in `bits 16` / `bits 32`, `rax` in 64-bit code). It is not a stack frame: a prologue at the first instruction would use the BIOS stack, and `ss = 0` would then address the slot in the wrong segment. The slot is `dd 0` in 16/32-bit code and `dq 0` in 64-bit code, so it stays in a `--boot` sector. An array or a struct local is still `a naked function cannot have local variables`.
+- `ds = expr`, and the same form for `es`, `ss`, `fs`, and `gs`, emits `mov <seg>, ax`. The value is the low 16 bits of the accumulator. A local or global with that name is still a variable. `cs` is not writable this way. Reading a segment register is not an expression.
+- `tests/boot/seg_local.lap` sets `ds` and `es`, stores a local, and writes `COPIHUE` to COM1. QEMU checks that string. `tests/freestanding/naked_local.lap` is the instruction stream, including a `u8` truncation in `bits 32`. It is assembled, not booted.
+
+### Changed
+- `while` / `if` in `bits 16` and the other boot builtins shipped in 0.24.1. This release is the two items that release left out.
+- Language version is 0.25.2.
+
 ## [0.25.1] - 2026-10-25
 
 ### Added
