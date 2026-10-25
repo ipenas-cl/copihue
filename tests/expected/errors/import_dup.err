@@ -1,0 +1,4 @@
+tests/errors/import_dup.lap:3:4: error: function 'main' is already defined at tests/errors/parts/import_dup_other.lap:1:4
+      3 | fn main() -> i64 {
+        |    ^
+1 error, compilation failed

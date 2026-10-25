@@ -1,0 +1,5 @@
+import "parts/no_such_file.lap";
+
+fn main() -> i64 {
+    return 0;
+}
