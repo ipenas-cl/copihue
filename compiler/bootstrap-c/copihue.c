@@ -16,7 +16,7 @@
 
 // ==== NAMING (single place to change when the language is renamed) ====
 #define LANG_NAME     "Copihue"
-#define LANG_VERSION  "0.27.4"
+#define LANG_VERSION  "0.27.5"
 #define COMPILER_BIN  "copihue"
 #define SRC_EXT       ".lap"   /* Lapageria rosea, the copihue */
 #define OLD_SRC_EXT   ".cph"   /* v0.18.x extension, still accepted with a warning */
@@ -670,6 +670,9 @@ static long long g_proven_lim;
 static AstNode* g_prev_stmt;
 static AstNode* g_prev2_stmt;
 static int g_strength_busy;
+// The while whose body is being emitted, and the statement just before it.
+static AstNode* g_enclosing_while;
+static AstNode* g_enclosing_prev;
 
 static const char* reg_dword(const char* reg) {
     if (!strcmp(reg, "rax")) return "eax";
@@ -7918,9 +7921,10 @@ static const char* distinct_reg(Codegen* cg, const char* name, const char** prev
 
 // `k = 0; while (k < n) { s = s + a[i*n+k] * b[k*n+j]; k = k + 1; }`
 // with n a sole positive constant and both arrays at least n*n. The fast
-// path keeps two running pointers, one step per branch. An even unroll
-// was measured and was slower, so it is not emitted. A failed i/j guard
-// runs the original loop.
+// path keeps two running pointers. n > 0 and k starts at 0, so the loop is
+// bottom-tested and the product is `imul rax, [rsi]`. An even unroll was
+// measured and was slower, so it is not emitted. A failed i/j guard runs
+// the original loop. The fast path jumps past that copy.
 static int try_strength_dot(Codegen* cg, AstNode* wh) {
     if (g_strength_busy || !o2_hosted() || !wh || wh->type != AST_WHILE || wh->child_count != 2)
         return 0;
@@ -8006,11 +8010,11 @@ static int try_strength_dot(Codegen* cg, AstNode* wh) {
     emit(cg, "    lea rsi, [rbp%lld+%s*8]\n", (long long)sb->offset, rj);
     emit(cg, "    mov rcx, %s\n    shl rcx, 3\n", rn);
     emit(cg, ".L%d:\n", top);
-    emit(cg, "    cmp %s, %s\n    jge .L%d\n", rk, rn, end);
-    emit(cg, "    mov rax, [rdi]\n    mov rbx, [rsi]\n    imul rax, rbx\n");
+    emit(cg, "    mov rax, [rdi]\n    imul rax, qword [rsi]\n");
     emit(cg, "    add %s, rax\n", rs);
     emit(cg, "    add rdi, 8\n    add rsi, rcx\n    add %s, 1\n", rk);
-    emit(cg, "    jmp .L%d\n", top);
+    emit(cg, "    cmp %s, %s\n    jl .L%d\n", rk, rn, top);
+    emit(cg, "    jmp .L%d\n", end);
     emit(cg, ".L%d:\n", slow);
     g_strength_busy = 1;
     gen_stmt(cg, wh);
@@ -8399,6 +8403,234 @@ static int try_sink_masks(Codegen* cg, AstNode* block, int start) {
     return n;
 }
 
+static int is_minus_one(AstNode* n, const char* name) {
+    if (!n || n->type != AST_ASSIGN || !n->name || !name || strcmp(n->name, name)) return 0;
+    if (n->child_count != 1 || !n->children[0]) return 0;
+    AstNode* e = n->children[0];
+    if (e->type != AST_BINOP || !e->op || e->op[0] != '-' || e->op[1] || e->child_count != 2)
+        return 0;
+    AstNode* a = e->children[0];
+    AstNode* b = e->children[1];
+    return a && a->type == AST_IDENT && a->name && !strcmp(a->name, name) && num_eq(b, 1);
+}
+
+// `j = i - 1` or `let j = i - 1`.
+static int assign_sub_one(AstNode* n, const char** dest, const char** src) {
+    if (!n || !n->name || (n->type != AST_ASSIGN && n->type != AST_LET)) return 0;
+    if (n->child_count != 1 || !n->children[0]) return 0;
+    AstNode* e = n->children[0];
+    if (e->type != AST_BINOP || !e->op || e->op[0] != '-' || e->op[1] || e->child_count != 2)
+        return 0;
+    AstNode* a = e->children[0];
+    AstNode* b = e->children[1];
+    if (!a || a->type != AST_IDENT || !a->name || !num_eq(b, 1)) return 0;
+    *dest = n->name;
+    *src = a->name;
+    return 1;
+}
+
+static int plus_one_name(AstNode* ix, const char** name) {
+    if (!ix || ix->type != AST_BINOP || !ix->op || ix->op[0] != '+' || ix->op[1] || ix->child_count != 2)
+        return 0;
+    AstNode* a = ix->children[0];
+    AstNode* b = ix->children[1];
+    AstNode* id = NULL;
+    if (a && a->type == AST_IDENT && num_eq(b, 1)) id = a;
+    else if (b && b->type == AST_IDENT && num_eq(a, 1)) id = b;
+    else return 0;
+    if (!id->name) return 0;
+    *name = id->name;
+    return 1;
+}
+
+static int index_named(AstNode* n, const char* arr, const char* idx) {
+    if (!n || n->type != AST_INDEX || n->child_count < 2 || !arr || !idx) return 0;
+    AstNode* a = n->children[0];
+    AstNode* i = n->children[1];
+    return a && a->type == AST_IDENT && a->name && !strcmp(a->name, arr) &&
+           i && i->type == AST_IDENT && i->name && !strcmp(i->name, idx);
+}
+
+// `a[j] > key` or `key < a[j]`.
+static int elem_gt_key(AstNode* c, const char* arr, const char* idx, const char* key) {
+    if (!c || c->type != AST_COMPARE || !c->op || c->child_count != 2 || !key) return 0;
+    if (!strcmp(c->op, ">") && index_named(c->children[0], arr, idx) &&
+        c->children[1] && c->children[1]->type == AST_IDENT && c->children[1]->name &&
+        !strcmp(c->children[1]->name, key))
+        return 1;
+    if (!strcmp(c->op, "<") && index_named(c->children[1], arr, idx) &&
+        c->children[0] && c->children[0]->type == AST_IDENT && c->children[0]->name &&
+        !strcmp(c->children[0]->name, key))
+        return 1;
+    return 0;
+}
+
+static void check_elem_store(Codegen* cg, AstNode* st) {
+    if (!st || st->type != AST_ARRAY_ASSIGN || st->child_count < 3) return;
+    check_indexable(cg, st->children[0]);
+    char* et = array_elem_type_name(cg, st->children[0]);
+    if (et)
+        check_types(st->children[2], "", ty_from_spelled(cg, et), expr_ty(cg, st->children[2]));
+}
+
+// Outer `i = C` (C >= 0) then `while (i < N)`, N a sole positive constant,
+// body ends with `i = i + 1`, and i is not written earlier in that body.
+// The array is a local i64 of at least N elements, so an index in
+// [-1, N-2] used as j+1 stays inside it.
+static int shift_outer_ok(Codegen* cg, const char* iname, Symbol* arr, long long* bound_out) {
+    AstNode* wh = g_enclosing_while;
+    AstNode* prev = g_enclosing_prev;
+    AstNode* cond;
+    AstNode* body;
+    AstNode* rhs;
+    long long bound = 0;
+    int i;
+    if (!iname || !arr || !wh || wh->type != AST_WHILE || wh->child_count != 2) return 0;
+    cond = wh->children[0];
+    body = wh->children[1];
+    if (!cond || cond->type != AST_COMPARE || !cond->op || strcmp(cond->op, "<") ||
+        cond->child_count != 2)
+        return 0;
+    if (!cond->children[0] || cond->children[0]->type != AST_IDENT || !cond->children[0]->name ||
+        strcmp(cond->children[0]->name, iname))
+        return 0;
+    rhs = cond->children[1];
+    if (rhs && rhs->type == AST_NUMBER) {
+        if (!parse_i64(rhs->value, &bound)) return 0;
+    } else if (rhs && rhs->type == AST_IDENT && rhs->name) {
+        if (!sole_i64(rhs->name, &bound)) return 0;
+    } else return 0;
+    if (bound <= 0) return 0;
+    if (!nonneg_init(prev, iname)) return 0;
+    if (!body || body->type != AST_BLOCK || body->child_count < 1) return 0;
+    if (!is_plus_one(body->children[body->child_count - 1], iname)) return 0;
+    for (i = 0; i < body->child_count - 1; i++) {
+        int w = 0;
+        count_writes(body->children[i], iname, &w);
+        if (w) return 0;
+    }
+    if (arr->is_volatile || !i64_arr(arr, bound)) return 0;
+    if (strcmp(arr->type_name, "i64")) return 0;
+    *bound_out = bound;
+    return 1;
+}
+
+// Insertion shift inside a proved `while (i < N)`:
+//   j = i - 1
+//   while (j >= 0 && a[j] > key) { a[j + 1] = a[j]; j = j - 1; }
+//   a[j + 1] = key
+// j starts at i-1, and i is in [C, N-1] when the body runs, so j <= N-2.
+// j only steps down by 1, and a[j] is read only after j >= 0, so j never
+// goes below -1. a[j+1] is then in range, including the store at j == -1.
+// The taken path is six instructions and has no upper-bound check.
+// `a[j] > key && j >= 0` is not matched: that reads a[-1]. Returns 2 when
+// the while and the following store are consumed.
+static int try_insert_shift(Codegen* cg, AstNode* block, int start) {
+    AstNode* wh;
+    AstNode* post;
+    AstNode* cond;
+    AstNode* body;
+    AstNode* st0;
+    AstNode* st1;
+    AstNode* base;
+    AstNode* kv;
+    AstNode* cleft;
+    const char* arr;
+    const char* jname;
+    const char* jpost;
+    const char* key;
+    const char* jdest;
+    const char* iname;
+    const char* rj;
+    const char* rkey;
+    const char* ri;
+    Symbol* sj;
+    Symbol* sk;
+    Symbol* si;
+    Symbol* sa;
+    long long bound = 0;
+    long long off0, off1;
+    int store, shift;
+    char mem0[96], mem1[96];
+    if (!o2_hosted() || g_strength_busy || !block || block->type != AST_BLOCK) return 0;
+    if (start < 0 || start + 1 >= block->child_count) return 0;
+    wh = block->children[start];
+    post = block->children[start + 1];
+    if (!wh || wh->type != AST_WHILE || wh->child_count != 2) return 0;
+    if (node_has_call(wh) || node_has_call(post)) return 0;
+    cond = wh->children[0];
+    body = wh->children[1];
+    if (!body || body->type != AST_BLOCK || body->child_count != 2) return 0;
+    st0 = body->children[0];
+    st1 = body->children[1];
+    if (!st0 || st0->type != AST_ARRAY_ASSIGN || st0->child_count < 3) return 0;
+    base = st0->children[0];
+    if (!base || base->type != AST_IDENT || !base->name) return 0;
+    arr = base->name;
+    jname = NULL;
+    if (!plus_one_name(st0->children[1], &jname)) return 0;
+    if (!index_named(st0->children[2], arr, jname)) return 0;
+    if (!is_minus_one(st1, jname)) return 0;
+    if (!cond || cond->type != AST_LOGICAL || !cond->op || strcmp(cond->op, "&&") ||
+        cond->child_count != 2)
+        return 0;
+    cleft = cond->children[0];
+    if (!cleft || cleft->type != AST_COMPARE || !cleft->op || strcmp(cleft->op, ">=") ||
+        cleft->child_count != 2)
+        return 0;
+    if (!cleft->children[0] || cleft->children[0]->type != AST_IDENT ||
+        !cleft->children[0]->name || strcmp(cleft->children[0]->name, jname))
+        return 0;
+    if (!num_eq(cleft->children[1], 0)) return 0;
+    if (!post || post->type != AST_ARRAY_ASSIGN || post->child_count < 3) return 0;
+    if (!post->children[0] || post->children[0]->type != AST_IDENT || !post->children[0]->name ||
+        strcmp(post->children[0]->name, arr))
+        return 0;
+    jpost = NULL;
+    if (!plus_one_name(post->children[1], &jpost) || strcmp(jpost, jname)) return 0;
+    kv = post->children[2];
+    if (!kv || kv->type != AST_IDENT || !kv->name) return 0;
+    key = kv->name;
+    if (!strcmp(key, jname) || !elem_gt_key(cond->children[1], arr, jname, key)) return 0;
+    jdest = NULL;
+    iname = NULL;
+    if (!assign_sub_one(g_prev_stmt, &jdest, &iname) || strcmp(jdest, jname)) return 0;
+    if (!strcmp(iname, jname) || !strcmp(iname, key) || !strcmp(iname, arr)) return 0;
+    sa = symtab_lookup_symbol(cg->symtab, (char*)arr);
+    if (!shift_outer_ok(cg, iname, sa, &bound)) return 0;
+    sj = symtab_lookup_symbol(cg->symtab, (char*)jname);
+    sk = symtab_lookup_symbol(cg->symtab, (char*)key);
+    si = symtab_lookup_symbol(cg->symtab, (char*)iname);
+    if (sym_narrow_int(sj) || sym_narrow_int(sk) || sym_narrow_int(si)) return 0;
+    rj = local_reg(sj);
+    rkey = local_reg(sk);
+    ri = local_reg(si);
+    if (!rj || !rkey || !ri) return 0;
+    if (!strcmp(rj, rkey) || !strcmp(rj, ri) || !strcmp(rkey, ri)) return 0;
+    off0 = sa->offset;
+    off1 = off0 + 8;
+    if (!fits_imm32_val(off0) || !fits_imm32_val(off1)) return 0;
+    check_elem_store(cg, st0);
+    check_elem_store(cg, post);
+    check_assign_types(cg, st1);
+    (void)bound;
+    store = new_label(cg);
+    shift = new_label(cg);
+    snprintf(mem0, sizeof mem0, "rbp%lld+%s*8", off0, rj);
+    snprintf(mem1, sizeof mem1, "rbp%lld+%s*8", off1, rj);
+    emit(cg, "    cmp %s, 0\n    jl .L%d\n", rj, store);
+    emit(cg, "    mov rax, [%s]\n", mem0);
+    emit(cg, "    cmp rax, %s\n    jle .L%d\n", rkey, store);
+    emit(cg, ".L%d:\n", shift);
+    emit_scaled_store(cg, mem1, 8, "rax");
+    emit(cg, "    sub %s, 1\n    js .L%d\n", rj, store);
+    emit(cg, "    mov rax, [%s]\n", mem0);
+    emit(cg, "    cmp rax, %s\n    jg .L%d\n", rkey, shift);
+    emit(cg, ".L%d:\n", store);
+    emit_scaled_store(cg, mem1, 8, rkey);
+    return 2;
+}
+
 static int try_hosted_rewrite(Codegen* cg, AstNode* n) {
     if (!o2_hosted()) return 0;
     if (try_strength_dot(cg, n)) return 1;
@@ -8435,6 +8667,11 @@ void gen_stmt(Codegen* cg, AstNode* n) {
             g_prev_stmt = i > 0 ? n->children[i - 1] : NULL;
             if (keep && i == 0) g_fwd_hold = 1;
             sunk = try_sink_masks(cg, n, i);
+            if (sunk >= 2) {
+                i += sunk - 1;
+                continue;
+            }
+            sunk = try_insert_shift(cg, n, i);
             if (sunk >= 2) {
                 i += sunk - 1;
                 continue;
@@ -8677,14 +8914,20 @@ void gen_stmt(Codegen* cg, AstNode* n) {
         g_loop_depth++;
         const char* save_idx = g_proven_idx;
         long long save_lim = g_proven_lim;
+        AstNode* save_ew = g_enclosing_while;
+        AstNode* save_ep = g_enclosing_prev;
         const char* pidx = NULL;
         long long plim = -1;
         if (o2_hosted() && match_proven(cg, g_prev_stmt, n, &pidx, &plim)) {
             g_proven_idx = pidx;
             g_proven_lim = plim;
         }
+        g_enclosing_while = n;
+        g_enclosing_prev = g_prev_stmt;
         if (branched) g_fwd_hold = 1;
         gen_stmt(cg, n->children[1]);
+        g_enclosing_while = save_ew;
+        g_enclosing_prev = save_ep;
         g_proven_idx = save_idx;
         g_proven_lim = save_lim;
         g_loop_depth--;
@@ -8794,6 +9037,8 @@ void gen_func(Codegen* cg, AstNode* n) {
     g_prev_stmt = NULL;
     g_prev2_stmt = NULL;
     g_strength_busy = 0;
+    g_enclosing_while = NULL;
+    g_enclosing_prev = NULL;
     if (!n || !n->name) return;  // Null safety
     if (n->file) focus_file(n->file);
     int param_count = n->child_count - 1;
@@ -9037,6 +9282,11 @@ void gen_func(Codegen* cg, AstNode* n) {
             i += sunk - 1;
             continue;
         }
+        sunk = try_insert_shift(cg, body, i);
+        if (sunk >= 2) {
+            i += sunk - 1;
+            continue;
+        }
         if (!try_hosted_rewrite(cg, body->children[i]))
             gen_stmt(cg, body->children[i]);
     }
@@ -9100,6 +9350,8 @@ void gen_func(Codegen* cg, AstNode* n) {
     g_slim = 0;
     g_expr_tmp = NULL;
     g_proven_idx = NULL;
+    g_enclosing_while = NULL;
+    g_enclosing_prev = NULL;
     g_nonneg_reg = NULL;
     g_fwd_ok = 0;
     g_fwd_hold = 0;

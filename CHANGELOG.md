@@ -2,6 +2,16 @@
 
 Todos los cambios importantes del proyecto.
 
+## [0.27.5] - 2026-10-25
+
+### Added
+- Hosted 64-bit `-O2` rewrites the insertion shift `j = i - 1; while (j >= 0 && a[j] > key) { a[j + 1] = a[j]; j = j - 1; } a[j + 1] = key` when it sits in `while (i < N)`, `N` is a sole positive constant, the local `i64` array has at least `N` elements, `i` starts at a non-negative constant, and `i` is incremented only at the end of that body. The taken path is six instructions and does not compare `j` with the length. `j` starts at `i - 1` and only decreases by one after `j >= 0`, so it does not go below -1. `key < a[j]` matches. `a[j] > key && j >= 0` does not. A `>=` test, an extra statement, a narrow or spilled name, or a failed proof of `i` keeps the bounds check.
+- The matmul inner product, already a running-pointer loop for `n > 0` with `k` starting at 0, is bottom-tested (`cmp` / `jl`) and multiplies with `imul rax, qword [rsi]`. An `i` or `j` outside `[0, n)` still runs the original loop.
+- `tests/lang/o2_shift.lap` checks a reverse run, an already sorted run, duplicates, negative keys, `n = 1`, a shift down to `j == -1`, `key < a[j]`, a `let` inside the body, a `>=` loop that must keep counting shifts, an extra statement in the body, and dot products of `n = 1` and of negative factors, against `-O0`.
+
+### Changed
+- Language version is 0.27.5. `-O0`, `--freestanding`, `--flat`, and `--boot` generate the same code as 0.27.4. `bits 16` and `bits 32` do not take these paths. The `-O2` assembly of `fib`, `sieve`, `arith`, `chain`, `fold`, and `array` matches 0.27.4 except the version line. `sort` drops the upper check on the shift. `matmul` changes the `k` loop only. `fib` is still the 16-instruction prologue. gcc `-O2` expands that recursion into a large even/odd tree; that rewrite is not in this compiler. A loop that does not lower the measured time is not kept.
+
 ## [0.27.4] - 2026-10-25
 
 ### Added
