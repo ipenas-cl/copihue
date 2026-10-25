@@ -410,7 +410,7 @@ Cada programa está escrito cuatro veces (\`.lap\`, \`.c\`, \`.rs\`, \`.ml\`) co
 - Ejecución: $RUNS repeticiones más una de calentamiento que no entra en la mediana. La mediana es el valor central de las $RUNS muestras ordenadas (la 4.ª si son 7). En cada celda, entre paréntesis, el mínimo y el máximo de esas repeticiones.
 - La ejecución medida tira stdout a \`/dev/null\`. El proceso sigue escribiendo una línea. Afinidad a un CPU: $pin_txt.
 - El tamaño es \`wc -c\` del fichero producido, sin \`strip\`. \`text\`/\`data\`/\`bss\` salen de \`size\`.
-- Copihue \`-O2\` en hosted pliega constantes, reescribe \`*\`, \`/\` y \`%\` por potencias de dos, evalúa una operación de operandos simples directo en el registro del local (o en \`rax\`/\`rbx\` si hace falta un temporal), mantiene hasta cuatro locales escalares en \`r12\`–\`r15\` y, cuando ninguna llamada cae dentro del rango de uso, dos más en \`r10\` y \`r11\`, direcciona un array con \`base+índice*escala\` en una instrucción, y si la función abre con \`if (param <op> hoja) return param\` compara el registro de entrada y retorna antes de armar el frame. No simplifica bucles. \`-O0\`, \`--freestanding\`, \`--flat\` y \`--boot\` no usan eso.
+- Copihue \`-O2\` en hosted pliega constantes, reescribe \`*\`, \`/\` y \`%\` por potencias de dos, evalúa una operación de operandos simples directo en el registro del local (o en \`rax\`/\`rbx\` si hace falta un temporal), mantiene hasta cuatro locales escalares en \`r12\`–\`r15\` y, cuando ninguna llamada cae dentro del rango de uso, dos más en \`r10\` y \`r11\`, direcciona un array con \`base+índice*escala\` en una instrucción, y si la función abre con \`if (param <op> hoja) return param\` compara el registro de entrada y retorna antes de armar el frame. Una llamada directa del mismo programa, con a lo más seis argumentos que quepan en \`rdi\`–\`r9\`, los deja en esos registros; \`syscall\`, los builtins y un argumento que es otra llamada siguen con \`push\`/\`pop\`. Un \`if\` o \`while\` cuya condición es una comparación de escalares, o de un elemento de array, salta con las banderas y no materializa 0/1; \`&&\` y \`||\` también, y \`&&\` no evalúa la derecha si la izquierda ya falla. Esa carga se reutiliza en el \`a[i]\` o \`a[i±constante] =\` siguiente. Un \`while (i < lim)\` que arranca en una constante no negativa, solo suma uno a \`i\` al final, no llama y no toma direcciones, omite el chequeo de límites del array local cuando el arreglo tiene al menos \`lim\` elementos. El producto \`s = s + a[i*n+k] * b[k*n+j]\` con \`k\` de 0 a \`n\` camina las dos filas con punteros si \`i\` y \`j\` están en rango; si no, corre el bucle original. Una función que no usa \`rbp\` y no empuja guarda los registros con \`push\`/\`pop\`. No borra bucles. \`-O0\`, \`--freestanding\`, \`--flat\` y \`--boot\` no usan eso.
 - C usa \`long\` ($long_bit bits aquí). Rust usa \`i64\`. OCaml usa \`int\` nativo, que en amd64 es 63 bits con etiqueta. Las cargas caben en ese rango: las cuatro salidas coincidieron. El desborde de \`rustc -O\` envuelve, igual que un binario release; no es el modo debug.
 - No hay intrínsecos, \`unsafe\`, pragmas, \`-march=native\` ni \`-C opt-level=3\`. Los flags son los pedidos: \`gcc -O2\`, \`rustc -O\`, \`ocamlopt -O3\`, \`copihue -O2\`.
 - Esta copia de ocamlopt no trae Flambda. \`-O3\` se pasa igual; no activa Flambda.
@@ -517,7 +517,7 @@ Un bucle de 500000000 vueltas no cabe en unos pocos milisegundos a ninguna frecu
 
 ## Array local y array global, solo Copihue
 
-\`bench/src/array_global.lap\` es el mismo algoritmo que \`array\`, con el arreglo en una global. En el generador actual, la lectura de un array local emite un chequeo de límites (\`test\`/\`cmp\`/\`jmp\`) y la de un array global no. La salida coincidió con \`array\`.
+\`bench/src/array_global.lap\` es el mismo algoritmo que \`array\`, con el arreglo en una global. Una carga de un array local emite un chequeo de límites, salvo el \`while (i < lim)\` de la metodología: el bucle interno de \`array\` y su suma final son de esa forma, así que no lo emiten. La global no lo emite. La salida coincidió con \`array\`.
 
 | Variante | Mediana (mín–máx) ms |
 |---|---:|
@@ -536,7 +536,7 @@ fi)
 
 El fichero de Copihue es el más chico de cada fila. \`file\` marca los binarios de Rust y de OCaml con información de depuración; la columna \`text\` de \`size\` es el código, y también ahí Copihue es el más chico. El binario de C está enlazado con libc y el de Copihue no: el tamaño no es "bytes del algoritmo".
 
-La mediana del array local y la del global están en la tabla de arriba. La diferencia no es el grueso del tiempo de \`array\`: esta corrida no muestra que el chequeo de límites sea lo que domina ese programa.
+La mediana del array local y la del global están en la tabla de arriba. El hueco que quede entre las dos está medido ahí; el perfil de más abajo cuenta las instrucciones del bucle interno.
 
 ## Límites
 
