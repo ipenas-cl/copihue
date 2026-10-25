@@ -1,0 +1,4 @@
+tests/errors/bits_not_naked.lap:1:12: error: bits 16 functions must be naked; the frame prologue uses 64-bit registers
+      1 | bits 16 fn real_mode() {
+        |            ^
+1 error, compilation failed

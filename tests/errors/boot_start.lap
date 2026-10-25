@@ -1,0 +1,4 @@
+// flags: --boot
+fn _start() -> i64 {
+    return 0;
+}
