@@ -1,0 +1,23 @@
+// also-o2
+// Scalar and pointer locals in a naked function are slots in the image.
+// Segment registers are `mov <seg>, ax`. An array local is still an error.
+
+bits 16 naked fn real_mode() {
+    ds = 0;
+    es = 0;
+    let ch: i64 = 67;
+    ch = ch + 1;
+    outb(0x3F8, ch);
+}
+
+bits 32 naked fn protected() {
+    ds = 0x10;
+    let n: u8 = inb(0x80);
+    outb(0x80, n);
+}
+
+naked fn stub64() {
+    let p: *u8 = 0;
+    let x = 1;
+    return x;
+}
