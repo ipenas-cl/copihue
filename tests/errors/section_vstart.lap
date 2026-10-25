@@ -1,0 +1,4 @@
+// flags: -c --freestanding
+section ".boot" @ 0x7C00 {
+    fn f() -> i64 { return 1; }
+}

@@ -2,6 +2,17 @@
 
 Todos los cambios importantes del proyecto.
 
+## [0.29.0] - 2026-10-25
+
+### Added
+- `-c` writes one ELF64 relocatable object (`nasm -f elf64`) and does not run `ld`. `-o` names that object (default `output.o`). `-c -S` writes the assembly of that object and does not assemble. Definitions in the object are NASM `global`: functions, `let` globals, and `data` names. `extern name;` with no definition in this object is NASM `extern`. `extern fn name(...) -> T;` and `extern bits 16|32|64 naked fn name(...);` are the same for a function: the call still checks the argument count and the argument types, and the object has no body. Without `-c` that declaration is `extern fn is only available with -c`. A body is `extern fn has no body`. A body later in the same object defines the function, and no `extern` is emitted.
+- The hosted object that defines `fn main` emits `_start` (`call main`, then `syscall` 60) and the hosted helpers (`__print_int`, `__strcmp`, `__strcpy`, `__strlen`), and those helpers are `global`. An object with no `main` has no `_start` and no copy of the helpers. A call to `print_int`, `strcmp`, `strcpy`, `strlen`, `print`, or `println` from that object is an `extern` of the helper. Two objects that both define `main` both define `_start`; `ld` reports the duplicate. Two objects that define the same function do too.
+- `--flat` and `--boot` stay `nasm -f bin`. `-c` with either one is `copihue: error: -c cannot be combined with --flat or --boot`. `section "name" @ address` is a bin load address (`vstart`). `-c` rejects it: `section '@' is a load address for --flat and --boot; -c does not emit vstart`. A named section without `@` is still emitted, with no `vstart`, so `nasm -f elf64` does not warn. `--freestanding` without `-c` still stops at assembly and still emits `vstart` when the source asked for it; assembling that file with `nasm -f elf64` still warns and ignores the attribute. `import` and several files on one command are still one object, not one object per file.
+- `tests/link` compiles two hosted files with `-c`, links them with `ld` and no libc, and runs the program (`42`) at `-O0` and `-O2`. The library object exports `add` and `bias` and has no `_start`. Linking that object to itself fails. A `--freestanding -c` section without `@` assembles with no `vstart` warning. Two `bits 32` freestanding objects are linked at `0x8000` and booted from `tests/usermode/boot.lap`. QEMU reads `COPIHUE` on COM1 at `-O0` and `-O2`.
+
+### Changed
+- Language version is 0.29.0, on top of 0.28.1.
+
 ## [0.28.1] - 2026-10-25
 
 ### Fixed

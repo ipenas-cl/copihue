@@ -1,0 +1,4 @@
+tests/errors/section_vstart.lap:2:1: error: section '@' is a load address for --flat and --boot; -c does not emit vstart
+      2 | section ".boot" @ 0x7C00 {
+        | ^
+1 error, compilation failed

@@ -1,0 +1,4 @@
+tests/errors/extern_fn.lap:1:1: error: extern fn is only available with -c
+      1 | extern fn add(a: i64) -> i64;
+        | ^
+1 error, compilation failed
