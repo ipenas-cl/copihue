@@ -82,7 +82,7 @@ The full language reference is in [docs/REFERENCE.md](docs/REFERENCE.md).
 - Freestanding built-ins: `inb/inw/inl`, `outb/outw/outl`, `cli`, `sti`, `hlt`, `pause`, `swapgs`,
   `lidt`/`lgdt`/`invlpg` (any address expression, including a variable), `rdmsr`/`wrmsr`, `ltr`, `iretq`, `sysretq`,
   `read_cr0`/`read_cr2`/`read_cr3`/`read_cr4`, `write_cr0`/`write_cr3`/`write_cr4`,
-  `set_syscall_stack`, `ljmp`, `int`, and inline `asm("...")`. The control-register builtins, `ljmp`, and `int` are a compile error in hosted mode. `read_cr*` / `write_cr*` are 64-bit forms; 16-bit code uses `asm("mov eax, cr0")`
+  `set_syscall_stack`, `ljmp`, `int`, `int_carry`, `cpuid`, `cpuid_edx`, and inline `asm("...")`. The control-register builtins, `ljmp`, and `int` are a compile error in hosted mode. In `bits 16` and `bits 32`, `read_cr*` / `write_cr*` emit `mov eax, crN` / `mov crN, eax`, and `in` / `out` / `rdmsr` / `wrmsr` use `eax` and `edx`. `if carry` reads CF. `lgdt(&gdtr)` names a `data` label
 - Diagnostics in the form `file:line:col: error: ...`, with the source line and a caret. They cover syntax errors,
   undeclared variables, indexing a non-array, unknown struct fields, unknown functions, a call with the wrong
   number of arguments, an interrupt function with the wrong shape, bad escapes, and hosted-only calls in freestanding code
@@ -94,11 +94,11 @@ The full language reference is in [docs/REFERENCE.md](docs/REFERENCE.md).
 
 | Suite | What it checks |
 |---|---|
-| 142 test programs + 18 examples | compiled at `-O0` and `-O2`, run, and stdout + exit code compared to golden files in `tests/expected/` |
-| 26 error tests | the compiler rejects the program with the exact expected message |
-| 14 freestanding tests | `--freestanding` output has no `_start`/syscalls and assembles; the instruction stream is golden. Six of them also require the same stream at `-O2` |
+| 143 test programs + 18 examples | compiled at `-O0` and `-O2`, run, and stdout + exit code compared to golden files in `tests/expected/` |
+| 27 error tests | the compiler rejects the program with the exact expected message |
+| 15 freestanding tests | `--freestanding` output has no `_start`/syscalls and assembles; the instruction stream is golden. Seven of them also require the same stream at `-O2` |
 | 4 flat-binary tests | `--flat` puts `_start` at offset 0; the raw image matches a golden hexdump. Two of them also require the same image at `-O2` |
-| 1 boot sector | `--boot` at `-O0` and `-O2` is the same 512-byte image ending in `55 aa`, compared to a golden hexdump. If `qemu-system-x86_64` is installed, the image is booted and COM1 must contain `COPIHUE`. CI installs QEMU; without it the hexdump test still runs |
+| 2 boot sectors | `--boot` at `-O0` and `-O2` is the same 512-byte image ending in `55 aa`, compared to a golden hexdump. If `qemu-system-x86_64` is installed, each image is booted and COM1 must contain `COPIHUE`. CI installs QEMU; without it the hexdump test still runs |
 | 1 user-mode image | `tests/usermode`: a 512-byte sector plus a flat kernel at `0x8000`. Both images match at `-O0` and `-O2`. If QEMU is installed, both kernels are booted and COM1 must contain `USER` |
 | `make net-test` | starts `examples/simple_api_server.lap`, queries it with `curl` and with two Copihue HTTP clients, then stops it |
 
@@ -108,7 +108,7 @@ The full language reference is in [docs/REFERENCE.md](docs/REFERENCE.md).
 - Call checking is the function name and the argument count. Argument types, return types, assignment types, and `const` are not checked. A return type of `*u8` or `[u8; 4]` parses in hosted, freestanding, and flat code; the bits still come back in `rax`. Function pointers are integer addresses, not a typed `fn` type, and an indirect call is not arity-checked.
 - Locals are block-scoped. Two `let`s of the same name in sibling blocks are different slots, so a use reads the one that is in scope. The stack slot is not reused after the block ends.
 - Integer arithmetic is always 64-bit and overflow wraps. Narrow types only change loads and stores. There are no bounds checks on pointer indexing.
-- A kernel is still one translation unit: there are no modules and no relocatable ELF objects. `bits 16` and `bits 32` are naked functions only: there is no 16-bit frame, and the `read_cr*` / `write_cr*` builtins are the 64-bit `mov rax, crN` form. `tests/boot/boot_sector.lap` reaches protected mode. It does not enter long mode; a page table does not fit as static data in 512 bytes.
+- A kernel is still one translation unit: there are no modules and no relocatable ELF objects. `bits 16` and `bits 32` are naked functions only: there is no 16-bit frame, so `let` is still rejected there, and `ds = 0` is not an assignment. Arithmetic in those functions is 32-bit (`eax`). A call to another Copihue function from `bits 16` or `bits 32` is still the 64-bit call sequence. `tests/boot/boot_sector.lap` and `tests/boot/realmode_builtins.lap` reach protected mode. They do not enter long mode; a page table does not fit as static data in 512 bytes.
 - `syscall fn` switches stacks with `set_syscall_stack` and returns with `o64 sysret` (sysretq). It does not program `STAR`, `LSTAR`, `SFMASK`, or `EFER`, and it does not emit `swapgs`. `TSS.rsp0` is a packed-struct store the kernel performs; the compiler does not build the GDT descriptor. The `syscall` instruction does not read the TSS.
 - `volatile` on a global scalar, a `*volatile T` pointee, or a struct field is reloaded and stored on every use, including inside a loop at `-O2`, at the access's real width. It is not a memory model: there are no atomics. `let volatile` on a local scalar keeps that local in its stack slot at `-O2` (a non-volatile scalar may live in a register). At `-O0` and in freestanding code every local is on the stack, so the keyword does not change those. `let volatile` on a struct or an array is a compile error.
 - Indexing a local array in hosted mode emits a bounds check (`syscall` + `exit`). `--freestanding` and `--flat` index the same local array without that trap. Pointer indexing is never checked.
@@ -179,9 +179,9 @@ bits 16 naked fn _start() {
 bits 32 naked fn pm() { hlt(); }
 ```
 
-`data` blocks are raw NASM in the text stream: `db`, `dw`, `dd`, `dq`, `times N db|dw|dd|dq value`, `align N` (zero padding), and `label:`. A string becomes its bytes, so a `;` inside the text is data. Integer literals in a data block are passed through as written (`dw 0xFFFF` stays hex). `int` and `ljmp` go through the expression parser, so `0x10` is emitted as decimal `16`; NASM treats that as the same number. `ljmp` takes a selector literal and a label name, not `&label`.
+`data` blocks are raw NASM in the text stream: `db`, `dw`, `dd`, `dq`, `times N db|dw|dd|dq value`, `align N` (zero padding), and `label:`. A string becomes its bytes, so a `;` inside the text is data. Integer literals in a data block are passed through as written (`dw 0xFFFF` stays hex). An operand may add or subtract an integer and a label (`dq page + 3`); NASM computes the address. `int` and `ljmp` go through the expression parser, so `0x10` is emitted as decimal `16`; NASM treats that as the same number. `ljmp` takes a selector literal and a label name, not `&label`.
 
-`tests/boot/boot_sector.lap` is a complete sector: BIOS teletype of `Copihue`, then a far jump into 32-bit protected mode that writes `COPIHUE` to COM1. Its GDT is its own (selector `0x08` is 32-bit code, `0x10` is data). That is not the AtomicOS loader GDT, whose 64-bit code selector is `0x18`. The control registers in that sector are `asm("mov eax, cr0")`, because `read_cr0()` emits `mov rax, cr0`, which nasm rejects in 16-bit mode. The image stops in protected mode. Long mode needs page tables built in memory outside the sector; `bits 64 naked fn` is how that stub would be written. Uninitialized `let` globals are not placed in the sector: use `data`.
+`tests/boot/boot_sector.lap` is a complete sector: BIOS teletype of `Copihue`, then a far jump into 32-bit protected mode that writes `COPIHUE` to COM1. Its GDT is its own (selector `0x08` is 32-bit code, `0x10` is data). That is not the AtomicOS loader GDT, whose 64-bit code selector is `0x18`. That sector still writes CR0 and loads the GDT with `asm`. `tests/boot/realmode_builtins.lap` does the same transition with `lgdt(&gdtr)`, `write_cr0(read_cr0() | 1)`, `if carry`, and `outb` to COM1, and QEMU checks `COPIHUE` there too. The image stops in protected mode. Long mode needs page tables built in memory outside the sector; `bits 64 naked fn` is how that stub would be written. `tests/freestanding/bits32_regs.lap` assembles `write_cr4`, `wrmsr(rdmsr(...) | imm)`, and `cpuid` and is not booted. Uninitialized `let` globals are not placed in the sector: use `data`.
 
 ## Repository layout
 

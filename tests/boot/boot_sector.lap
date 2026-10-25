@@ -8,8 +8,8 @@
 //
 // The 16-bit entry prints `banner` with BIOS teletype (int 0x10),
 // enables protected mode, and far-jumps to `pm`. `pm` writes "COPIHUE"
-// to COM1 (0x3F8). Control-register builtins are 64-bit (`mov rax, cr0`);
-// this 16-bit code uses asm("mov eax, cr0") instead.
+// to COM1 (0x3F8). This sector still uses asm for lgdt and CR0.
+// tests/boot/realmode_builtins.lap is the sector that calls lgdt and write_cr0.
 
 data banner {
     db "Copihue", 13, 10, 0;

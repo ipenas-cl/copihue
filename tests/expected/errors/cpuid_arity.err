@@ -1,0 +1,4 @@
+tests/errors/cpuid_arity.lap:2:5: error: cpuid(leaf) takes 1 argument
+      2 |     cpuid();
+        |     ^
+1 error, compilation failed
