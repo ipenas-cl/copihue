@@ -1,0 +1,15 @@
+// A volatile global is read and written in memory on every use.
+let volatile ticks: i64 = 0;
+
+fn bump() -> i64 {
+    ticks = ticks + 1;
+    return ticks;
+}
+
+fn main() -> i32 {
+    print_int(bump()); println("");
+    print_int(bump()); println("");
+    ticks = 40;
+    print_int(ticks + 2); println("");
+    return 0;
+}

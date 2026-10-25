@@ -1,0 +1,82 @@
+// Smallest kernel surface Copihue can compile on its own: boot, serial,
+// a bump allocator, a packed IDT, an interrupt handler and a syscall entry.
+// Loaded at 0x10000 by a long-mode stub. No hosted runtime.
+
+packed struct IdtEntry {
+    off_lo: u16,
+    sel: u16,
+    ist: u8,
+    typ: u8,
+    off_mid: u16,
+    off_hi: u32,
+    zero: u32
+}
+
+packed struct DescPtr { limit: u16, base: u64 }
+
+let volatile ticks: i64 = 0;
+let hp: i64 = 0;
+let heap: [u8; 128];
+let idt: [IdtEntry; 32];
+let kstack: [u8; 256];
+
+fn alloc(n: i64) -> i64 {
+    if (hp + n > 128) { return 0; }
+    let p = heap + hp;
+    hp = hp + n;
+    return p;
+}
+
+fn serial_putc(c: i64) -> i64 {
+    let tries = 0;
+    while ((inb(0x3FD) & 0x20) == 0 && tries < 1000) { tries = tries + 1; }
+    outb(0x3F8, c);
+    return 0;
+}
+
+interrupt fn timer() {
+    ticks = ticks + 1;
+    outb(0x20, 0x20);
+}
+
+interrupt fn fault(err: i64) {
+    ticks = err;
+}
+
+syscall fn sys_write(nr: i64, ch: i64, a2: i64, a3: i64, a4: i64, a5: i64) -> i64 {
+    if (nr == 1) { serial_putc(ch); return 0; }
+    return nr;
+}
+
+fn set_gate(n: i64, handler: i64) -> i64 {
+    idt[n].off_lo = handler & 0xFFFF;
+    idt[n].sel = 0x08;
+    idt[n].ist = 0;
+    idt[n].typ = 0x8E;
+    idt[n].off_mid = (handler >> 16) & 0xFFFF;
+    idt[n].off_hi = handler >> 32;
+    idt[n].zero = 0;
+    return 0;
+}
+
+fn _start() -> i64 {
+    let bss: *u8 = bss_start();
+    let n: i64 = bss_end() - bss_start();
+    let i: i64 = 0;
+    while (i < n) {
+        bss[i] = 0;
+        i = i + 1;
+    }
+    set_syscall_stack(kstack + 256);
+    set_gate(32, &timer);
+    let idtr: DescPtr;
+    idtr.limit = 32 * 16 - 1;
+    idtr.base = idt;
+    lidt(&idtr);
+    let buf = alloc(8);
+    let p: *u8 = buf;
+    p[0] = 'A';
+    serial_putc(p[0]);
+    while (1) { hlt(); }
+    return 0;
+}

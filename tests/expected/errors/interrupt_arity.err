@@ -1,0 +1,4 @@
+tests/errors/interrupt_arity.lap:1:14: error: an interrupt function takes 0 arguments, or 1 (the CPU error code)
+      1 | interrupt fn boom(a: i64, b: i64) {
+        |              ^
+1 error, compilation failed

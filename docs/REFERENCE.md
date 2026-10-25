@@ -1,4 +1,4 @@
-# Copihue Language Reference (v0.18)
+# Copihue Language Reference (v0.20)
 
 This document describes the language that `copihue` accepts today. Anything not listed here is not supported.
 Planned features are in the README roadmap.
@@ -16,6 +16,7 @@ Planned features are in the README roadmap.
 - Comments: `// to end of line`.
 - Identifiers: `[A-Za-z_][A-Za-z0-9_]*`.
 - Keywords: `fn let mut if else while for return struct`. `break` and `continue` are statements.
+- `packed`, `interrupt`, `syscall`, and `volatile` are contextual words, not keywords. `packed struct`, `interrupt fn`, `syscall fn`, `let volatile`, and `*volatile` use them. A function or variable may still be named `syscall` or `volatile`.
 - Integer literals: decimal `42`, hex `0xFF`, binary `0b1010`, with optional `_` separators (`1_000_000`).
 - Character literals: `'A'`, and escapes `'\n' '\t' '\r' '\0' '\\' '\''`. Their value is an integer.
 - String literals: `"..."` with the escapes `\n \t \r \0 \\ \" \'`. A string literal's value is a pointer to NUL-terminated bytes in the data section.
@@ -31,6 +32,7 @@ Planned features are in the README roadmap.
 | `*T` | pointer, 8 bytes |
 | `[T; N]` | fixed array of N elements of T |
 | `struct Name` | fields laid out in order, 8 bytes per scalar field, nested structs embedded |
+| `packed struct Name` | fields laid out at their real size, with no padding |
 
 All arithmetic is done in 64-bit registers. The element type affects loads and stores through arrays and pointers:
 loads from unsigned types zero-extend, and stores truncate. Scalar locals and globals always occupy 8 bytes.
@@ -50,10 +52,59 @@ struct Rect { a: Point, b: Point }        // nested structs are embedded
 fn add(a: i64, b: i64) -> i64 { return a + b; }
 ```
 
-- Functions take up to 6 parameters. They are passed in `rdi, rsi, rdx, rcx, r8, r9` and the return value comes back in `rax`.
+- Functions take up to 16 parameters. The first six are passed in `rdi, rsi, rdx, rcx, r8, r9`. The seventh is at `[rbp+16]`, then one 8-byte slot each. The return value comes back in `rax`.
 - A struct parameter (`r: Rect`) is passed by value: the callee gets its own copy. A pointer parameter (`r: *Rect`) refers to the caller's struct; use `r->field`.
-- Using an undeclared variable is a compile error.
+- Using an undeclared variable, or assigning to one, is a compile error.
+- A direct call of an unknown function is a compile error, and the argument count must match the declaration. A call through a local or a global is indirect and is not checked (see Function pointers).
 - Indexing (`x[i]`) requires `x` to be an array or a pointer. Indexing a scalar is a compile error.
+
+### Packed structs
+
+```copihue
+packed struct IdtEntry {
+    off_lo: u16, sel: u16, ist: u8, typ: u8,
+    off_mid: u16, off_hi: u32, zero: u32
+}
+```
+
+Scalar fields use 1, 2, 4, or 8 bytes and the next field starts immediately after. A pointer field is 8 bytes. A nested struct is embedded at its own size. An x86-64 interrupt gate written this way is 16 bytes. Ordinary `struct` layout is unchanged (8 bytes per scalar field).
+
+A global array of structs can be indexed and its fields assigned (`idt[n].sel = 8`). Packed stores use the field's width, so a `u8` store does not overwrite the next field. Uninitialized global structs and arrays of structs are reserved with `resb` for their real size.
+
+### Volatile globals
+
+```copihue
+let volatile ticks: i64 = 0;
+```
+
+Every read and every write of a volatile global is a memory operand. The compiler does not fold it or lift it out of a loop, at `-O0` or `-O2`. Use this for a counter that an interrupt handler updates. `*volatile T` and `*mut volatile T` are accepted and mark the pointer variable; they do not change the instruction used to load the pointee. This is not a general memory model.
+
+### Function pointers
+
+There is no `fn(...)` type. `&name`, when `name` is not a local or a global, is the address of that function (an `i64`). Calling a local or a global is indirect (`call rbx`), so this works:
+
+```copihue
+let f = &add;
+f(20, 22);
+set_gate(32, &timer);
+```
+
+The address can be stored in an integer, a global, or an array element and called later. An indirect call does not check the argument count.
+
+### Interrupt and syscall functions
+
+```copihue
+interrupt fn timer() { ticks = ticks + 1; outb(0x20, 0x20); }
+interrupt fn fault(err: i64) { ticks = err; }
+
+syscall fn sys_write(nr: i64, a1: i64, a2: i64, a3: i64, a4: i64, a5: i64) -> i64 {
+    return a1;
+}
+```
+
+`interrupt fn` takes no parameters, or one parameter (the error code the CPU pushed). The prologue saves the general registers and the epilogue ends in `iretq`. `return` leaves through that epilogue. Zero or one parameter is required; a function cannot be both `interrupt` and `syscall`.
+
+`syscall fn` is a `syscall` entry. Arguments arrive in the Linux convention and are presented to the body as ordinary parameters: `nr` from `rax`, then `rdi`, `rsi`, `rdx`, `r10`, `r8`, `r9`. At most seven parameters. The prologue switches to the stack last stored by `set_syscall_stack(top)` (the top must be 16-byte aligned; the kernel sets this before any entry) and the epilogue returns with `sysret`. The value in `rax` is the return value. The compiler does not write `STAR`, `LSTAR`, or `EFER`; do that with `wrmsr`.
 
 ## Statements
 
@@ -102,7 +153,11 @@ Hosted built-ins are a compile error. These built-ins are available:
 |---|---|
 | `inb(port)`, `inw(port)`, `inl(port)` | `in al/ax/eax, dx` (zero-extended) |
 | `outb(port, v)`, `outw(port, v)`, `outl(port, v)` | `out dx, al/ax/eax` |
-| `cli()`, `sti()`, `hlt()`, `pause()` | the matching instruction |
+| `cli()`, `sti()`, `hlt()`, `pause()`, `swapgs()` | the matching instruction |
+| `lidt(ptr)`, `lgdt(ptr)`, `invlpg(ptr)` | `lidt/lgdt/invlpg [rax]` |
+| `rdmsr(msr)` | returns the 64-bit MSR value |
+| `wrmsr(msr, value)` | writes a 64-bit MSR |
+| `set_syscall_stack(top)` | stack pointer `syscall fn` switches to. Call it with a 16-byte-aligned top before any syscall entry |
 | `asm("instr; instr")` | inline NASM. `;` separates instructions; the string must be a literal |
 | `bss_start()`, `bss_end()` | address of the first / one past the last zero-initialized global (`--flat` only) |
 
@@ -115,6 +170,8 @@ Memory-mapped I/O uses typed pointers, for example `let vga: *u16 = 0xB8000; vga
 ## Known limitations
 
 - Integer arithmetic is 64-bit two's complement and wraps. Narrow types only affect memory accesses.
-- There is no type checking of assignments or call arguments yet, and no bounds checking on pointer indexing.
-- Struct assignment `a = b` is not supported. Copy fields individually or pass structs by value.
-- There are no modules or imports. A program is a single file.
+- Direct calls check the function name and the argument count. Assignments, argument types, and indirect calls are not type-checked. There is no bounds checking on pointer indexing.
+- Struct assignment `a = b` is not supported. Copy fields individually or pass structs by value. Ordinary structs are not packed; nested field access through an ordinary struct still addresses the first 8 bytes of a nested value.
+- Indexing a local array inserts a hosted bounds check, so freestanding programs should index globals or pointers.
+- There are no modules or imports, no relocatable objects, and no 16-bit or 32-bit codegen. A program is a single file. `interrupt fn` and `syscall fn` can be assembled; running `iretq` or `sysret` requires a CPU already in the right mode, which the hosted test suite does not do.
+- `syscall fn` does not program the syscall MSRs or a TSS. `volatile` covers global scalars only.

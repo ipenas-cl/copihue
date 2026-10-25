@@ -1,0 +1,14 @@
+// More than six parameters travel on the stack (System V: 7th at [rbp+16]).
+fn add2(a: i64, b: i64) -> i64 { return a + b; }
+
+fn sum(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, h: i64) -> i64 {
+    return a + b + c + d + e + f + g + h;
+}
+
+fn main() -> i32 {
+    print_int(sum(1, 2, 3, 4, 5, 6, 7, 8));
+    println("");
+    print_int(sum(1, 2, 3, 4, 5, 6, add2(3, 4), 8));
+    println("");
+    return 0;
+}

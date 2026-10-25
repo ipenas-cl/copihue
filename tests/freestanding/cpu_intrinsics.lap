@@ -1,0 +1,9 @@
+// Instructions a kernel needs for tables, MSRs and paging.
+fn program_cpu(idt: i64, gdt: i64, page: i64, msr: i64, val: i64) -> i64 {
+    lidt(idt);
+    lgdt(gdt);
+    invlpg(page);
+    wrmsr(msr, val);
+    swapgs();
+    return rdmsr(msr);
+}
