@@ -1,0 +1,4 @@
+tests/errors/struct_assign_type.lap:7:7: error: cannot assign struct 'Rect' to struct 'Point'
+      7 |     a = b;
+        |       ^
+1 error, compilation failed

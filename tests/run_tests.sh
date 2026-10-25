@@ -75,6 +75,17 @@ for src in tests/freestanding/*.lap; do
   # Keep only instructions (drop comments/blank lines) as the golden output.
   grep -vE '^\s*(;|$)' "$WORK/fs.asm" | grep -v '^; Generated' > "$WORK/fs.norm"
   check "$src" "tests/expected/freestanding/$name.asm.txt" "$WORK/fs.norm"
+  # // also-o2: the same instruction stream at -O2 (volatile must not move).
+  if grep -q '^// also-o2' "$src"; then
+    if ! ( cd "$WORK" && "$CC" -O2 --freestanding -o fs2.asm "$ROOT/$src" 2>err.txt ); then
+      fail=$((fail+1)); failed+=("$src -O2"); echo "FAIL $src -O2:"; cat "$WORK/err.txt"; continue
+    fi
+    if grep -qE '_start|^\s*syscall' "$WORK/fs2.asm" || ! nasm -f elf64 "$WORK/fs2.asm" -o "$WORK/fs2.o"; then
+      fail=$((fail+1)); failed+=("$src -O2"); echo "FAIL $src -O2: not freestanding or does not assemble"; continue
+    fi
+    grep -vE '^\s*(;|$)' "$WORK/fs2.asm" | grep -v '^; Generated' > "$WORK/fs2.norm"
+    check "$src -O2" "tests/expected/freestanding/$name.asm.txt" "$WORK/fs2.norm"
+  fi
 done
 
 # 4. Flat-binary tests: tests/flat/*.lap build with --flat 0x10000 into a raw

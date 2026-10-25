@@ -1,0 +1,61 @@
+// Volatile pointee and volatile fields. The countdown re-reads the register;
+// hoisting the load, or dropping the store, would not terminate.
+packed struct Dev {
+    volatile cmd: u32,
+    volatile dat: u32
+}
+
+let cell: [u8; 8];
+let gp: *volatile u32 = 0;
+
+fn main() -> i32 {
+    let buf: [u8; 16];
+    let i = 0;
+    while (i < 16) { buf[i] = 0; i = i + 1; }
+
+    let p: *volatile u32 = buf;
+    p[1] = 34;
+    p[0] = 17;
+    print_int(p[0]); println("");
+    print_int(p[1]); println("");
+
+    *p = 51;
+    print_int(*p); println("");
+    print_int(p[1]); println("");
+
+    let n = 0;
+    p[0] = 3;
+    while (p[0] != 0) {
+        n = n + p[0];
+        p[0] = p[0] - 1;
+    }
+    print_int(n); println("");
+
+    let d: Dev;
+    d.dat = 5;
+    d.cmd = 6;
+    print_int(d.cmd); println("");
+    print_int(d.dat); println("");
+
+    let q: *Dev = &d;
+    q->dat = 8;
+    q->cmd = 7;
+    print_int(d.cmd); println("");
+    print_int(d.dat); println("");
+
+    n = 0;
+    d.cmd = 3;
+    while (d.cmd != 0) {
+        n = n + d.cmd;
+        d.cmd = d.cmd - 1;
+    }
+    print_int(n); println("");
+    print_int(d.dat); println("");
+
+    gp = cell;
+    gp[1] = 22;
+    gp[0] = 11;
+    print_int(gp[0]); println("");
+    print_int(gp[1]); println("");
+    return 0;
+}
