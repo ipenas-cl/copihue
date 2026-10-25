@@ -1,0 +1,37 @@
+// Real mode: a bits 16 call passes the byte in ax, bx/bp are naked
+// registers, and jmp word [land] resumes at hue. QEMU checks COPIHUE.
+// cld/std run after the writes; they do not change the serial bytes.
+
+data land {
+    dw hue;
+}
+
+bits 16 naked fn putc(c: i64) {
+    bx = c;
+    outb(0x3F8, bx);
+}
+
+bits 16 naked fn _start() {
+    ax = 0;
+    ds = ax;
+    es = ax;
+    ss = ax;
+    bp = 0x7C00;
+    sp = bp;
+    cld();
+    bx = 67;
+    putc(bx);
+    putc(79);
+    putc(80);
+    putc(73);
+    jmp [land];
+}
+
+bits 16 naked fn hue() {
+    putc(72);
+    putc(85);
+    putc(69);
+    std();
+    cld();
+    while (1) { hlt(); }
+}

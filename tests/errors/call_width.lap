@@ -1,0 +1,7 @@
+bits 32 naked fn p() {
+    hlt();
+}
+
+bits 16 naked fn k() {
+    p();
+}

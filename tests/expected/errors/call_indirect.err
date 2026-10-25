@@ -1,0 +1,4 @@
+tests/errors/call_indirect.lap:3:5: error: an indirect call is not available in bits 16
+      3 |     f();
+        |     ^
+1 error, compilation failed

@@ -1,0 +1,4 @@
+tests/errors/call_arity.lap:6:5: error: a bits 32 call takes at most 4 register arguments
+      6 |     f(1, 2, 3, 4, 5);
+        |     ^
+1 error, compilation failed
