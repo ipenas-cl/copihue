@@ -16,7 +16,7 @@
 
 // ==== NAMING (single place to change when the language is renamed) ====
 #define LANG_NAME     "Copihue"
-#define LANG_VERSION  "0.28.2"
+#define LANG_VERSION  "0.29.1"
 #define COMPILER_BIN  "copihue"
 #define SRC_EXT       ".lap"   /* Lapageria rosea, the copihue */
 #define OLD_SRC_EXT   ".cph"   /* v0.18.x extension, still accepted with a warning */
@@ -34,6 +34,7 @@ static int g_loop_break[MAX_LOOP_DEPTH], g_loop_cont[MAX_LOOP_DEPTH], g_loop_dep
 int g_freestanding = 0;              // --freestanding: no OS, no syscalls, no _start
 const char* g_flat_org = NULL;       // --flat ADDR: freestanding flat binary loaded at ADDR, entry _start
 int g_boot = 0;                      // --boot: flat sector at 0x7C00, padded to 512, signature 0xAA55
+int g_reloc = 0;                     // -c: one ELF64 relocatable object (nasm -f elf64), no ld
 
 static void print_source_line(int line, int col) {
     if (!g_src_text || line <= 0) return;
@@ -185,7 +186,7 @@ typedef struct AstNode {
 #define AF_SYSCALL    8
 #define AF_NAKED      16
 #define AF_CARRY      32   // `if carry`: branch on CF, no accumulator load
-#define AF_EXTERN     64   // `extern name`: a qword defined outside this let
+#define AF_EXTERN     64   // `extern name` or `extern fn`: defined in another -c object
 #define AF_JMP_MEM   128   // `jmp [name]`: indirect through memory, naked only
 
 // Symbol table
@@ -1937,6 +1938,13 @@ static int peek_word(Parser* p, const char* s) {
     return t.t == T_IDENT && t.len == n && !memcmp(t.s, s, n);
 }
 
+static int peek_word_at(Parser* p, int ahead, const char* s) {
+    if (p->pos + ahead >= p->count) return 0;
+    Tok t = p->tokens[p->pos + ahead];
+    int n = (int)strlen(s);
+    return t.t == T_IDENT && t.len == n && !memcmp(t.s, s, n);
+}
+
 static int peek_tok_at(Parser* p, int ahead, TokType t) {
     return p->pos + ahead < p->count && p->tokens[p->pos + ahead].t == t;
 }
@@ -2529,6 +2537,30 @@ static void parse_extern(Parser* p, AstNode* prog) {
     add_top(prog, g);
 }
 
+// `extern fn add(a: i64) -> i64;` and `extern bits 32 naked fn putc(c: i64);`.
+// The declaration is a forward function so calls keep their arity check.
+// The body is supplied by another `-c` object. Without `-c` there is no
+// second object, so the declaration is an error.
+static void parse_extern_fn(Parser* p, AstNode* prog) {
+    Tok kw = advance_tok(p);
+    if (!g_reloc)
+        diag_error(kw.line, kw.col, "extern fn is only available with -c");
+    AstNode* fn;
+    if (peek_word(p, "bits") || peek_word(p, "naked"))
+        fn = parse_bits_naked_fn(p);
+    else if (check_tok(p, T_FN))
+        fn = parse_func(p);
+    else {
+        Tok bad = peek_tok(p);
+        diag_error(bad.line, bad.col, "extern fn needs a function declaration");
+        return;
+    }
+    if (fn && !fn->is_forward_decl)
+        diag_error(fn->line, fn->col, "extern fn has no body");
+    if (fn) fn->flags |= AF_EXTERN;
+    add_top(prog, fn);
+}
+
 static void parse_into(Parser* p, AstNode* prog);
 
 static char* path_dir(const char* path) {
@@ -2654,6 +2686,13 @@ static void parse_section(Parser* p, AstNode* prog) {
             advance_tok(p);
         has_addr = 1;
     }
+    // nasm -f elf64 warns and ignores vstart. -c must not emit it, and must
+    // not pretend the address was applied. --flat and --boot are nasm -f bin.
+    if (has_addr && g_reloc) {
+        diag_error(kw.line, kw.col,
+                   "section '@' is a load address for --flat and --boot; -c does not emit vstart");
+        has_addr = 0;
+    }
     NamedSection* sec = name && section_name_ok(name) ? section_note(name, has_addr, addr, kw.line, kw.col) : NULL;
     if (!check_tok(p, T_LBRACE)) {
         diag_error(peek_tok(p).line, peek_tok(p).col, "section body must be a block");
@@ -2704,6 +2743,9 @@ static void parse_top_item(Parser* p, AstNode* prog) {
         add_top(prog, fn);
     } else if (peek_word(p, "data") && peek_tok_at(p, 1, T_IDENT)) {
         add_top(prog, parse_data(p));
+    } else if (peek_word(p, "extern") &&
+               (peek_tok_at(p, 1, T_FN) || peek_word_at(p, 1, "bits") || peek_word_at(p, 1, "naked"))) {
+        parse_extern_fn(p, prog);
     } else if (peek_word(p, "extern") && peek_tok_at(p, 1, T_IDENT)) {
         parse_extern(p, prog);
     } else if (peek_word(p, "bits") || peek_word(p, "naked")) {
@@ -9916,13 +9958,126 @@ static void write_global_def(Codegen* cg, FILE* out, GlobalVar* gv) {
 // start labels belong there (before the bytes). Everything else gets its
 // start label at the first switch. align=1 keeps a named section packed;
 // the default .text/.data/.bss lines stay exactly as they were.
+// vstart is a nasm bin attribute. -c is nasm -f elf64, which warns and
+// ignores it, so a relocatable object never asks for a load address.
+static int section_bin_addr(const NamedSection* sec) {
+    return sec && sec->has_addr && !g_reloc;
+}
+
+static int func_is_defined(AstNode* ast, const char* name) {
+    if (!ast || !name) return 0;
+    for (int i = 0; i < ast->child_count; i++) {
+        AstNode* fn = ast->children[i];
+        if (fn->type == AST_FUNCTION && fn->name && !fn->is_forward_decl &&
+            !strcmp(fn->name, name))
+            return 1;
+    }
+    return 0;
+}
+
+static int ast_calls(AstNode* n, const char* name) {
+    if (!n || !name) return 0;
+    if (n->type == AST_CALL && n->name && !strcmp(n->name, name)) return 1;
+    for (int i = 0; i < n->child_count; i++)
+        if (ast_calls(n->children[i], name)) return 1;
+    return 0;
+}
+
+static void emit_once(Codegen* cg, const char* dir, const char* name,
+                      const char** seen, int* nseen) {
+    if (!name || !name[0]) return;
+    for (int i = 0; i < *nseen; i++)
+        if (!strcmp(seen[i], name)) return;
+    emit(cg, "%s %s\n", dir, name);
+    if (*nseen < 512) seen[(*nseen)++] = name;
+}
+
+// -c: definitions are NASM `global`, declarations are `extern`. One
+// invocation is still one object. The linker sees the symbols.
+static void emit_link_syms(Codegen* cg, AstNode* ast, GlobalSymbolTable* gst) {
+    if (!g_reloc || !ast) return;
+    const char* seen[512];
+    int nseen = 0;
+    int any = 0;
+    for (int i = 0; i < ast->child_count; i++) {
+        AstNode* fn = ast->children[i];
+        if (fn->type != AST_FUNCTION || !fn->name || !(fn->flags & AF_EXTERN)) continue;
+        if (func_is_defined(ast, fn->name)) continue;
+        emit_once(cg, "extern", fn->name, seen, &nseen);
+        any = 1;
+    }
+    if (gst) {
+        for (int i = 0; i < gst->count; i++) {
+            GlobalVar* gv = &gst->vars[i];
+            if (!gv->is_extern || !gv->name) continue;
+            if (!strcmp(gv->name, "__syscall_rsp") || !strcmp(gv->name, "__syscall_user_rsp"))
+                continue;
+            int defined = 0;
+            for (int j = 0; j < ast->child_count; j++) {
+                AstNode* d = ast->children[j];
+                if (d->type == AST_DATA && d->name && !strcmp(d->name, gv->name)) defined = 1;
+            }
+            if (defined) continue;
+            emit_once(cg, "extern", gv->name, seen, &nseen);
+            any = 1;
+        }
+    }
+    // Hosted helpers are defined in the object that has fn main. A library
+    // object that calls them names the symbol; an unused extern is dropped
+    // by nasm and does not become an undefined link requirement.
+    if (!g_freestanding && !func_is_defined(ast, "main")) {
+        if (ast_calls(ast, "print_int")) {
+            emit_once(cg, "extern", "__print_int", seen, &nseen);
+            any = 1;
+        }
+        if (ast_calls(ast, "strcmp")) {
+            emit_once(cg, "extern", "__strcmp", seen, &nseen);
+            any = 1;
+        }
+        if (ast_calls(ast, "strcpy")) {
+            emit_once(cg, "extern", "__strcpy", seen, &nseen);
+            any = 1;
+        }
+        if (ast_calls(ast, "strlen") || ast_calls(ast, "print") || ast_calls(ast, "println")) {
+            emit_once(cg, "extern", "__strlen", seen, &nseen);
+            any = 1;
+        }
+    }
+    for (int i = 0; i < ast->child_count; i++) {
+        AstNode* item = ast->children[i];
+        if (item->type == AST_FUNCTION && item->name && !item->is_forward_decl) {
+            emit_once(cg, "global", item->name, seen, &nseen);
+            any = 1;
+        } else if (item->type == AST_DATA && item->name) {
+            emit_once(cg, "global", item->name, seen, &nseen);
+            any = 1;
+        }
+    }
+    if (gst) {
+        for (int i = 0; i < gst->count; i++) {
+            GlobalVar* gv = &gst->vars[i];
+            if (!gv->name || gv->is_extern) continue;
+            emit_once(cg, "global", gv->name, seen, &nseen);
+            any = 1;
+        }
+    }
+    if (!g_freestanding && func_is_defined(ast, "main")) {
+        emit_once(cg, "global", "__print_int", seen, &nseen);
+        emit_once(cg, "global", "__strcmp", seen, &nseen);
+        emit_once(cg, "global", "__strcpy", seen, &nseen);
+        emit_once(cg, "global", "__strlen", seen, &nseen);
+        any = 1;
+    }
+    if (any) emit(cg, "\n");
+}
+
 static void emit_section_switch(Codegen* cg, const char* name) {
     const char* want = (name && name[0]) ? name : ".text";
     if (g_emit_section && !strcmp(g_emit_section, want)) return;
     NamedSection* sec = section_find(want);
     if (!strcmp(want, ".bss")) g_bss_tail = 1;
     int standard = !strcmp(want, ".text") || !strcmp(want, ".data") || !strcmp(want, ".bss");
-    if (sec && sec->has_addr)
+    if (section_bin_addr(sec))
         emit(cg, "\nsection %s vstart=0x%llx align=1\n", want, sec->addr);
     else if (!standard)
         emit(cg, "\nsection %s align=1\n", want);
@@ -10064,13 +10219,18 @@ void codegen(AstNode* ast, const char* file, StringTable* strtab, TypeTable* typ
     }
 
     if (g_freestanding) note_section_calls(ast);
+    emit_link_syms(&cg, ast, &global_symtab);
     NamedSection* text_sec = section_find(".text");
+    // -c emits _start only in the hosted object that defines fn main.
+    // A library object has no entry and no copy of the hosted helpers.
+    int emit_entry = !g_freestanding && (!g_reloc || func_is_defined(ast, "main"));
     if (g_freestanding) {
         // No entry point and no runtime: the embedding code (e.g. a kernel's
         // asm entry) calls our functions with the System V calling convention.
         // `@` on ".text" is NASM vstart (the labels' load address). It is not
         // `start=`: that would insert a hole and, at 0x100000, a megabyte of zeros.
-        if (text_sec && text_sec->has_addr)
+        // -c does not emit vstart: nasm -f elf64 would ignore it.
+        if (section_bin_addr(text_sec))
             emit(&cg, "\nsection .text vstart=0x%llx align=1\n", text_sec->addr);
         else
             emit(&cg, "\nsection .text\n");
@@ -10079,11 +10239,13 @@ void codegen(AstNode* ast, const char* file, StringTable* strtab, TypeTable* typ
             text_sec->started = 1;
         }
         emit(&cg, "\n");
-    } else {
+    } else if (emit_entry) {
         emit(&cg, "\nsection .text\n    global _start\n\n");
         emit(&cg, "_start:\n    call main\n    mov rdi, rax\n");
         emit(&cg, "    mov rax, 60\n    syscall\n");
         gen_helpers(&cg);
+    } else {
+        emit(&cg, "\nsection .text\n");
     }
     g_emit_section = ".text";
 
@@ -10163,7 +10325,7 @@ void codegen(AstNode* ast, const char* file, StringTable* strtab, TypeTable* typ
     }
     if (g_flat_org) fprintf(cg.out, "bits 64\norg %s\n\n", g_flat_org);
     NamedSection* data_sec = section_find(".data");
-    if (data_sec && data_sec->has_addr)
+    if (section_bin_addr(data_sec))
         fprintf(cg.out, "section .data vstart=0x%llx align=1\n", data_sec->addr);
     else
         fprintf(cg.out, "section .data\n");
@@ -10203,14 +10365,14 @@ void codegen(AstNode* ast, const char* file, StringTable* strtab, TypeTable* typ
     int has_bss = 0;
     NamedSection* bss_sec = section_find(".bss");
     if (g_flat_org) {
-        if (bss_sec && bss_sec->has_addr)
+        if (section_bin_addr(bss_sec))
             fprintf(cg.out, "\nsection .bss vstart=0x%llx align=1\n__bss_start:\n", bss_sec->addr);
         else
             fprintf(cg.out, "\nsection .bss\n__bss_start:\n");
         has_bss = 1;
         if (bss_sec) bss_sec->started = 1;
     } else if (bss_sec && bss_sec->need_start && !bss_sec->started) {
-        if (bss_sec->has_addr)
+        if (section_bin_addr(bss_sec))
             fprintf(cg.out, "\nsection .bss vstart=0x%llx align=1\n", bss_sec->addr);
         else
             fprintf(cg.out, "\nsection .bss\n");
@@ -10230,14 +10392,14 @@ void codegen(AstNode* ast, const char* file, StringTable* strtab, TypeTable* typ
     }
 
     if (g_flat_org && !g_bss_tail) {
-        if (bss_sec && bss_sec->has_addr)
+        if (section_bin_addr(bss_sec))
             fprintf(cg.out, "\nsection .bss vstart=0x%llx align=1\n%s_end:\n", bss_sec->addr, bss_sec->sym);
         else
             fprintf(cg.out, "\nsection .bss\n__bss_end:\n");
         if (bss_sec) bss_sec->ended = 1;
     } else if (!g_bss_tail && bss_sec && bss_sec->need_end && !bss_sec->ended) {
         if (!has_bss) {
-            if (bss_sec->has_addr)
+            if (section_bin_addr(bss_sec))
                 fprintf(cg.out, "\nsection .bss vstart=0x%llx align=1\n", bss_sec->addr);
             else
                 fprintf(cg.out, "\nsection .bss\n");
@@ -10259,8 +10421,11 @@ static void usage(FILE* o) {
         "Options:\n"
         "  -O0 | -O1 | -O2     optimization level (default -O0)\n"
         "  -o <file>           output executable (default ./a.out),\n"
-        "                      or assembly file with -S / --freestanding\n"
+        "                      assembly file with -S / --freestanding,\n"
+        "                      or relocatable object with -c (default output.o)\n"
         "  -S                  only generate NASM assembly, do not assemble or link\n"
+        "  -c                  one ELF64 relocatable object (nasm -f elf64), no ld;\n"
+        "                      global definitions, extern declarations, no vstart\n"
         "  --freestanding      no OS: no _start, no syscalls, no hosted builtins;\n"
         "                      emits assembly to be included by your own entry code (implies -S)\n"
         "  --flat <addr>       freestanding flat binary (nasm -f bin) loaded at <addr>;\n"
@@ -10282,15 +10447,16 @@ int main(int argc, char** argv) {
     const char* inputs[MAX_LOADED];
     int ninputs = 0;
     const char* out = NULL;
-    int only_asm = 0, verbose = 0;
+    int only_asm = 0, want_asm = 0, verbose = 0;
 
     for (int i = 1; i < argc; i++) {
         const char* a = argv[i];
         if (!strcmp(a, "-O0")) optimization_level = 0;
         else if (!strcmp(a, "-O1")) optimization_level = 1;
         else if (!strcmp(a, "-O2")) optimization_level = 2;
-        else if (!strcmp(a, "-S")) only_asm = 1;
-        else if (!strcmp(a, "--freestanding")) { g_freestanding = 1; only_asm = 1; }
+        else if (!strcmp(a, "-S")) want_asm = 1;
+        else if (!strcmp(a, "-c")) g_reloc = 1;
+        else if (!strcmp(a, "--freestanding")) g_freestanding = 1;
         else if (!strcmp(a, "--flat")) {
             if (i + 1 >= argc) { fprintf(stderr, COMPILER_BIN ": error: --flat needs a load address\n"); return 2; }
             if (g_boot) { fprintf(stderr, COMPILER_BIN ": error: --flat and --boot cannot be combined\n"); return 2; }
@@ -10313,6 +10479,13 @@ int main(int argc, char** argv) {
             return 2;
         } else inputs[ninputs++] = a;
     }
+    if (g_reloc && g_flat_org) {
+        fprintf(stderr, COMPILER_BIN ": error: -c cannot be combined with --flat or --boot\n");
+        return 2;
+    }
+    // --freestanding alone still stops at assembly. -c assembles an object
+    // unless the user also passed -S. --flat and --boot assemble a raw image.
+    only_asm = want_asm || (g_freestanding && !g_flat_org && !g_reloc);
     if (ninputs == 0) { usage(stderr); return 2; }
     for (int i = 0; i < ninputs; i++) {
         const char* input = inputs[i];
@@ -10324,7 +10497,7 @@ int main(int argc, char** argv) {
     }
 
     const char* asm_out = only_asm ? (out ? out : "output.asm") : "output.asm";
-    const char* exe_out = out ? out : "a.out";
+    const char* exe_out = out ? out : (g_reloc ? "output.o" : "a.out");
 
     if (verbose) {
         fprintf(stderr, LANG_NAME " " LANG_VERSION ": compiling %s (-O%d%s)\n",
@@ -10369,6 +10542,15 @@ int main(int argc, char** argv) {
         }
         remove(asm_out);
         if (verbose) fprintf(stderr, "  wrote %s (flat binary, org %s)\n", exe_out, g_flat_org);
+        return 0;
+    }
+    if (g_reloc) {
+        if (run_cmd("nasm -f elf64 '%s' -o '%s'", asm_out, exe_out) != 0) {
+            fprintf(stderr, COMPILER_BIN ": error: assembler (nasm) failed; this is a compiler bug, please report it\n");
+            return 1;
+        }
+        remove(asm_out);
+        if (verbose) fprintf(stderr, "  wrote %s (elf64 relocatable)\n", exe_out);
         return 0;
     }
 

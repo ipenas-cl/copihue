@@ -1,0 +1,7 @@
+// bits 32 so a protected-mode entry at 0x8000 can call it. The byte is
+// copied out of eax before outb, which evaluates the port into eax.
+bits 32 naked fn putc(c: i64) -> i64 {
+    ecx = c;
+    outb(0x3F8, ecx);
+    return 0;
+}
