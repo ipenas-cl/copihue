@@ -1,0 +1,223 @@
+// Hosted -O2: lea for *3/*5/*9, even-n dot product unrolled by two, and
+// adds-before-masks. -O0 prints the same lines. A product that wraps is
+// printed in pieces under 1000000 so the golden is not masked.
+
+fn piece(v: i64, k: i64) -> i64 {
+    let x = v;
+    let neg = 0;
+    if (x < 0) {
+        neg = 1;
+        x = 0 - x;
+    }
+    let a = x % 1000000;
+    let y = x / 1000000;
+    let b = y % 1000000;
+    let c = y / 1000000;
+    if (k == 0) {
+        return neg;
+    }
+    if (k == 1) {
+        return c;
+    }
+    if (k == 2) {
+        return b;
+    }
+    return a;
+}
+
+fn mul3(n: i64) -> i64 {
+    return n * 3;
+}
+
+fn mul5(n: i64) -> i64 {
+    return n * 5;
+}
+
+fn mul6(n: i64) -> i64 {
+    return n * 6;
+}
+
+fn mul4(n: i64) -> i64 {
+    return n * 4;
+}
+
+fn mul9(n: i64) -> i64 {
+    return n * 9;
+}
+
+fn arith_small() -> i64 {
+    let n = 5;
+    let a = 1;
+    let b = 2;
+    let c = 3;
+    let i = 0;
+    while (i < n) {
+        a = (a + b) & 2147483647;
+        b = (b + c) & 2147483647;
+        c = (c + i) & 2147483647;
+        i = i + 1;
+    }
+    return a * 1000000 + b * 1000 + c;
+}
+
+fn mask_indep() -> i64 {
+    let a = 20;
+    let b = 3;
+    let c = 9;
+    let d = 4;
+    a = (a + b) & 15;
+    c = (c + d) & 7;
+    return a * 10 + c;
+}
+
+fn mask_self() -> i64 {
+    let a = 6;
+    let b = 5;
+    a = (a + a) & 15;
+    b = (b + b) & 7;
+    return a * 10 + b;
+}
+
+fn mask_dep() -> i64 {
+    let a = 5;
+    let b = 9;
+    a = (a + b) & 31;
+    b = (b + a) & 31;
+    return a * 100 + b;
+}
+
+fn scrub(n: i64) -> i64 {
+    let i = 0;
+    let v = n;
+    while (i < 4) {
+        v = (v * 3 + (i & 7) + 1) & 1023;
+        i = i + 1;
+    }
+    return v;
+}
+
+fn dot4() -> i64 {
+    let n = 4;
+    let a: [i64; 16];
+    let b: [i64; 16];
+    let i = 0;
+    let j = 0;
+    let k = 0;
+    let s = 0;
+    let sum = 0;
+    while (i < n) {
+        j = 0;
+        while (j < n) {
+            a[i * n + j] = i + j + 1;
+            b[i * n + j] = j + 1;
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    i = 0;
+    while (i < n) {
+        j = 0;
+        while (j < n) {
+            s = 0;
+            k = 0;
+            while (k < n) {
+                s = s + a[i * n + k] * b[k * n + j];
+                k = k + 1;
+            }
+            sum = sum + s;
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    return sum;
+}
+
+fn dot3() -> i64 {
+    let n = 3;
+    let a: [i64; 16];
+    let b: [i64; 16];
+    let i = 0;
+    let j = 0;
+    let k = 0;
+    let s = 0;
+    let sum = 0;
+    while (i < n) {
+        j = 0;
+        while (j < n) {
+            a[i * n + j] = i + j + 1;
+            b[i * n + j] = j + 1;
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    i = 0;
+    while (i < n) {
+        j = 0;
+        while (j < n) {
+            s = 0;
+            k = 0;
+            while (k < n) {
+                s = s + a[i * n + k] * b[k * n + j];
+                k = k + 1;
+            }
+            sum = sum + s;
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    return sum;
+}
+
+fn main() -> i32 {
+    print_int(mul3(4));
+    println("");
+    print_int(mul3(0 - 4));
+    println("");
+    print_int(mul5(4));
+    println("");
+    print_int(mul5(0 - 3));
+    println("");
+    print_int(mul9(4));
+    println("");
+    print_int(mul9(0 - 2));
+    println("");
+    print_int(mul6(7));
+    println("");
+    print_int(mul6(0 - 7));
+    println("");
+    print_int(mul4(9));
+    println("");
+    print_int(mul4(0 - 9));
+    println("");
+    print_int(piece(mul3(9223372036854775807), 0));
+    println("");
+    print_int(piece(mul3(9223372036854775807), 1));
+    println("");
+    print_int(piece(mul3(9223372036854775807), 2));
+    println("");
+    print_int(piece(mul3(9223372036854775807), 3));
+    println("");
+    print_int(piece(mul5(0 - 2000000000000000000), 0));
+    println("");
+    print_int(piece(mul5(0 - 2000000000000000000), 1));
+    println("");
+    print_int(piece(mul5(0 - 2000000000000000000), 2));
+    println("");
+    print_int(piece(mul5(0 - 2000000000000000000), 3));
+    println("");
+    print_int(arith_small());
+    println("");
+    print_int(mask_indep());
+    println("");
+    print_int(mask_self());
+    println("");
+    print_int(mask_dep());
+    println("");
+    print_int(scrub(8));
+    println("");
+    print_int(dot4());
+    println("");
+    print_int(dot3());
+    println("");
+    return 0;
+}

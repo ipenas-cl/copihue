@@ -2,6 +2,17 @@
 
 Todos los cambios importantes del proyecto.
 
+## [0.27.4] - 2026-10-25
+
+### Added
+- Hosted 64-bit `-O2` turns a register times 3, 5, or 9 into `lea`. The product wraps mod 2^64, the same as `imul`. Powers of two stay shifts. `*6` stays `imul`.
+- A straight-line run of at least two `x = (x + y) & imm`, with `imm` in `0..2147483647` and with neither `x` nor `y` assigned earlier in the run, emits every `add` and then every `and`. One statement, a narrow local, a spilled local, or a source that is an earlier destination in the run stays in the original order.
+- The running-pointer inner product takes two steps and one taken branch when `n` is even, and leaves `k == n`. An odd `n` keeps one step per branch. A failed `i`/`j` guard still runs the original loop.
+- `tests/lang/o2_hot.lap` checks those three against `-O0`, including a wrapping product, a dependent mask, and both even and odd `n`.
+
+### Changed
+- Language version is 0.27.4. `-O0`, `--freestanding`, `--flat`, and `--boot` generate the same code as 0.27.3. `bits 16` and `bits 32` do not take these paths. The `-O2` assembly of `fib`, `sieve`, `chain`, `fold`, and `sort` matches 0.27.3 except the version line. `fib` is not rewritten: gcc `-O2` expands the recursion, and the Copihue prologue for `n >= 2` is already 16 instructions. `sort` stays above C; the inner shift still checks the upper bound, and that check was not removed.
+
 ## [0.27.3] - 2026-10-25
 
 ### Added
