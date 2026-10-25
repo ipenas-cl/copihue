@@ -2,6 +2,17 @@
 
 Todos los cambios importantes del proyecto.
 
+## [0.29.3] - 2026-10-25
+
+### Added
+- Five hosted benchmarks in `bench/`: `fill` (add `(i + r)` into each byte, mask with 255, then sum the buffer), `copy` (copy bytes, sum the destination, then add 1 to each source byte), `hash` (FNV-1, offset basis `2166136261` masked to 31 bits, prime `16777619`, mask `2147483647` after every byte), `parse` (ASCII digits and commas, nine digits then a comma), and `list` (an array of `{val, next}` nodes, `next` an index, sentinel `-1`). The `.lap`, `.c`, `.rs`, and `.ml` sources share the algorithm, the limits, and the one-integer output. Copihue and C keep the byte buffers in `.bss`, one byte per element. A local `u8[n]` would reserve `n * 8` stack bytes. Rust uses a stack array. OCaml uses `Bytes` on the heap. OCaml `list` stores the pair in a flat int array (`2 * i`, `2 * i + 1`) because a record is a heap block, not 16 contiguous bytes. The index chain is the same. There is no `malloc`.
+
+### Changed
+- Language version is 0.29.3, on top of 0.29.2. This round does not change the code generator. Hosted 64-bit `-O2` of the thirteen bench programs matches the measured binary, which printed 0.29.2, except the version line. `bits 16` and `bits 32` are the 0.29.2 `ebx` fix.
+- gcc `-O2` of `matmul.c` keeps the `i, j, k` order and vectorizes the inner product with `pmuludq` and `paddq`. The result buffer is cleared with `memset`. SSE is not emitted. The even unroll of the inner product and the bottom-tested `k` loop stay out; both were slower when measured.
+- gcc `-O2` of `fib.c` is 416 lines. It splits the recurrence into even and odd steps (`sub rsp, 200`, one `call fib`). That is not a deletion of redundant moves in the direct prologue. The rewrite is not emitted. For `n >= 2` the prologue stays 16 instructions: `mov r12, rdi` holds `n` across the two calls, and `sub rsp, 8` is the alignment adjustment.
+- On this machine, the 22:33:23–22:34:10 UTC window (the binary printed 0.29.2; hosted `-O2` matches 0.29.3 except the version line) overlaps the 21:45 window on all eight previous programs. The new rows, with ranges that do not overlap: `copy` is 47.8 ms (47.5–49.0) against C 9.6 (9.0–10.0), 4.97×, because gcc emits `call memcpy` and Copihue copies one byte per iteration. `fill` is 32.4 ms (32.1–32.7) against C 11.9 (11.2–12.9), 2.72×; gcc vectorizes with `movdqa` and this loop is not a constant `rep stosb`. `parse` is 22.3 ms (21.9–22.5) against C 13.8 (13.2–14.2), 1.62×; gcc turns `* 10` into `lea`, Copihue emits `imul`. `list` is above all three: 53.4 ms (53.0–54.2) against C 33.3 (33.0–33.7), Rust 41.8 (41.4–42.1), and OCaml 30.9 (30.4–31.2). Each hop is two `imul` by 16; gcc is `sal rax, 4` and two loads. `hash` overlaps C (44.6–45.4 against 45.1–45.7); the median ratio is 1.00. It is above Rust (38.7–39.0) and below OCaml (46.0–47.0). The printed decimal of these five is not in any `.s`. `chain` stays under the three in this row and these runs; the binary is the one from 0.25.1. `sort` overlaps Rust (52.3–53.0 against 52.7–53.5); the median ratio is 0.99.
+
 ## [0.29.2] - 2026-10-25
 
 ### Fixed

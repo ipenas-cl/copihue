@@ -1,0 +1,31 @@
+// BENCH: hash n=131072 reps=256
+// FNV-1 sobre bytes. La base 2166136261 enmascarada a 31 bits es 18652613.
+// El primo es 16777619. La máscara 2147483647 después de cada byte deja el
+// valor dentro de un int de OCaml (63 bits). El total suma cada vuelta.
+let buf: [u8; 131072];
+
+fn main() -> i32 {
+    let n = 131072;
+    let reps = 256;
+    let i = 0;
+    let r = 0;
+    let h = 0;
+    let total = 0;
+    while (i < n) {
+        buf[i] = i & 255;
+        i = i + 1;
+    }
+    while (r < reps) {
+        h = 18652613;
+        i = 0;
+        while (i < n) {
+            h = (h * 16777619 + buf[i]) & 2147483647;
+            i = i + 1;
+        }
+        total = total + h;
+        r = r + 1;
+    }
+    print_int(total);
+    println("");
+    return 0;
+}
