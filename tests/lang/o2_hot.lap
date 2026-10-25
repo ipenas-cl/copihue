@@ -1,6 +1,7 @@
-// Hosted -O2: lea for *3/*5/*9, even-n dot product unrolled by two, and
-// adds-before-masks. -O0 prints the same lines. A product that wraps is
-// printed in pieces under 1000000 so the golden is not masked.
+// Hosted -O2: lea for *3/*5/*9, and adds-before-masks. The dot product is
+// the running-pointer loop for even and odd n, not unrolled. -O0 prints
+// the same lines. A product that wraps is printed in pieces under 1000000
+// so the golden is not masked.
 
 fn piece(v: i64, k: i64) -> i64 {
     let x = v;
