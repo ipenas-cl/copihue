@@ -7120,11 +7120,7 @@ static void emit_cond_succeed(Codegen* cg, AstNode* n, int ok_lab) {
     if (n->type == AST_LOGICAL && n->op && !strcmp(n->op, "&&")) {
         int fail = new_label(cg);
         emit_cond_fail(cg, n->children[0], fail);
-        const char* nn = nonneg_reg_of(cg, n->children[0]);
-        const char* saved = g_nonneg_reg;
-        if (nn) g_nonneg_reg = nn;
         emit_cond_succeed(cg, n->children[1], ok_lab);
-        g_nonneg_reg = saved;
         emit(cg, ".L%d:\n", fail);
         return;
     }
@@ -7943,15 +7939,12 @@ void gen_stmt(Codegen* cg, AstNode* n) {
         int start_lab = new_label(cg);
         int end_lab = new_label(cg);
         int cont_lab = new_label(cg);
-        // One check up front, then the body, then a taken branch back.
-        // The failing test falls out, so the hot path has no unconditional jmp.
-        int invert = o2_hosted() && can_branch_cond(cg, n->children[0]);
-        if (!invert) emit(cg, ".L%d:\n", start_lab);
+        emit(cg, ".L%d:\n", start_lab);
         int branched = 0;
         if (legacy_bits()) {
             gen_expr(cg, n->children[0]);
             emit(cg, "    test eax, eax\n    jz .L%d\n", end_lab);
-        } else if (invert) {
+        } else if (o2_hosted() && can_branch_cond(cg, n->children[0])) {
             g_fwd_ok = 0;
             emit_cond_fail(cg, n->children[0], end_lab);
             g_nonneg_reg = NULL;
@@ -7960,7 +7953,6 @@ void gen_stmt(Codegen* cg, AstNode* n) {
             gen_expr(cg, n->children[0]);
             emit(cg, "    test rax, rax\n    jz .L%d\n", end_lab);
         }
-        if (invert) emit(cg, ".L%d:\n", start_lab);
         if (g_loop_depth >= MAX_LOOP_DEPTH) { diag_error(n->line, n->col, "loops nested too deeply"); return; }
         g_loop_break[g_loop_depth] = end_lab;
         g_loop_cont[g_loop_depth] = cont_lab;
@@ -7979,17 +7971,9 @@ void gen_stmt(Codegen* cg, AstNode* n) {
         g_proven_lim = save_lim;
         g_loop_depth--;
         emit(cg, ".L%d:\n", cont_lab);
-        if (n->child_count > 2)  // for-loop increment, its own block
+        if (n->child_count > 2)
             gen_stmt(cg, n->children[2]);
-        if (invert) {
-            g_fwd_ok = 0;
-            g_nonneg_reg = NULL;
-            emit_cond_succeed(cg, n->children[0], start_lab);
-            g_nonneg_reg = NULL;
-            emit(cg, ".L%d:\n", end_lab);
-        } else {
-            emit(cg, "    jmp .L%d\n.L%d:\n", start_lab, end_lab);
-        }
+        emit(cg, "    jmp .L%d\n.L%d:\n", start_lab, end_lab);
     } else if (n->type == AST_BREAK || n->type == AST_CONTINUE) {
         if (g_loop_depth == 0) {
             diag_error(n->line, n->col, "'%s' outside of a loop", n->type == AST_BREAK ? "break" : "continue");
