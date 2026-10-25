@@ -1,0 +1,60 @@
+// First sector of tests/usermode. BIOS enters at 0x7C00 in real mode.
+// This sector's GDT is only for the jump to the kernel: 0x08 is 32-bit
+// code and 0x10 is data, both base 0. The kernel at 0x8000 installs the
+// long-mode GDT. Sectors 2 through 17 (16 sectors, 8192 bytes) are the
+// flat kernel. They stay on cylinder 0 of a 1.44MB floppy.
+data drive { db 0; }
+data tries { db 3; }
+
+data gdt {
+    dq 0;
+    dw 0xFFFF;
+    dw 0;
+    db 0;
+    db 0x9A;
+    db 0xCF;
+    db 0;
+    dw 0xFFFF;
+    dw 0;
+    db 0;
+    db 0x92;
+    db 0xCF;
+    db 0;
+}
+
+data gdtr {
+    dw 23;
+    dd gdt;
+}
+
+bits 16 naked fn _start() {
+    cli();
+    asm("xor ax, ax");
+    asm("mov ds, ax");
+    asm("mov es, ax");
+    asm("mov ss, ax");
+    asm("mov sp, 0x7C00");
+    asm("mov [drive], dl");
+    asm(".read:");
+    asm("mov ah, 0x02");
+    asm("mov al, 16");
+    asm("mov ch, 0");
+    asm("mov cl, 2");
+    asm("mov dh, 0");
+    asm("mov bx, 0x8000");
+    asm("mov dl, [drive]");
+    int(0x13);
+    asm("jnc .loaded");
+    asm("dec byte [tries]");
+    asm("jnz .read");
+    asm("mov dx, 0x3F8");
+    asm("mov al, 88");
+    asm("out dx, al");
+    hlt();
+    asm(".loaded:");
+    asm("lgdt [gdtr]");
+    asm("mov eax, cr0");
+    asm("or al, 1");
+    asm("mov cr0, eax");
+    asm("jmp 0x08:0x8000");
+}

@@ -15,6 +15,50 @@ Todos los cambios importantes del proyecto.
 ### Changed
 - Language version is 0.27.3.
 
+## [0.27.2] - 2026-10-25
+
+### Added
+- Hosted 64-bit `-O2` stores a constant with an immediate `mov` when the value fits the element, including a constant index (`mov byte [mem], 0`).
+- `i = 0; while (i < lim) { a[i] = C; i = i + 1; }` on a local `u8` or `i8` array becomes `rep stosb` from element 0 and sets `i = lim`, when `lim` is inside the length. If `lim` is not a proved constant, a runtime check keeps the original loop. A negative limit or one past the array is left alone.
+- `s = S; i = I; while (i < N) { s = s + A*i + B; i = i + 1; }` is replaced by the closed sum only when `N`, `A`, `B`, `S`, and `I` are constants, every product `A*i` and every partial sum fits in `i64`, and the terms are all non-negative or all non-positive. A sum that can wrap keeps the loop. `tests/lang/o2_reduce.lap` checks that against `-O0`, including a negative trip count, mixed signs, `i * i`, overflow, and division by a negative, by zero, and by a power of two.
+
+### Changed
+- Language version is 0.27.2. `-O0`, `--freestanding`, `--flat`, and `--boot` generate the same code as 0.27.1. `bits 16` and `bits 32` do not take these paths. The `make bench` samples were taken on a compiler that printed 0.26.3, before 0.27.0 and 0.27.1 landed on main. On this machine the medians are `fold` 142.1 ms (141.8–142.7) to 1.6 ms (1.1–2.5), overlapping C (1.3–1.9) and Rust (1.3–2.1), and `sieve` 82.3 ms (82.1–82.5) to 69.6 ms (69.4–70.0). Against C (70.0–70.4) the ranges touch at 70.0, so `sieve` is not below C, and it stays above Rust (42.8–43.6). `arith`, `fib`, `matmul`, `chain`, `array`, and `sort` are the same binary as 0.26.2. `fib` is still 3.00× C. Inverting `while` was measured (2026-10-25 16:52:01–16:52:37 UTC) and not kept: `arith` went from 67.6 ms (66.9–71.6) to 73.4 ms (70.7–74.6). There is no inlining, no unrolling, and no rewrite of `fib`.
+
+## [0.27.1] - 2026-10-25
+
+### Added
+- `label name;` is a code address inside a function. `label_addr(name)` is `lea rax, [name]` for that label, a function, or a data label. An unknown name is `unknown label 'nope'`. In `bits 16` or `bits 32` it is `label_addr() is a 64-bit address`. The address does not change `rsp`.
+- `save_context(&ctx)` stores eight qwords: `rip`, `rsp`, `rbp`, `rbx`, `r12`, `r13`, `r14`, `r15`. `rip` is the next instruction. It returns 0. `restore_context(&ctx)` loads them and jumps there, so `save_context` then returns 1. The argument is a name or `&name`. Anything else is `save_context() takes the address of a context`. In `bits 16` or `bits 32` it is `save_context() is a 64-bit context switch`. The compiler emits the `rsp` and `rbp` moves, after the prologue, so a framed function's epilogue still matches. Callee-saved registers are restored so a value kept in `r12`–`r15` survives the other task. The address is a `lea` into `r11`, which is not part of the context. The builtin is `restore_context`, not `switch_to`, because a kernel may already have a function of that name. Writing `ctx.rip = label_addr(after)` before the restore resumes at that label with the saved frame.
+- `interrupt fn pf(frame: *PfFrame)` takes a pointer to the CPU frame. Without an error code the fields are `rip`, `cs`, `rflags`, `rsp`, `ss` and the pointer is `[rbp+120]`. A struct whose first field is `error_code` points at `[rbp+128]`, and `rip` is the next qword. The epilogue reads the parameter again, so `frame = other` returns through another saved frame, and `frame.rip = x` / `frame.rsp = y` are what `iretq` pops. The fifteen saved registers sit 120 bytes below that first CPU qword (`r15` at the low address through `rax`). Each field must be 8 bytes at `0, 8, 16, ...`. `*i64` is `an interrupt frame parameter must point at a struct`. `interrupt fn timer()` and `interrupt fn fault(err: i64)` are unchanged.
+- `tests/lang/context.lap` runs the switch under Linux at `-O0` and `-O2`. `tests/ctx` boots under QEMU: a `#PF` handler rewrites `rip` and `rsp`, an IRQ handler switches stacks, and `restore_context` returns. COM1 shows `COPIHUE`. `tests/freestanding/frame_handler.lap` is the instruction stream at `-O0` and `-O2`. It is assembled, not booted.
+
+### Changed
+- Language version is 0.27.1.
+
+## [0.27.0] - 2026-10-25
+
+### Added
+- An ordinary `struct` lays fields out at their real width with natural alignment. `u8`/`i8` align to 1, `u16`/`i16` to 2, `u32`/`i32` to 4, and `u64`/`i64` and every pointer to 8. A nested struct uses its own alignment and size. The struct's alignment is the strictest of its fields, and its size is rounded up to that alignment. `packed struct` is unchanged for scalars: no padding, so an IDT gate stays 16 bytes and `rsp0` stays at offset 4. A TSS still has to be packed, because natural alignment would place `rsp0` at 8.
+- A field `[T; N]` occupies `N * sizeof(T)` bytes, packed or not. `e.name[i]` and `e.blocks[i]` address that field. `T` may be an integer, a pointer, or a struct whose size is already known. A count that is not positive, an unknown element type, or a size that does not fit is `cannot lay out field 'name' of type '[Missing; 4]'` and the compiler exits with status 1. It does not emit a smaller struct and exit 0.
+- `sizeof(T)` and `sizeof(value)` are the type's size in bytes. `offsetof(Struct, field)` is the field's offset. Both are compile-time integers (`mov rax, N`). `sizeof()` takes one argument. `offsetof(Struct, field)` takes a struct name and a field name. An unknown size is `sizeof() has no size for this type`.
+- A load of a `u8`/`u16`/`u32` field zero-extends into `rax`. A load of an `i8`/`i16`/`i32` field sign-extends. A store writes only that field's width. Operators stay 64-bit; the narrow value is the one that was loaded, and the store truncates again. Scalar locals and globals still occupy 8-byte slots.
+- `tests/lang/struct_width.lap` runs under Linux. A packed directory entry is 56 bytes (`name` at 0, `size` at 16, `nblocks` at 20, `blocks` at 24), the same shape without `packed` is also 56, and a `u8` then a `u32` then a `u16` then a `u64` is 24 bytes with those fields at 0, 4, 8, and 16. Writing `name[0]` does not change `size`. A `u8` field `200 + 100` stores 44. It is not booted. `tests/errors/struct_layout.lap` is the layout the compiler rejects.
+
+### Changed
+- Language version is 0.27.0.
+
+## [0.26.2] - 2026-10-25
+
+### Added
+- Hosted 64-bit `-O2` places the arguments of a direct call in `rdi`, `rsi`, `rdx`, `rcx`, `r8`, and `r9` when every argument is a scalar the compiler can put in that register (at most six). An argument that is itself a call, an indirect call, a struct passed by value, `syscall` / `syscall6`, and the hosted builtins keep the push/pop sequence. A function that never addresses `rbp` and never pushes saves callee-saved registers with `push`/`pop`, so both calls in `fib` stay 16-byte aligned. One callee-saved temporary holds the left-hand side of `f(n - 1) + f(n - 2)` across the call.
+- `if` and `while` jump on the flags when the condition is a comparison of two scalars or of one array element and a scalar, including `&&` and `||`. The comparison does not become 0 or 1. `&&` still skips the right-hand side. A comparison used as a value (`let x = a < b`) still materializes 0 or 1. `if carry` is unchanged.
+- The value loaded by that comparison is reused by the next use of the same element. `a[j + 1] = a[j]` stores through `base+(j+1)*scale` and does not load `a[j]` again. A `while (i < lim)` that starts from a non-negative constant, only increments `i` by one at the end, and contains no call and no address-of, skips the local bounds check when every array it indexes with `i` has at least `lim` elements. A shorter array still traps. The inner product `s = s + a[i * n + k] * b[k * n + j]`, with `k` from 0 to `n`, walks the two rows with running pointers when `i` and `j` are in `[0, n)`. Otherwise the original loop runs. This does not delete loops.
+- `tests/lang/o2_flow.lap` checks that this matches `-O0`: register arguments, a call used as an argument, `||`, a value comparison, an insertion-sort shift that stores `a[0]` when `j` is `-1`, a proved bounds-free loop, the matmul running pointers, and a bounds trap when the limit is larger than the array.
+
+### Changed
+- Language version is 0.26.2. `-O0`, `--freestanding`, `--flat`, and `--boot` generate the same code as 0.26.1. `bits 16` and `bits 32` do not take these paths. On this machine `sort` went from 255.4 ms to 78.3 ms and `matmul` from 78.8 ms to 46.8 ms (medians, `make bench`). `fib` has fewer instructions on the `n >= 2` path and its median did not improve (389.7 ms to 394.3 ms, ranges overlap). `arith`, `chain`, and `fold` are the same binary as 0.25.1.
+
 ## [0.26.1] - 2026-10-25
 
 ### Added
