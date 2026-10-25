@@ -2,16 +2,30 @@
 
 Todos los cambios importantes del proyecto.
 
-## [0.28.1] - 2026-10-25
+## [0.28.2] - 2026-10-25
 
 ### Added
 - Hosted 64-bit `-O2` rewrites the insertion shift `j = i - 1; while (j >= 0 && a[j] > key) { a[j + 1] = a[j]; j = j - 1; } a[j + 1] = key` when it sits in `while (i < N)`, `N` is a sole positive constant, the local `i64` array has at least `N` elements, `i` starts at a non-negative constant, and `i` is incremented only at the end of that body. The taken path is six instructions and does not compare `j` with the length. `j` starts at `i - 1` and only decreases by one after `j >= 0`, so it does not go below -1. `key < a[j]` matches. `a[j] > key && j >= 0` does not. A `>=` test, an extra statement, a narrow or spilled name, or a failed proof of `i` keeps the bounds check.
 - `tests/lang/o2_shift.lap` checks a reverse run, an already sorted run, duplicates, negative keys, `n = 1`, a shift down to `j == -1`, `key < a[j]`, a `let` inside the body, a `>=` loop that must keep counting shifts, an extra statement in the body, and dot products of `n = 1` and of negative factors, against `-O0`.
 
 ### Changed
-- Language version is 0.28.1. The bench binary printed 0.27.5, before 0.28.0 landed on main; the eight `-O2` programs match that measurement except the version line. `-O0`, `--freestanding`, `--flat`, and `--boot` match 0.28.0 except the version line. `bits 16` and `bits 32` do not take the shift. The `-O2` assembly of `fib`, `sieve`, `matmul`, `arith`, `chain`, `fold`, and `array` matches 0.27.4 except the version line. `sort` `text` goes from 701 to 659 and `data` from 41 to 21. The taken shift is 6 instructions. `fib` is still the 16-instruction prologue. gcc `-O2` emits 416 lines for `fib.c`, with `sub rsp, 200` and a tree that subtracts 2. It is still exponential. That rewrite is not in this compiler.
-- On this machine, against the 20:44:22–20:44:58 UTC window (Copihue 0.27.4), the 21:11:18–21:11:53 UTC window is `sort` 77.9 ms (77.6–78.4) to 52.6 ms (52.4–55.3). Those ranges do not overlap. `sort` is below C (72.9–73.5) and OCaml (153.3–154.6). It overlaps Rust (52.6–53.6), so it is not below Rust; the median ratio is 0.99. The other seven overlap the reference. `matmul` stays above C (31.6–32.2) and below Rust (50.1–51.0) and OCaml (77.7–80.2). `fib` is still 3.00× C. `chain` stays under the three in this row and these runs; the binary is the one from 0.25.1.
-- A bottom-tested `k` loop with `imul rax, qword [rsi]` was measured on 2026-10-25 21:06:42–21:07:17 UTC and not kept. `matmul` went from 46.9 ms (46.3–47.4) to 48.0 ms (47.6–48.2). The ranges do not overlap, and the later one is slower. `text` of that binary was 1021. This release keeps the 10-instruction top-tested loop (`text` 1028).
+- Language version is 0.28.2. It includes the `if` / `while` fix from 0.28.1. A hosted `-O2` comparison that is not a leaf (`i * i < limit`, `i < n * n`) jumps on the flags and does not write 0 or 1. The scalar flag path is unchanged. `-O0`, `--freestanding`, `--flat`, and `--boot` match 0.28.1 except the version line. `bits 16` and `bits 32` do not take the shift. The `-O2` assembly of `fib`, `arith`, `chain`, `fold`, `array`, and `sort` matches the 21:11:18–21:11:53 UTC binary (it printed 0.27.5) except the version line. `sieve` `text` goes from 682 to 672 and `matmul` from 1028 to 1018. `sort` stays at 659 / 21. The taken shift is 6 instructions. The `matmul` `k` loop stays the 10-instruction top-tested loop. `fib` is still the 16-instruction prologue. gcc `-O2` emits 416 lines for `fib.c`, with `sub rsp, 200` and a tree that subtracts 2. It is still exponential. That rewrite is not in this compiler.
+- On this machine, the 21:45:10–21:45:46 UTC window (Copihue 0.28.2) against that 21:11 window: `sieve` 69.7 ms (69.2–70.0) to 72.3 ms (71.9–72.5). Those ranges do not overlap, and the later one is slower. The inner mark loop is unchanged; the changed compare is `i * i < limit`. `matmul` 46.2 ms (46.1–46.7) to 47.9 ms (46.4–48.6). Those ranges overlap. The changed compare is `i < n * n`. The other six overlap 21:11. In the 21:45 window, `sort` is 52.6 ms (52.4–53.1), below C (72.9–73.7) and OCaml (153.7–154.3), and it overlaps Rust (52.6–53.6), so it is not below Rust; the median ratio is 0.99. `sieve` overlaps C (69.9–72.4), stays above Rust (42.7–43.3), and stays below OCaml (128.0–134.6). `matmul` stays above C (32.0–34.0) and below Rust (50.3–51.3) and OCaml (78.4–81.3). `fib` is 3.01× C. `chain` stays under the three in this row and these runs; the binary is the one from 0.25.1.
+- Against the 20:44:22–20:44:58 UTC window (Copihue 0.27.4), the shift in the 21:11 window was `sort` 77.9 ms (77.6–78.4) to 52.6 ms (52.4–55.3). Those ranges do not overlap. The 21:45 `sort` binary matches that one except the version line, and 52.4–53.1 does not overlap 77.6–78.4 either.
+- A bottom-tested `k` loop with `imul rax, qword [rsi]` was measured on 2026-10-25 21:06:42–21:07:17 UTC and not kept. `matmul` went from 46.9 ms (46.3–47.4) to 48.0 ms (47.6–48.2). The ranges do not overlap, and the later one is slower. `text` of that binary was 1021. This release keeps the 10-instruction top-tested loop (`text` 1018, ten bytes less than 1028 because the checksum compare no longer writes 0 or 1).
+
+## [0.28.1] - 2026-10-25
+
+### Fixed
+- An `if` or `while` whose condition is a comparison, `&&`, `||`, or `!` jumps on the flags. It does not write 0 or 1 into `rax` (`eax` in `bits 16` and `bits 32`). `while (rax == 0)` leaves the compared value in `rax` when the loop ends, and the body of `if (rax == 0 - 1)` still sees it. A comparison used as a value still writes 0 or 1. Hosted `-O2` already branched on scalar flags; that path is unchanged. `if carry` still reads CF.
+- `*(addr) = imm` is `mov size [addr], imm` when the address is a number, a naked register, or `reg+disp` / `reg-disp` and the literal fits the pointee. The constant is not moved through `rax` first. Any other store still evaluates the value in the accumulator.
+
+### Added
+- `tests/freestanding/rax_branch.lap` checks the instruction stream at `-O0` and `-O2`: `syscall`, `while (rax == 0)`, `mov byte [4200200], 0`, and `if (rax == 0 - bias)` leaving `rax` for `rdi = rax`. `let r = syscall(8)` stores the slot before that byte store, and `return r` reloads it. The file is assembled, not booted. `syscall` itself is not executed.
+- `tests/boot/rax_keep.lap` is a 512-byte sector. `ax` is the character, a false `if` and a false `while` do not replace it, and `*(addr) = 0` does not either. QEMU reads `COPIHUE` on COM1.
+
+### Changed
+- Language version is 0.28.1, on top of 0.28.0.
 
 ## [0.28.0] - 2026-10-25
 
