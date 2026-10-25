@@ -1,0 +1,45 @@
+// also-o2
+// Indirect jmp, cld/std, a bits 16/32 register call, and syscall(n, ...).
+// Assembled, not booted. tests/boot/call16.lap and tests/boot/call32.lap
+// run the call and the memory jump under QEMU.
+
+let resume_rip: i64 = 0;
+
+bits 64 naked fn go() {
+    let slot: i64 = 0;
+    cld();
+    std();
+    jmp [resume_rip];
+    jmp [slot];
+    jmp rax;
+    jmp rbx;
+    syscall(1, 65, 1, 1);
+}
+
+bits 16 naked fn add16(a: i64, b: i64) -> i64 {
+    bx = a;
+    bp = b;
+    return bx;
+}
+
+bits 16 naked fn run16() {
+    si = 1;
+    di = 2;
+    bx = 3;
+    bp = 4;
+    jmp bx;
+    add16(bx, di);
+}
+
+bits 32 naked fn add32(a: i64, b: i64, c: i64, d: i64) -> i64 {
+    return a;
+}
+
+bits 32 naked fn run32() {
+    ebx = 1;
+    ebp = 2;
+    esi = 3;
+    edi = 4;
+    jmp ebx;
+    add32(ebx, ebp, esi, edi);
+}

@@ -1,0 +1,70 @@
+// Protected mode: a bits 32 call passes the byte in eax. esi holds it
+// across the UART wait (ebx is the scratch of `inb & 0x20`). jmp dword
+// [land] resumes at hue. QEMU checks COPIHUE. Selector 0x08 is 32-bit
+// code and 0x10 is data, both base 0, the same GDT as realmode_builtins.
+
+data gdt {
+    dq 0;
+    dw 0xFFFF;
+    dw 0;
+    db 0;
+    db 0x9A;
+    db 0xCF;
+    db 0;
+    dw 0xFFFF;
+    dw 0;
+    db 0;
+    db 0x92;
+    db 0xCF;
+    db 0;
+}
+
+data gdtr {
+    dw 23;
+    dd gdt;
+}
+
+data land {
+    dd hue;
+}
+
+bits 16 naked fn _start() {
+    cli();
+    ax = 0;
+    ds = ax;
+    es = ax;
+    ss = ax;
+    sp = 0x7C00;
+    lgdt(&gdtr);
+    write_cr0(read_cr0() | 1);
+    ljmp(0x08, pm);
+}
+
+bits 32 naked fn putc(c: i64) {
+    esi = c;
+    while ((inb(0x3FD) & 0x20) == 0) { pause(); }
+    outb(0x3F8, esi);
+}
+
+bits 32 naked fn pm() {
+    asm("mov ax, 0x10");
+    asm("mov ds, ax");
+    asm("mov es, ax");
+    asm("mov ss, ax");
+    cld();
+    ebp = 0x7C00;
+    esp = ebp;
+    ebx = 67;
+    putc(ebx);
+    putc(79);
+    putc(80);
+    putc(73);
+    jmp [land];
+}
+
+bits 32 naked fn hue() {
+    putc(72);
+    putc(85);
+    putc(69);
+    while (1) { hlt(); }
+}

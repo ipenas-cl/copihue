@@ -2,6 +2,19 @@
 
 Todos los cambios importantes del proyecto.
 
+## [0.27.2] - 2026-10-25
+
+### Added
+- `cld()` and `std()` emit that instruction and take no arguments, in `bits 16`, `bits 32`, and 64-bit code. `rep` still honors whatever DF is set.
+- `jmp rax` and `jmp [resume_rip]` are indirect jumps, and only inside `naked`. Outside it, the error is `an indirect jmp is only available in a naked function` and the instruction is not emitted: NASM would treat `jmp rax` as a register jump and drop the frame. The register is any general register `push` accepts, at the width the mode can encode (`register 'rax' is not available in bits 16`). `jmp [name]` reads a global, a `data` label, or a naked local. The size is `jmp qword [name]` in 64-bit code, `jmp dword [name]` in `bits 32`, and `jmp word [name]` in `bits 16`. A name that is not memory is `jmp [name] takes a variable or a data label`. A direct `jmp 0x8200` or `jmp label` is unchanged, including outside `naked`.
+- `bx` and `bp`, and `ebx`, `ebp`, `esi`, and `edi`, are naked lvalues and rvalues in `bits 16` and `bits 32`. An immediate writes that width only (`mov bx, 67` leaves the high half of `ebx`). In 64-bit code the error is `register 'ebx' is not available in bits 64`: `rbx` is the scratch and `rbp` is the frame. Outside `naked`, `register 'bp' is only available in a naked function`. They are not parameter registers. `si` and `di` stay available in 64-bit naked code, as before.
+- A call from `bits 16` or `bits 32` uses the naked parameter registers. `bits 32` evaluates each argument into `eax`, pushes `eax`, and pops into `esi`, `edx`, `ecx`, `eax` (at most four). `bits 16` does the same with `ax`, `cx`, `dx`, and `si`. `push rax` / `pop rdi` is not an encoding in `bits 16`, and a 64-bit `ret` would pop a return address a 16-bit `call` did not push. Both functions are naked, so the callee already reads those registers. The callee must be the same bits mode: `a bits 16 call cannot target a 64-bit function`, or `a bits 16 call cannot target a bits 32 function`. More than four arguments is `a bits 32 call takes at most 4 register arguments`. The `call` is near. In `bits 16` the displacement is 16 bits (±32KiB); nasm reports it when the callee is farther, and a far call is not emitted because both functions share `CS`. An indirect call is `an indirect call is not available in bits 16`, because the name is what selects the mode. A 64-bit call is still `push rax` / `pop rdi`. The first argument lives in `ax` or `eax`, which the next expression overwrites.
+- `syscall(n, a1, a2, a3, a4, a5, a6)` in `--freestanding`, `--flat`, or `--boot` loads `rax`, then `rdi`, `rsi`, `rdx`, `r10`, `r8`, `r9`, executes `syscall`, and leaves the result in `rax`. At most six arguments after the number: `syscall() takes at most 6 arguments`. `syscall()` with no arguments is still the one instruction, so existing code that set the registers itself is unchanged. `bits 16` and `bits 32` stay `syscall() is a 64-bit instruction`. Hosted `syscall` / `syscall6` are unchanged.
+- `tests/boot/call16.lap` calls a `bits 16` function, uses `bx` and `bp`, jumps through `jmp word [land]`, and writes `COPIHUE` to COM1. QEMU checks that string. `tests/boot/call32.lap` does the same in protected mode (`eax` / `ebx` / `ebp` / `esi`, `jmp dword [land]`). `tests/freestanding/jmp_call.lap` is the instruction stream at `-O0` and `-O2`, including `syscall(1, 65, 1, 1)`. It is assembled, not booted.
+
+### Changed
+- Language version is 0.27.2.
+
 ## [0.26.1] - 2026-10-25
 
 ### Added

@@ -1,0 +1,7 @@
+bits 32 naked fn f(a: i64, b: i64, c: i64, d: i64) -> i64 {
+    return a;
+}
+
+bits 32 naked fn k() {
+    f(1, 2, 3, 4, 5);
+}

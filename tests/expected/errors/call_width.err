@@ -1,0 +1,4 @@
+tests/errors/call_width.lap:6:5: error: a bits 16 call cannot target a bits 32 function
+      6 |     p();
+        |     ^
+1 error, compilation failed

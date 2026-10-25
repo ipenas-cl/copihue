@@ -15,7 +15,7 @@
 
 // ==== NAMING (single place to change when the language is renamed) ====
 #define LANG_NAME     "Copihue"
-#define LANG_VERSION  "0.26.1"
+#define LANG_VERSION  "0.27.2"
 #define COMPILER_BIN  "copihue"
 #define SRC_EXT       ".lap"   /* Lapageria rosea, the copihue */
 #define OLD_SRC_EXT   ".cph"   /* v0.18.x extension, still accepted with a warning */
@@ -182,6 +182,7 @@ typedef struct AstNode {
 #define AF_NAKED      16
 #define AF_CARRY      32   // `if carry`: branch on CF, no accumulator load
 #define AF_EXTERN     64   // `extern name`: a qword defined outside this let
+#define AF_JMP_MEM   128   // `jmp [name]`: indirect through memory, naked only
 
 // Symbol table
 typedef struct {
@@ -302,7 +303,8 @@ typedef struct {
     const char* name;
     int bits;
     int seg;
-    int high;   // ah: the byte is not the low byte of the accumulator
+    int high;        // ah: the byte is not the low byte of the accumulator
+    int legacy_only; // bits 16 and bits 32. 64-bit code keeps using these as scratch or as the frame
 } MachReg;
 
 static const MachReg* mach_reg(const char* n) {
@@ -311,7 +313,12 @@ static const MachReg* mach_reg(const char* n) {
         {"fs", 16, 1, 0}, {"gs", 16, 1, 0},
         {"al", 8, 0, 0}, {"ah", 8, 0, 1}, {"dl", 8, 0, 0},
         {"ax", 16, 0, 0}, {"sp", 16, 0, 0}, {"si", 16, 0, 0}, {"di", 16, 0, 0},
+        // bx is the scratch of a binary operator. bp is the frame pointer of
+        // a normal function. Both are naked lvalues in bits 16 and bits 32
+        // only: a 64-bit naked function still evaluates through rbx.
+        {"bx", 16, 0, 0, 1}, {"bp", 16, 0, 0, 1},
         {"eax", 32, 0, 0}, {"ecx", 32, 0, 0}, {"edx", 32, 0, 0}, {"esp", 32, 0, 0},
+        {"ebx", 32, 0, 0, 1}, {"ebp", 32, 0, 0, 1}, {"esi", 32, 0, 0, 1}, {"edi", 32, 0, 0, 1},
         {"rax", 64, 0, 0}, {"rbx", 64, 0, 0}, {"rsp", 64, 0, 0}, {"rbp", 64, 0, 0},
         // rdi/rsi/rdx are also the first naked parameters. A bare assignment
         // overwrites that parameter. They exist so ring-3 code can fill
@@ -336,6 +343,19 @@ static int mach_here(AstNode* at, const MachReg* r) {
         diag_error(at->line, at->col, "register '%s' is not available in bits %d", r->name, g_fn_bits);
         return 0;
     }
+    if (r->legacy_only && !legacy_bits()) {
+        diag_error(at->line, at->col, "register '%s' is not available in bits %d",
+                   r->name, g_fn_bits ? g_fn_bits : 64);
+        return 0;
+    }
+    return 1;
+}
+
+// Usable as a naked operand in this function. No diagnostic.
+static int mach_ok(const MachReg* r) {
+    if (!r || !(g_fn_flags & AF_NAKED)) return 0;
+    if (r->bits == 64 && legacy_bits()) return 0;
+    if (r->legacy_only && !legacy_bits()) return 0;
     return 1;
 }
 
@@ -1572,13 +1592,26 @@ AstNode* parse_stmt(Parser* p) {
             end_simple_stmt(p);
             return jn;
         }
-        // `jmp 0x8200` and `jmp other`. `jmp(...)` stays a call.
+        // `jmp 0x8200`, `jmp other`, `jmp reg`, and `jmp [name]`.
+        // `jmp(...)` stays a call.
         if (t.len == 3 && !memcmp(t.s, "jmp", 3) &&
             (peek_tok_at(p, 1, T_NUM) ||
+             peek_tok_at(p, 1, T_LBRACKET) ||
              (peek_tok_at(p, 1, T_IDENT) && !peek_tok_at(p, 2, T_LPAREN) && !peek_tok_at(p, 2, T_EQ)))) {
             advance_tok(p);
             AstNode* jp = ast_new(AST_JMP);
-            if (check_tok(p, T_NUM)) {
+            if (check_tok(p, T_LBRACKET)) {
+                advance_tok(p);
+                jp->flags |= AF_JMP_MEM;
+                if (!check_tok(p, T_IDENT)) {
+                    Tok bad = peek_tok(p);
+                    diag_error(bad.line, bad.col, "jmp [name] takes a variable or a data label");
+                } else {
+                    Tok id = advance_tok(p);
+                    jp->name = strndup(id.s, id.len);
+                }
+                expect(p, T_RBRACKET);
+            } else if (check_tok(p, T_NUM)) {
                 Tok num = advance_tok(p);
                 jp->value = strndup(num.s, num.len);
             } else if (check_tok(p, T_IDENT)) {
@@ -2747,7 +2780,7 @@ static int builtin_ret_ty(const char* f, VTy* out) {
         !strcmp(f, "set_syscall_stack") || !strcmp(f, "ljmp") || !strcmp(f, "int") || !strcmp(f, "asm") ||
         !strcmp(f, "lodsb") || !strcmp(f, "stosb") || !strcmp(f, "stosd") ||
         !strcmp(f, "pushfd") || !strcmp(f, "popfd") || !strcmp(f, "push") || !strcmp(f, "pop") ||
-        !strcmp(f, "stc") || !strcmp(f, "clc") || !strcmp(f, "ud2") ||
+        !strcmp(f, "stc") || !strcmp(f, "clc") || !strcmp(f, "cld") || !strcmp(f, "std") || !strcmp(f, "ud2") ||
         !strcmp(f, "rep_stosb") || !strcmp(f, "rep_stosw") || !strcmp(f, "rep_stosd") || !strcmp(f, "rep_stosq") ||
         !strcmp(f, "rep_movsb") || !strcmp(f, "rep_movsw") || !strcmp(f, "rep_movsd") || !strcmp(f, "rep_movsq")) {
         *out = ty_i64();
@@ -2790,8 +2823,7 @@ static VTy expr_ty(Codegen* cg, AstNode* n) {
         GlobalVar* g = (cg && cg->global_symtab) ? global_symtab_lookup(cg->global_symtab, n->name) : NULL;
         if (g) return global_vty(cg, g);
         {
-            const MachReg* mr = mach_reg(n->name);
-            if ((g_fn_flags & AF_NAKED) && mr && !(mr->bits == 64 && legacy_bits()))
+            if (mach_ok(mach_reg(n->name)))
                 return ty_i64();
         }
         return ty_unk();
@@ -3043,7 +3075,65 @@ static void gen_load_callee(Codegen* cg, const char* name) {
 // User-function call. Six or fewer register arguments keep the historical
 // push/pop sequence so existing programs generate the same instructions.
 // Further arguments follow the System V stack convention (7th at [rbp+16]).
+//
+// bits 16 and bits 32 cannot `push rax` / `pop rdi`: that encoding does not
+// exist, and a 64-bit `ret` would pop a return address the 16-bit `call`
+// never pushed. Those functions are naked, so the callee already reads
+// eax/ecx/edx/esi or ax/cx/dx/si. The caller evaluates each argument into
+// the accumulator, pushes that width, and pops into those registers.
+// Both sides must be the same bits mode. A near call is relative; in bits
+// 16 the displacement is 16 bits, so the callee has to land within ±32KiB
+// or nasm rejects the object. Indirect calls stay 64-bit: the name is what
+// tells us the callee's mode.
 static void gen_user_call(Codegen* cg, AstNode* n, int indirect) {
+    if (legacy_bits()) {
+        int mode = g_fn_bits;
+        int argc = n->child_count;
+        if (indirect) {
+            diag_error(n->line, n->col, "an indirect call is not available in bits %d", mode);
+            return;
+        }
+        if (argc > 4) {
+            diag_error(n->line, n->col, "a bits %d call takes at most 4 register arguments", mode);
+            return;
+        }
+        {
+            AstNode* fn = find_func(cg, n->name);
+            if (!fn) {
+                diag_error(n->line, n->col, "unknown function '%s'", n->name ? n->name : "(call)");
+            } else {
+                int target = fn->bits ? fn->bits : 64;
+                if (target != mode) {
+                    if (target == 64)
+                        diag_error(n->line, n->col, "a bits %d call cannot target a 64-bit function", mode);
+                    else
+                        diag_error(n->line, n->col,
+                                   "a bits %d call cannot target a bits %d function", mode, target);
+                } else {
+                    int want = fn->child_count - 1;
+                    if (argc != want)
+                        diag_error(n->line, n->col, "function '%s' takes %d argument%s, not %d",
+                                   n->name, want, want == 1 ? "" : "s", argc);
+                    else
+                        check_user_args(cg, n, fn);
+                }
+            }
+        }
+        {
+            static const char* p16[] = {"ax", "cx", "dx", "si"};
+            static const char* p32[] = {"eax", "ecx", "edx", "esi"};
+            const char** pregs = mode == 16 ? p16 : p32;
+            const char* acc = mode == 16 ? "ax" : "eax";
+            for (int i = 0; i < argc; i++) {
+                gen_one_arg(cg, n->children[i]);
+                emit(cg, "    push %s\n", acc);
+            }
+            for (int i = argc - 1; i >= 0; i--)
+                emit(cg, "    pop %s\n", pregs[i]);
+            if (n->name) emit(cg, "    call %s\n", n->name);
+        }
+        return;
+    }
     const char* regs[] = {"rdi", "rsi", "rdx", "rcx", "r8", "r9"};
     int argc = n->child_count;
     if (argc > 16) {
@@ -3196,7 +3286,8 @@ static int gen_core_builtin(Codegen* cg, AstNode* n) {
     }
     if (!strcmp(f, "hlt") || !strcmp(f, "cli") || !strcmp(f, "sti") || !strcmp(f, "pause") ||
         !strcmp(f, "swapgs") || !strcmp(f, "lodsb") || !strcmp(f, "stosb") || !strcmp(f, "stosd") ||
-        !strcmp(f, "stc") || !strcmp(f, "clc") || !strcmp(f, "ud2")) {
+        !strcmp(f, "stc") || !strcmp(f, "clc") || !strcmp(f, "cld") || !strcmp(f, "std") ||
+        !strcmp(f, "ud2")) {
         if (n->child_count != 0) {
             diag_error(n->line, n->col, "%s() takes no arguments", f);
             return 1;
@@ -3429,19 +3520,36 @@ static int gen_core_builtin(Codegen* cg, AstNode* n) {
         return 1;
     }
     if (!strcmp(f, "syscall") && g_freestanding) {
-        // One instruction. The caller already put the number in rax and the
-        // arguments in rdi, rsi, rdx. The hosted syscall(n, a1, ...) helper
-        // is the runtime and stays unavailable here.
-        if (n->child_count != 0) {
-            diag_error(n->line, n->col,
-                       "syscall() takes no arguments with --freestanding; set rax, rdi, rsi and rdx first");
-            return 1;
-        }
+        // The instruction, not the hosted Linux helper. No arguments leaves
+        // the registers exactly as the caller set them (one `syscall` line,
+        // so existing programs stay byte-identical). With arguments the
+        // compiler loads rax, then rdi, rsi, rdx, r10, r8, r9, and the
+        // result stays in rax. Up to six arguments after the number.
         if (legacy_bits()) {
             diag_error(n->line, n->col, "syscall() is a 64-bit instruction");
             return 1;
         }
-        emit(cg, "    syscall\n");
+        if (n->child_count > 7) {
+            diag_error(n->line, n->col, "syscall() takes at most 6 arguments");
+            return 1;
+        }
+        if (n->child_count == 0) {
+            emit(cg, "    syscall\n");
+            return 1;
+        }
+        {
+            const char* sregs[] = {"rdi", "rsi", "rdx", "r10", "r8", "r9"};
+            int narg = n->child_count - 1;
+            if (narg > 6) narg = 6;
+            for (int i = 0; i < narg; i++) {
+                gen_expr(cg, n->children[i + 1]);
+                emit(cg, "    push rax\n");
+            }
+            for (int i = narg - 1; i >= 0; i--)
+                emit(cg, "    pop %s\n", sregs[i]);
+            gen_expr(cg, n->children[0]);
+            emit(cg, "    syscall\n");
+        }
         return 1;
     }
     if (!strcmp(f, "int")) {
@@ -5155,8 +5263,7 @@ static int mem_operand(AstNode* addr, char* buf, int n) {
         snprintf(buf, n, "%s", e->value);
         return 1;
     }
-    if (e->type == AST_IDENT && e->name && mach_reg(e->name) &&
-        (g_fn_flags & AF_NAKED) && !(mach_reg(e->name)->bits == 64 && legacy_bits())) {
+    if (e->type == AST_IDENT && e->name && mach_ok(mach_reg(e->name))) {
         snprintf(buf, n, "%s", e->name);
         return 1;
     }
@@ -5164,8 +5271,7 @@ static int mem_operand(AstNode* addr, char* buf, int n) {
         (e->op[0] == '+' || e->op[0] == '-') && !e->op[1]) {
         AstNode* a = e->children[0];
         AstNode* b = e->children[1];
-        if (a && a->type == AST_IDENT && a->name && mach_reg(a->name) &&
-            (g_fn_flags & AF_NAKED) && !(mach_reg(a->name)->bits == 64 && legacy_bits()) &&
+        if (a && a->type == AST_IDENT && a->name && mach_ok(mach_reg(a->name)) &&
             b && b->type == AST_NUMBER && b->value) {
             snprintf(buf, n, "%s%s%s", a->name, e->op, b->value);
             return 1;
@@ -6501,6 +6607,65 @@ static EarlyRet match_early_ret(Codegen* cg, AstNode* fn) {
 
 void gen_stmt(Codegen* cg, AstNode* n);
 
+// Memory operand of `jmp [name]`: a naked slot, a data label, or a global.
+// A register parameter has no address. NULL if the name is not memory.
+static const char* jmp_mem_label(Codegen* cg, const char* name) {
+    Symbol* sym;
+    GlobalVar* gv;
+    if (!name) return NULL;
+    sym = cg->symtab ? symtab_lookup_symbol(cg->symtab, (char*)name) : NULL;
+    if (sym) return sym->mem;
+    if (is_data_name(cg, name)) return name;
+    gv = cg->global_symtab ? global_symtab_lookup(cg->global_symtab, (char*)name) : NULL;
+    if (gv) return gv->name;
+    return NULL;
+}
+
+// Direct `jmp 0x8200` / `jmp label` stay available outside naked. A GPR name
+// is an indirect jump in NASM (`jmp rax` is not a label), so that form is
+// naked-only and is not emitted otherwise. `jmp [name]` is the same rule:
+// the size prefix is the mode's address width (`qword` / `dword` / `word`).
+static void gen_jmp(Codegen* cg, AstNode* n) {
+    if (n->flags & AF_JMP_MEM) {
+        const char* lab;
+        const char* sz;
+        if (!(g_fn_flags & AF_NAKED)) {
+            diag_error(n->line, n->col, "an indirect jmp is only available in a naked function");
+            return;
+        }
+        lab = jmp_mem_label(cg, n->name);
+        if (!lab) {
+            diag_error(n->line, n->col, "jmp [%s] takes a variable or a data label",
+                       n->name ? n->name : "");
+            return;
+        }
+        sz = g_fn_bits == 16 ? "word" : g_fn_bits == 32 ? "dword" : "qword";
+        emit(cg, "    jmp %s [%s]\n", sz, lab);
+        return;
+    }
+    if (n->name) {
+        int cls = stack_reg_class(n->name);
+        if (cls >= 2) {
+            int bits = g_fn_bits ? g_fn_bits : 64;
+            if (!(g_fn_flags & AF_NAKED)) {
+                diag_error(n->line, n->col, "an indirect jmp is only available in a naked function");
+                return;
+            }
+            if (!stack_reg_here(cls)) {
+                diag_error(n->line, n->col, "register '%s' is not available in bits %d", n->name, bits);
+                return;
+            }
+            emit(cg, "    jmp %s\n", n->name);
+            return;
+        }
+        if (!find_func(cg, n->name) && !is_data_name(cg, n->name))
+            diag_error(n->line, n->col, "unknown jump target '%s'", n->name);
+        emit(cg, "    jmp %s\n", n->name);
+        return;
+    }
+    if (n->value) emit(cg, "    jmp %s\n", n->value);
+}
+
 void gen_stmt(Codegen* cg, AstNode* n) {
     if (!n) return;  // Null safety
     if (n->file) focus_file(n->file);
@@ -6744,12 +6909,7 @@ void gen_stmt(Codegen* cg, AstNode* n) {
         }
         emit(cg, "    jmp .L%d\n", n->type == AST_BREAK ? g_loop_break[g_loop_depth - 1] : g_loop_cont[g_loop_depth - 1]);
     } else if (n->type == AST_JMP) {
-        if (n->value) emit(cg, "    jmp %s\n", n->value);
-        else if (n->name) {
-            if (!find_func(cg, n->name) && !is_data_name(cg, n->name))
-                diag_error(n->line, n->col, "unknown jump target '%s'", n->name);
-            emit(cg, "    jmp %s\n", n->name);
-        }
+        gen_jmp(cg, n);
     } else if (n->type == AST_MEM_STORE) {
         gen_mem_store(cg, n);
     } else if (n->type == AST_CALL || n->type == AST_ASSIGN || n->type == AST_ARRAY_ASSIGN || n->type == AST_FIELD_ASSIGN) {
@@ -6963,6 +7123,7 @@ void gen_func(Codegen* cg, AstNode* n) {
         // call already fills). bits 32: eax, ecx, edx, esi. bits 16: ax, cx,
         // dx, si. ax/eax are the accumulator, so a later expression overwrites
         // that parameter. bx/ebx/rbx stay scratch and are not parameter registers.
+        // bx/bp and ebx/ebp/esi/edi are naked lvalues in bits 16/32 (not here).
         int mode = bits ? bits : 64;
         int maxp = (mode == 16 || mode == 32) ? 4 : 6;
         static const char* p16[] = {"ax", "cx", "dx", "si"};

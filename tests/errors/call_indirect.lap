@@ -1,0 +1,4 @@
+bits 16 naked fn k() {
+    let f: i64 = 0;
+    f();
+}
