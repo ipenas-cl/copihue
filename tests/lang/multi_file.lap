@@ -1,0 +1,9 @@
+fn add2(n: i64) -> i64;
+import "parts/mf_part.lap";
+import "parts/mf_part.lap";
+
+fn main() -> i64 {
+    print_int(add2(base));
+    println("");
+    return 0;
+}

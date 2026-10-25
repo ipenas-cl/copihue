@@ -1,0 +1,5 @@
+import "cycle_b.lap";
+
+fn from_a() -> i64 {
+    return 1;
+}
