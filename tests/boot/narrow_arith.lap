@@ -1,0 +1,24 @@
+// bits 16: a u8 sum wraps before the compare, a u32 compare is unsigned,
+// and u32 >> and / are logical. QEMU checks COPIHUE.
+
+bits 16 naked fn _start() {
+    let x: u8 = 200;
+    let u: u32 = 4294967295;
+    if (x + 100 < 50) {
+        if (u < 1) {
+        } else {
+            if ((u >> 1) == 2147483647) {
+                if ((u / 2) == 2147483647) {
+                    outb(0x3F8, 67);
+                    outb(0x3F8, 79);
+                    outb(0x3F8, 80);
+                    outb(0x3F8, 73);
+                    outb(0x3F8, 72);
+                    outb(0x3F8, 85);
+                    outb(0x3F8, 69);
+                }
+            }
+        }
+    }
+    while (1) { hlt(); }
+}

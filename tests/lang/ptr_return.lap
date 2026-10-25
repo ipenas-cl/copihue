@@ -38,7 +38,7 @@ fn main() -> i32 {
     let q: *u8 = as_mut(p);
     print_int(q[1]);
     println("");
-    let r: *u8 = as_vol(p);
+    let r: *u8 = as_vol(p) as *u8;
     print_int(r[0]);
     println("");
 
