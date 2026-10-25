@@ -1,0 +1,6 @@
+fn main() -> i32 {
+    {
+        let b = 1;
+    }
+    return b;
+}

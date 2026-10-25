@@ -100,6 +100,15 @@ for src in tests/flat/*.lap; do
   fi
   od -An -tx1 -v "$WORK/flat.bin" > "$WORK/flat.hex"
   check "$src" "tests/expected/flat/$name.hex" "$WORK/flat.hex"
+  if grep -q '^// also-o2' "$src"; then
+    if ! ( cd "$WORK" && "$CC" -O2 --flat 0x10000 -o flat2.bin "$ROOT/$src" 2>>err.txt ); then
+      fail=$((fail+1)); failed+=("$src -O2"); echo "FAIL $src -O2:"; cat "$WORK/err.txt"; continue
+    fi
+    if ! cmp -s "$WORK/flat.bin" "$WORK/flat2.bin"; then
+      fail=$((fail+1)); failed+=("$src (-O0 vs -O2)"); echo "FAIL $src: -O0 and -O2 images differ"; continue
+    fi
+    pass=$((pass+1))
+  fi
 done
 
 # 5. Boot sectors: tests/boot/*.lap build with --boot into a 512-byte image

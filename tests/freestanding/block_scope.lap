@@ -1,0 +1,18 @@
+// also-o2
+// The load passed to put_hex must be the `b` stored from p[0], not the `b` of the other branch.
+
+fn put_hex(b: i64) -> i64 {
+    return b;
+}
+
+fn pf(p: *u8) -> i64 {
+    if (0) {
+        let b = -7;
+        put_hex(b);
+    }
+    if (p) {
+        let b = p[0];
+        return put_hex(b);
+    }
+    return 0;
+}
