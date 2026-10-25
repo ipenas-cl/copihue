@@ -16,7 +16,7 @@
 
 // ==== NAMING (single place to change when the language is renamed) ====
 #define LANG_NAME     "Copihue"
-#define LANG_VERSION  "0.27.3"
+#define LANG_VERSION  "0.27.4"
 #define COMPILER_BIN  "copihue"
 #define SRC_EXT       ".lap"   /* Lapageria rosea, the copihue */
 #define OLD_SRC_EXT   ".cph"   /* v0.18.x extension, still accepted with a warning */
@@ -5538,7 +5538,17 @@ static void place_ordered_k(Codegen* cg, const char* op, AstNode* left, AstNode*
             }
         }
         if (op[0] == '*' && R.kind == 3 && scalar_leaf(cg, left, &Ls) && Ls.kind == 1) {
-            emit(cg, "    imul %s, %s, %lld\n", dest, Ls.reg, R.imm);
+            // lea wraps mod 2^64, same as imul, and does not set flags.
+            // Nothing after place_k reads the multiply flags. *4 and *8
+            // already became shl. *6 is not a scale.
+            int scale = 0;
+            if (o2_hosted() && R.imm == 3) scale = 2;
+            else if (o2_hosted() && R.imm == 5) scale = 4;
+            else if (o2_hosted() && R.imm == 9) scale = 8;
+            if (scale)
+                emit(cg, "    lea %s, [%s+%s*%d]\n", dest, Ls.reg, Ls.reg, scale);
+            else
+                emit(cg, "    imul %s, %s, %lld\n", dest, Ls.reg, R.imm);
             return;
         }
         place_k(cg, left, dest, allow);
@@ -7908,7 +7918,9 @@ static const char* distinct_reg(Codegen* cg, const char* name, const char** prev
 
 // `k = 0; while (k < n) { s = s + a[i*n+k] * b[k*n+j]; k = k + 1; }`
 // with n a sole positive constant and both arrays at least n*n. The fast
-// path keeps two running pointers. A failed i/j guard runs the original loop.
+// path keeps two running pointers, one step per branch. An even unroll
+// was measured and was slower, so it is not emitted. A failed i/j guard
+// runs the original loop.
 static int try_strength_dot(Codegen* cg, AstNode* wh) {
     if (g_strength_busy || !o2_hosted() || !wh || wh->type != AST_WHILE || wh->child_count != 2)
         return 0;
@@ -8308,6 +8320,85 @@ static int try_linear_sum(Codegen* cg, AstNode* wh) {
     return 1;
 }
 
+// `x = (x + y) & imm`, both names in registers, imm in 0..2^31-1.
+// y may be x. The 64-bit `and` sign-extends an imm32, which matches this range.
+static int match_mask_add(Codegen* cg, AstNode* st, const char** rd, const char** rs,
+                          long long* imm) {
+    AstNode* e;
+    AstNode* add;
+    AstNode* maskn;
+    AstNode* L;
+    AstNode* R;
+    const char* other = NULL;
+    Symbol* sd;
+    Symbol* ss;
+    long long m = 0;
+    if (!o2_hosted() || !st || st->type != AST_ASSIGN || !st->name || st->child_count != 1)
+        return 0;
+    e = st->children[0];
+    if (!e || e->type != AST_BINOP || !e->op || e->op[0] != '&' || e->op[1] || e->child_count != 2)
+        return 0;
+    add = e->children[0];
+    maskn = e->children[1];
+    if (!is_add_op(add) || !maskn || maskn->type != AST_NUMBER) return 0;
+    if (!parse_i64(maskn->value, &m) || m < 0 || m > 2147483647LL) return 0;
+    L = add->children[0];
+    R = add->children[1];
+    if (L && L->type == AST_IDENT && L->name && !strcmp(L->name, st->name) &&
+        R && R->type == AST_IDENT && R->name)
+        other = R->name;
+    else if (R && R->type == AST_IDENT && R->name && !strcmp(R->name, st->name) &&
+             L && L->type == AST_IDENT && L->name)
+        other = L->name;
+    else return 0;
+    sd = symtab_lookup_symbol(cg->symtab, st->name);
+    ss = symtab_lookup_symbol(cg->symtab, (char*)other);
+    if (!sd || !ss || sd->is_array || ss->is_array || sd->is_pointer || ss->is_pointer)
+        return 0;
+    if (sym_narrow_int(sd) || sym_narrow_int(ss)) return 0;
+    if (name_addr_taken(g_cur_fn, st->name) || name_addr_taken(g_cur_fn, other)) return 0;
+    *rd = local_reg(sd);
+    *rs = local_reg(ss);
+    if (!*rd || !*rs) return 0;
+    *imm = m;
+    return 1;
+}
+
+// Straight-line `x = (x + y) & imm`. Emit every add, then every mask, when
+// neither x nor y was a destination earlier in the run. One statement stays
+// on the normal path. Returns how many statements were consumed.
+static int try_sink_masks(Codegen* cg, AstNode* block, int start) {
+    const char* rd[8];
+    const char* rs[8];
+    long long imm[8];
+    int n = 0;
+    int i, j;
+    if (!o2_hosted() || !block || block->type != AST_BLOCK) return 0;
+    for (i = start; i < block->child_count && n < 8; i++) {
+        const char* d = NULL;
+        const char* s = NULL;
+        long long m = 0;
+        int clash = 0;
+        if (!match_mask_add(cg, block->children[i], &d, &s, &m)) break;
+        for (j = 0; j < n; j++) {
+            if (!strcmp(s, rd[j]) || !strcmp(d, rd[j])) clash = 1;
+        }
+        if (clash) break;
+        rd[n] = d;
+        rs[n] = s;
+        imm[n] = m;
+        n++;
+    }
+    if (n < 2) return 0;
+    for (i = 0; i < n; i++) {
+        check_assign_types(cg, block->children[start + i]);
+        emit(cg, "    add %s, %s\n", rd[i], rs[i]);
+    }
+    for (i = 0; i < n; i++)
+        emit(cg, "    and %s, %lld\n", rd[i], imm[i]);
+    return n;
+}
+
 static int try_hosted_rewrite(Codegen* cg, AstNode* n) {
     if (!o2_hosted()) return 0;
     if (try_strength_dot(cg, n)) return 1;
@@ -8339,9 +8430,15 @@ void gen_stmt(Codegen* cg, AstNode* n) {
         // Names declared here hide outer ones and disappear at the closing brace.
         symtab_enter(cg->symtab);
         for (int i = 0; i < n->child_count; i++) {
+            int sunk;
             g_prev2_stmt = i > 1 ? n->children[i - 2] : NULL;
             g_prev_stmt = i > 0 ? n->children[i - 1] : NULL;
             if (keep && i == 0) g_fwd_hold = 1;
+            sunk = try_sink_masks(cg, n, i);
+            if (sunk >= 2) {
+                i += sunk - 1;
+                continue;
+            }
             if (!try_hosted_rewrite(cg, n->children[i]))
                 gen_stmt(cg, n->children[i]);
         }
@@ -8932,8 +9029,14 @@ void gen_func(Codegen* cg, AstNode* n) {
         check_types(ret->children[0], "return value", dst_ty, expr_ty(cg, ret->children[0]));
     }
     for (int i = body_from; i < body->child_count; i++) {
+        int sunk;
         g_prev2_stmt = i > 1 ? body->children[i - 2] : NULL;
         g_prev_stmt = i > 0 ? body->children[i - 1] : NULL;
+        sunk = try_sink_masks(cg, body, i);
+        if (sunk >= 2) {
+            i += sunk - 1;
+            continue;
+        }
         if (!try_hosted_rewrite(cg, body->children[i]))
             gen_stmt(cg, body->children[i]);
     }
