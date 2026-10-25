@@ -1,0 +1,198 @@
+section .data
+__syscall_rsp: dq 0
+__syscall_user_rsp: dq 0
+section .bss
+tss: resb 104
+cur: resq 1
+section .text
+set_rsp0:
+    push rbp
+    mov rbp, rsp
+    sub rsp, __frame_set_rsp0
+    mov [rbp-8], rdi
+    mov rax, [rbp-8]
+    push rax
+    pop rcx
+    mov [tss+4], rcx
+    mov rax, [rbp-8]
+    push rax
+    pop rcx
+    mov [tss+36], rcx
+    mov rax, [tss+4]
+    leave
+    ret
+    xor rax, rax
+    leave
+    ret
+__frame_set_rsp0 equ 80
+program_syscall:
+    push rbp
+    mov rbp, rsp
+    sub rsp, __frame_program_syscall
+    mov [rbp-8], rdi
+    mov rax, 3221225600
+    mov rcx, rax
+    rdmsr
+    shl rdx, 32
+    or rax, rdx
+    mov [rbp-16], rax
+    mov rax, 3221225600
+    push rax
+    mov rax, [rbp-16]
+    push rax
+    mov rax, 1
+    mov rbx, rax
+    pop rax
+    or rax, rbx
+    pop rdx
+    mov rcx, rdx
+    mov rdx, rax
+    shr rdx, 32
+    wrmsr
+    mov rax, 3221225601
+    push rax
+    mov rax, 4503633987108864
+    pop rdx
+    mov rcx, rdx
+    mov rdx, rax
+    shr rdx, 32
+    wrmsr
+    mov rax, 3221225602
+    push rax
+    mov rax, [rbp-8]
+    pop rdx
+    mov rcx, rdx
+    mov rdx, rax
+    shr rdx, 32
+    wrmsr
+    mov rax, 3221225604
+    push rax
+    mov rax, 512
+    pop rdx
+    mov rcx, rdx
+    mov rdx, rax
+    shr rdx, 32
+    wrmsr
+    mov rax, 40
+    ltr ax
+    mov rax, 28672
+    push rax
+    pop rdi
+    call set_rsp0
+    leave
+    ret
+    xor rax, rax
+    leave
+    ret
+__frame_program_syscall equ 80
+fault:
+    push rax
+    push rcx
+    push rdx
+    push rbx
+    push rbp
+    push rsi
+    push rdi
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    push r13
+    push r14
+    push r15
+    push rax
+    mov rbp, rsp
+    sub rsp, __frame_fault
+    mov rax, [rbp+128]
+    mov [rbp-8], rax
+    mov rax, [tss+4]
+    mov [cur], rax
+    mov rax, [rbp-8]
+    mov [cur], rax
+.Lret_fault:
+    mov rsp, rbp
+    pop rax
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rbp
+    pop rbx
+    pop rdx
+    pop rcx
+    pop rax
+    add rsp, 8
+    iretq
+__frame_fault equ 80
+sys_write:
+    mov [__syscall_user_rsp], rsp
+    mov rsp, [__syscall_rsp]
+    push qword [__syscall_user_rsp]
+    push rcx
+    push r11
+    mov r9, r8
+    mov r8, r10
+    mov rcx, rdx
+    mov rdx, rsi
+    mov rsi, rdi
+    mov rdi, rax
+    push rbp
+    mov rbp, rsp
+    sub rsp, __frame_sys_write
+    mov [rbp-8], rdi
+    mov [rbp-16], rsi
+    mov rax, [rbp-16]
+    jmp .Lret_sys_write
+    xor rax, rax
+.Lret_sys_write:
+    leave
+    pop r11
+    pop rcx
+    pop rsp
+    o64 sysret
+__frame_sys_write equ 80
+enter_ring3:
+    push rbp
+    mov rbp, rsp
+    sub rsp, __frame_enter_ring3
+    iretq
+    mov rax, 0
+    leave
+    ret
+    xor rax, rax
+    leave
+    ret
+__frame_enter_ring3 equ 64
+raw_sysret:
+    push rbp
+    mov rbp, rsp
+    sub rsp, __frame_raw_sysret
+    o64 sysret
+    mov rax, 0
+    leave
+    ret
+    xor rax, rax
+    leave
+    ret
+__frame_raw_sysret equ 64
+kmain:
+    push rbp
+    mov rbp, rsp
+    sub rsp, __frame_kmain
+    lea rax, [sys_write]
+    push rax
+    pop rdi
+    call program_syscall
+    leave
+    ret
+    xor rax, rax
+    leave
+    ret
+__frame_kmain equ 64

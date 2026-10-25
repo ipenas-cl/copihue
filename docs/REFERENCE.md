@@ -1,4 +1,4 @@
-# Copihue Language Reference (v0.22.2)
+# Copihue Language Reference (v0.23.0)
 
 This document describes the language that `copihue` accepts today. Anything not listed here is not supported.
 Planned features are in the README roadmap.
@@ -116,7 +116,9 @@ syscall fn sys_write(nr: i64, a1: i64, a2: i64, a3: i64, a4: i64, a5: i64) -> i6
 
 `interrupt fn` takes no parameters, or one parameter (the error code the CPU pushed). The prologue saves the general registers and the epilogue ends in `iretq`. `return` leaves through that epilogue. Zero or one parameter is required; a function cannot be both `interrupt` and `syscall`.
 
-`syscall fn` is a `syscall` entry. Arguments arrive in the Linux convention and are presented to the body as ordinary parameters: `nr` from `rax`, then `rdi`, `rsi`, `rdx`, `r10`, `r8`, `r9`. At most seven parameters. The prologue switches to the stack last stored by `set_syscall_stack(top)` (the top must be 16-byte aligned; the kernel sets this before any entry) and the epilogue returns with `sysret`. The value in `rax` is the return value. The compiler does not write `STAR`, `LSTAR`, or `EFER`; do that with `wrmsr`.
+In 64-bit mode the CPU's interrupt frame is `RIP`, `CS`, `RFLAGS`, `RSP`, `SS`, and the epilogue leaves that frame intact. `iretq` therefore returns to ring 3 when the saved `CS.RPL` is 3, and to ring 0 when the interrupted code was ring 0. The compiler does not build that frame and does not emit `swapgs`. The first entry into ring 3 is a frame the kernel pushes itself and then `iretq()`.
+
+`syscall fn` is a `syscall` entry. Arguments arrive in the Linux convention and are presented to the body as ordinary parameters: `nr` from `rax`, then `rdi`, `rsi`, `rdx`, `r10`, `r8`, `r9`. At most seven parameters. The prologue switches to the stack last stored by `set_syscall_stack(top)` (the top must be 16-byte aligned; the kernel sets this before any entry) and the epilogue returns with `o64 sysret`. NASM has no `sysretq` mnemonic; `o64 sysret` is REX.W SYSRET (encoding `48 0F 07`). It loads RIP from `rcx` and RFLAGS from `r11`, forces ring 3, and takes `CS`/`SS` from `STAR`. The value in `rax` is the return value. With seven parameters the epilogue drops the spacer and the seventh argument with `add rsp, 16` so that drop does not overwrite `rax`. The `syscall` instruction does not consult the TSS; `set_syscall_stack` is the stack switch. The compiler does not write `STAR`, `LSTAR`, `SFMASK`, or `EFER`; do that with `wrmsr`.
 
 ### Naked functions and `bits`
 
@@ -215,13 +217,58 @@ Hosted built-ins are a compile error. These built-ins are available:
 | `write_cr0(v)`, `write_cr3(v)`, `write_cr4(v)` | `mov crN, rax`. The written value stays in `rax`, so the call is an `i64` expression |
 | `rdmsr(msr)` | returns the 64-bit MSR value |
 | `wrmsr(msr, value)` | writes a 64-bit MSR |
+| `ltr(selector)` | `ltr ax`. `selector` is the TSS selector (for example `0x28`), not the address of the TSS |
+| `iretq()` | `iretq`, for a frame the kernel pushed itself. An `interrupt fn` already ends with this instruction |
+| `sysretq()` | `o64 sysret` (NASM's spelling of `sysretq`). `rcx` must be the user RIP and `r11` the user RFLAGS. A `syscall fn` already ends with this instruction |
 | `set_syscall_stack(top)` | stack pointer `syscall fn` switches to. Call it with a 16-byte-aligned top before any syscall entry |
 | `asm("instr; instr")` | inline NASM. `;` separates instructions; the string must be a literal |
 | `ljmp(selector, label)` | `jmp sel:name`. `selector` is an integer literal and `label` is a name, not `&label`. `ljmp(0x08, pm)` emits `jmp 8:pm` |
 | `int(n)` | `int N`, one integer literal. `int(0x10)` emits `int 16`, which encodes `CD 10` |
 | `bss_start()`, `bss_end()` | address of the first / one past the last zero-initialized global (`--flat` only) |
 
-`read_cr*` and `write_cr*` are a compile error without `--freestanding` or `--flat`. `ljmp` and `int` are a compile error without `--freestanding`, `--flat`, or `--boot`. A non-literal `int(n)` is `int(n) takes one integer literal`. The regression suite assembles the control-register moves with `nasm` and does not execute them: those instructions fault in Linux user mode, the same way `iretq` and `sysret` do.
+`read_cr*` and `write_cr*` are a compile error without `--freestanding` or `--flat`. `ljmp`, `int`, `ltr`, `iretq`, and `sysretq` are a compile error without `--freestanding`, `--flat`, or `--boot`. A non-literal `int(n)` is `int(n) takes one integer literal`. `ltr()` with no argument is `ltr(selector) takes 1 argument`. The hosted regression suite assembles the privileged instructions with `nasm` and does not execute them.
+
+### TSS and user syscall
+
+A 64-bit task-state segment is 104 bytes. It has to be a `packed struct`: an ordinary struct stores every field in an 8-byte slot, so `rsp0` would not land at offset 4.
+
+```copihue
+packed struct Tss {
+    reserved0: u32,   // 0
+    rsp0: u64,        // 4   ring 0 stack on an interrupt from ring 3
+    rsp1: u64,        // 12
+    rsp2: u64,        // 20
+    reserved1: u64,   // 28
+    ist1: u64,        // 36  then ist2..ist7, 8 bytes each
+    ist2: u64,
+    ist3: u64,
+    ist4: u64,
+    ist5: u64,
+    ist6: u64,
+    ist7: u64,
+    reserved2: u64,   // 92
+    reserved3: u16,   // 100
+    iomap: u16        // 102  set to 104 when there is no I/O bitmap
+}
+
+fn set_rsp0(p: *Tss, sp: i64) -> i64 {
+    p->rsp0 = sp;
+    return p->rsp0;
+}
+```
+
+`set_rsp0(&tss, new_sp)` is the context-switch write. It stores eight bytes at offset 4 and does not touch the IST slots. The GDT entry that describes this memory is a 16-byte system descriptor (type `0x89`, limit 103). `ltr` reads that descriptor; it does not take the TSS address. Build the descriptor, `lgdt` the table, then `ltr(selector)`.
+
+Syscall MSRs, written with the existing `rdmsr` / `wrmsr`:
+
+| MSR | Address | Role |
+|---|---|---|
+| `IA32_EFER` | `0xC0000080` | set bit 0 (`SCE`) without clearing `LME` (bit 8) |
+| `IA32_STAR` | `0xC0000081` | `SYSCALL` CS is bits 47:32; `SYSRET` SS is bits 63:48 plus 8, CS plus 16, RPL forced to 3 |
+| `IA32_LSTAR` | `0xC0000082` | RIP of the `syscall fn` |
+| `IA32_FMASK` | `0xC0000084` | RFLAGS bits cleared on `syscall` (`SFMASK`) |
+
+`tests/flat/user_syscall.lap` is that sequence plus `ltr` and `set_rsp0`, assembled at `-O0` and `-O2`. It is not executed. `tests/usermode/kernel.lap` is the same sequence in a kernel QEMU boots from `tests/usermode/boot.lap`. The 2MB identity map in that kernel is marked user-accessible so ring 3 can fetch its instructions. COM1 shows `USER`: a syscall, an `int 0x80` (iretq back to ring 3), a syscall that stores a new `rsp0`, and a second `int 0x80` whose frame is on that new stack. `ltr`, `iretq`, `sysret`, and the MSR writes run on that QEMU CPU. The freestanding and flat goldens only assemble them.
 
 `read_cr*` and `write_cr*` emit `mov rax, crN` and `mov crN, rax`. That form is 64-bit. In `bits 16` or `bits 32`, use `asm`, for example `asm("mov eax, cr0")` and `asm("mov cr0, eax")`.
 
@@ -254,7 +301,7 @@ dw 0xAA55
 
 Those two lines are emitted after `bits 64`. `dw` does not depend on the bit mode. Leaving them under `bits 16`, next to a 64-bit prologue, is what makes nasm report `instruction not supported in 16-bit mode`. The code and the data must fit in 510 bytes; the image is then exactly 512 bytes and the last two are `55 aa`. An uninitialized `let` global is not copied into the sector. Put constants in `data`.
 
-`tests/boot/boot_sector.lap` prints `Copihue` with BIOS teletype (`int(0x10)`, AH=`0x0E`) and far-jumps to a 32-bit stub that writes `COPIHUE` to port `0x3F8`. The sector installs its own GDT: selector `0x08` is 32-bit code and `0x10` is data, both base 0. That is not the AtomicOS loader GDT (`0x18` is 64-bit code there). The far jump is the 16-bit form `EA ip16 sel`; with `org 0x7C00` the IP is the label's low 16 bits, and the protected-mode segment has base 0, so execution continues at that linear address. The example does not enter long mode. A page table is larger than the free space in the sector; it has to be written at some other physical address. `bits 64 naked fn` is the form of the long-mode stub.
+`tests/boot/boot_sector.lap` prints `Copihue` with BIOS teletype (`int(0x10)`, AH=`0x0E`) and far-jumps to a 32-bit stub that writes `COPIHUE` to port `0x3F8`. The sector installs its own GDT: selector `0x08` is 32-bit code and `0x10` is data, both base 0. That is not the AtomicOS loader GDT (`0x18` is 64-bit code there). The far jump is the 16-bit form `EA ip16 sel`; with `org 0x7C00` the IP is the label's low 16 bits, and the protected-mode segment has base 0, so execution continues at that linear address. The example does not enter long mode. A page table is larger than the free space in the sector; it has to be written at some other physical address. `tests/usermode` is the image that does: its sector loads a kernel at `0x8000`, and that kernel's `bits 32 naked fn _start` builds the page tables and far-jumps to 64-bit code.
 
 The regression suite compares the hexdump at `-O0` and `-O2`. When `qemu-system-x86_64` is on `PATH`, it boots the image (`-display none -boot a`, floppy, raw) and requires `COPIHUE` on COM1. That check is skipped, not failed, when QEMU is absent. CI installs the `qemu-system-x86` package.
 
@@ -264,5 +311,5 @@ The regression suite compares the hexdump at `-O0` and `-O2`. When `qemu-system-
 - Direct calls check the function name and the argument count. Assignments, argument types, return types, and indirect calls are not type-checked. There is no bounds checking on pointer indexing.
 - Ordinary struct fields still occupy 8 bytes each. Only `packed struct` uses the real width of `u8`/`u16`/`u32`. There is no padding or alignment attribute beyond packed-or-not. Struct assignment copies the whole value; it does not assign field by field in the source. Nested fields (`r.b.x`) use the real offset.
 - Indexing a local array in hosted mode inserts a bounds check that exits the process. `--freestanding` and `--flat` omit that check. Pointer indexing is never checked.
-- There are no modules or imports and no relocatable objects. A program is a single file. `bits 16` and `bits 32` exist only as naked functions: there is no 16-bit or 32-bit frame, and `read_cr*` / `write_cr*` are not valid in those modes. `interrupt fn`, `syscall fn`, and the control-register builtins can be assembled; running `iretq`, `sysret`, or a move to or from a control register requires a CPU already in ring 0, which the hosted test suite does not do. The boot-sector test does execute real mode and protected mode under QEMU when QEMU is installed.
-- `syscall fn` does not program the syscall MSRs or a TSS. `volatile` is per access, as described above. It is not a memory model, and `let volatile` on a local scalar does not change codegen.
+- There are no modules or imports and no relocatable objects. A program is a single file. `bits 16` and `bits 32` exist only as naked functions: there is no 16-bit or 32-bit frame, and `read_cr*` / `write_cr*` are not valid in those modes. The hosted suite assembles `iretq`, `sysret`, `ltr`, and the control-register moves and does not execute them. The boot-sector test executes real mode and protected mode under QEMU. `tests/usermode` executes long mode, `ltr`, the syscall MSRs, `iretq` to ring 3, `syscall`/`sysret`, and `iretq` from an interrupt, also under QEMU.
+- `syscall fn` does not program `STAR`, `LSTAR`, `SFMASK`, or `EFER`, and it does not emit `swapgs`. The kernel does that with `wrmsr` and `asm`. The `syscall` stack is `set_syscall_stack`, not `TSS.rsp0`. `volatile` is per access, as described above. It is not a memory model, and `let volatile` on a local scalar does not change codegen.
