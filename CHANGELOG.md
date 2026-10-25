@@ -2,6 +2,16 @@
 
 Todos los cambios importantes del proyecto.
 
+## [0.27.2] - 2026-10-25
+
+### Added
+- Hosted 64-bit `-O2` stores a constant with an immediate `mov` when the value fits the element, including a constant index (`mov byte [mem], 0`).
+- `i = 0; while (i < lim) { a[i] = C; i = i + 1; }` on a local `u8` or `i8` array becomes `rep stosb` from element 0 and sets `i = lim`, when `lim` is inside the length. If `lim` is not a proved constant, a runtime check keeps the original loop. A negative limit or one past the array is left alone.
+- `s = S; i = I; while (i < N) { s = s + A*i + B; i = i + 1; }` is replaced by the closed sum only when `N`, `A`, `B`, `S`, and `I` are constants, every product `A*i` and every partial sum fits in `i64`, and the terms are all non-negative or all non-positive. A sum that can wrap keeps the loop. `tests/lang/o2_reduce.lap` checks that against `-O0`, including a negative trip count, mixed signs, `i * i`, overflow, and division by a negative, by zero, and by a power of two.
+
+### Changed
+- Language version is 0.27.2. `-O0`, `--freestanding`, `--flat`, and `--boot` generate the same code as 0.27.1. `bits 16` and `bits 32` do not take these paths. The `make bench` samples were taken on a compiler that printed 0.26.3, before 0.27.0 and 0.27.1 landed on main. On this machine the medians are `fold` 142.1 ms (141.8–142.7) to 1.6 ms (1.1–2.5), overlapping C (1.3–1.9) and Rust (1.3–2.1), and `sieve` 82.3 ms (82.1–82.5) to 69.6 ms (69.4–70.0). Against C (70.0–70.4) the ranges touch at 70.0, so `sieve` is not below C, and it stays above Rust (42.8–43.6). `arith`, `fib`, `matmul`, `chain`, `array`, and `sort` are the same binary as 0.26.2. `fib` is still 3.00× C. Inverting `while` was measured (2026-10-25 16:52:01–16:52:37 UTC) and not kept: `arith` went from 67.6 ms (66.9–71.6) to 73.4 ms (70.7–74.6). There is no inlining, no unrolling, and no rewrite of `fib`.
+
 ## [0.27.1] - 2026-10-25
 
 ### Added
