@@ -14,7 +14,19 @@ Todos los cambios importantes del proyecto.
 - `tests/boot/section.lap` is one section `.boot` at `0x7C00`. The image starts with `b8 00 7c` (`mov ax, __sec__boot_start`) and QEMU checks `COPIHUE`. `tests/freestanding/sections.lap` is the instruction stream at `-O0` and `-O2`, including a `let`, a `data` block, and `section_start` / `section_end` of `.extra`, `.text`, `.data`, and `.bss`. It is assembled, not booted. `nasm -f elf64` warns that it ignores `vstart`; `nasm -f bin` applies it.
 
 ### Changed
-- Language version is 0.28.0.
+- Language version is 0.28.0. It includes the hosted `-O2` rewrites from 0.27.4. `-O0`, `--freestanding`, `--flat`, and `--boot` stay the same as 0.27.4 when the program does not use `section`.
+
+## [0.27.4] - 2026-10-25
+
+### Added
+- Hosted 64-bit `-O2` turns a register times 3, 5, or 9 into `lea`. The product wraps mod 2^64, the same as `imul`. Powers of two stay shifts. `*6` stays `imul`.
+- A straight-line run of at least two `x = (x + y) & imm`, with `imm` in `0..2147483647` and with neither `x` nor `y` assigned earlier in the run, emits every `add` and then every `and`. One statement, a narrow local, a spilled local, or a source that is an earlier destination in the run stays in the original order.
+- `tests/lang/o2_hot.lap` checks the multiply and the mask order against `-O0`, including a wrapping product, a dependent mask that must stay in order, and a dot product with even and odd `n`.
+
+### Changed
+- Language version is 0.27.4. `-O0`, `--freestanding`, `--flat`, and `--boot` generate the same code as 0.27.3. `bits 16` and `bits 32` do not take these paths. The `-O2` assembly of `fib`, `sieve`, `chain`, `fold`, and `sort` matches 0.27.3 except the version line. `matmul` changes only the fill (`i * 3` is `lea`); the inner product is still 10 instructions. `text` is unchanged.
+- On this machine, against the 17:30:43–17:31:18 UTC window (a 0.27.2 binary whose eight `-O2` programs match 0.27.3 except the version line), the 20:33:00–20:33:36 UTC window is `array` 57.1 ms (56.9–57.5) to 45.6 ms (45.3–46.0) and `arith` 66.6 ms (66.4–67.1) to 63.5 ms (63.3–63.8). Those ranges do not overlap. `array` is below OCaml (58.6–59.2) and overlaps C (43.1–49.8), so it is not below C, and it stays above Rust (33.2–34.5). The local and the global overlap (45.3–46.0 and 45.0–46.0). `arith` is below OCaml (66.2–69.0) and above C (59.1–59.7) and Rust (55.6–56.2). `fib`, `sieve`, `matmul`, `chain`, `fold`, and `sort` overlap the reference. `fib` is still 3.00× C. `sort` stays above C (73.0–73.9) and Rust (53.1–53.4). `chain` stays under the three in this row and these runs; the binary is the one from 0.25.1.
+- Two steps per branch on the even inner product were measured (2026-10-25 17:40:12–17:40:48 UTC) and not kept. `matmul` went from 46.5 ms (45.9–47.1) to 47.6 ms (47.4–48.1). The ranges do not overlap, and the later one is slower. That binary also used `lea` for `i * 3` in the fill. The hot loop was the unroll, and this release does not emit it. Inverting `while` stays out, as measured in 0.27.2.
 
 ## [0.27.3] - 2026-10-25
 
