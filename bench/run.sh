@@ -8,7 +8,7 @@ cd "$ROOT"
 
 RUNS=${BENCH_RUNS:-7}
 COMPILE_RUNS=${BENCH_COMPILE_RUNS:-5}
-BENCHES="fib sieve matmul arith chain fold array sort"
+BENCHES="fib sieve matmul arith chain fold array sort fill copy hash parse list"
 
 need() {
     if ! command -v "$1" >/dev/null 2>&1; then
@@ -277,6 +277,42 @@ fold_rs_imm=$(fold_note "$WORK/fold_rs.s")
 fold_ml_imm=$(fold_note "$WORK/fold_ml.s")
 fold_lap_imm=$(fold_note "$WORK/fold_lap.s")
 
+# Same question for the system benches: if the printed decimal is in the
+# .s, that compiler did the work at compile time.
+imm_note() {
+    src=$1
+    dec=$2
+    if [ ! -f "$src" ]; then
+        printf 'no se generó el .s'
+        return
+    fi
+    if grep -q -F "$dec" "$src"; then
+        printf 'sí'
+    else
+        printf 'no'
+    fi
+}
+
+{
+    echo '| Programa | gcc | rustc | ocamlopt | copihue |'
+    echo '|---|---|---|---|---|'
+    for name in fill copy hash parse list; do
+        dec=$(tr -d '\n' < "$WORK/stdout/${name}_c")
+        gcc -O2 -S -o "$WORK/${name}_c.s" "$ROOT/bench/src/${name}.c"
+        rustc -O --emit=asm -o "$WORK/${name}_rs.s" "$ROOT/bench/src/${name}.rs"
+        (cd "$WORK" && ocamlopt -O3 -S -o "$WORK/${name}_ml.s" "$ROOT/bench/src/${name}.ml") >/dev/null 2>&1 || true
+        "$ROOT/copihue" -O2 -S -o "$WORK/${name}_lap.s" "$ROOT/bench/src/${name}.lap"
+        rm -f "$WORK/${name}.cmi" "$WORK/${name}.cmx" "$WORK/${name}.o" \
+            "$ROOT/bench/src/${name}.cmi" "$ROOT/bench/src/${name}.cmx" "$ROOT/bench/src/${name}.o" \
+            "$ROOT/bench/src/${name}.s"
+        printf '| `%s` | %s | %s | %s | %s |\n' "$name" \
+            "$(imm_note "$WORK/${name}_c.s" "$dec")" \
+            "$(imm_note "$WORK/${name}_rs.s" "$dec")" \
+            "$(imm_note "$WORK/${name}_ml.s" "$dec")" \
+            "$(imm_note "$WORK/${name}_lap.s" "$dec")"
+    done
+} > "$WORK/sys_imm.md"
+
 cpu_model=$(awk -F: '/model name/{gsub(/^ +/, "", $2); print $2; exit}' /proc/cpuinfo)
 cpu_mhz=$(awk -F: '/cpu MHz/{gsub(/^ +/, "", $2); print $2; exit}' /proc/cpuinfo)
 ncpu=$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo "?")
@@ -368,6 +404,55 @@ worst_ratio=$2
 best_name=$3
 best_ratio=$4
 compile_win=$5
+nbench=$(echo $BENCHES | awk '{print NF}')
+
+sep_line() {
+    awk -F '\t' -v order="$BENCHES" -v lang="$1" -v label="$2" '
+        $1 != "array_global" && $2 == "lap" { lo[$1] = $7 + 0; hi[$1] = $8 + 0 }
+        $1 != "array_global" && $2 == lang { clo[$1] = $7 + 0; chi[$1] = $8 + 0 }
+        END {
+            above = ""; below = ""; over = ""
+            nnames = split(order, names, " ")
+            for (i = 1; i <= nnames; i++) {
+                n = names[i]
+                if (!(n in lo) || !(n in clo)) continue
+                if (lo[n] > chi[n]) above = above " `" n "`"
+                else if (hi[n] < clo[n]) below = below " `" n "`"
+                else over = over " `" n "`"
+            }
+            if (above == "") above = " ninguna"
+            if (below == "") below = " ninguna"
+            if (over == "") over = " ninguna"
+            printf "Contra %s, el mínimo de Copihue queda por encima del máximo en:%s. El máximo de Copihue queda por debajo del mínimo en:%s. Los rangos se solapan en:%s.\n", label, above, below, over
+        }
+    ' "$ROOT/bench/results.tsv"
+}
+
+gap_txt="$(sep_line c C)
+$(sep_line rs Rust)
+$(sep_line ml OCaml)"
+
+size_note=$(awk -F '\t' -v order="$BENCHES" '
+    $1 != "array_global" && $2 == "lap" { b["lap",$1] = $9 + 0; t["lap",$1] = $10 + 0 }
+    $1 != "array_global" && ($2 == "c" || $2 == "rs" || $2 == "ml") {
+        b[$2,$1] = $9 + 0; t[$2,$1] = $10 + 0
+    }
+    END {
+        file_small = 1; text_small = 1
+        nnames = split(order, names, " ")
+        for (i = 1; i <= nnames; i++) {
+            n = names[i]
+            if (b["lap",n] >= b["c",n] || b["lap",n] >= b["rs",n] || b["lap",n] >= b["ml",n]) file_small = 0
+            if (t["lap",n] >= t["c",n] || t["lap",n] >= t["rs",n] || t["lap",n] >= t["ml",n]) text_small = 0
+        }
+        if (file_small && text_small)
+            print "El fichero de Copihue es el más chico de cada fila. `file` marca los binarios de Rust y de OCaml con información de depuración; la columna `text` de `size` es el código, y también ahí Copihue es el más chico."
+        else if (file_small)
+            print "El fichero de Copihue es el más chico de cada fila. En la columna `text` no lo es en todas; hay que leer la tabla."
+        else
+            print "En tamaño de fichero Copihue no es el más chico en todas las filas; hay que leer la tabla."
+    }
+' "$ROOT/bench/results.tsv")
 
 cell() {
     # $1 median ns, $2 min ns, $3 max ns
@@ -412,9 +497,10 @@ Cada programa está escrito cuatro veces (\`.lap\`, \`.c\`, \`.rs\`, \`.ml\`) co
 - Ejecución: $RUNS repeticiones más una de calentamiento que no entra en la mediana. La mediana es el valor central de las $RUNS muestras ordenadas (la 4.ª si son 7). En cada celda, entre paréntesis, el mínimo y el máximo de esas repeticiones.
 - La ejecución medida tira stdout a \`/dev/null\`. El proceso sigue escribiendo una línea. Afinidad a un CPU: $pin_txt.
 - El tamaño es \`wc -c\` del fichero producido, sin \`strip\`. \`text\`/\`data\`/\`bss\` salen de \`size\`.
-- Copihue \`-O2\` en hosted pliega constantes, reescribe \`*\`, \`/\` y \`%\` por potencias de dos, evalúa una operación de operandos simples directo en el registro del local (o en \`rax\`/\`rbx\` si hace falta un temporal), mantiene hasta cuatro locales escalares en \`r12\`–\`r15\` y, cuando ninguna llamada cae dentro del rango de uso, dos más en \`r10\` y \`r11\`, direcciona un array con \`base+índice*escala\` en una instrucción, y si la función abre con \`if (param <op> hoja) return param\` compara el registro de entrada y retorna antes de armar el frame. Una llamada directa del mismo programa, con a lo más seis argumentos que quepan en \`rdi\`–\`r9\`, los deja en esos registros; \`syscall\`, los builtins y un argumento que es otra llamada siguen con \`push\`/\`pop\`. Un \`if\` o \`while\` cuya condición es una comparación de escalares, o de un elemento de array, salta con las banderas y no materializa 0/1; \`&&\` y \`||\` también, y \`&&\` no evalúa la derecha si la izquierda ya falla. Esa carga se reutiliza en el \`a[i]\` o \`a[i±constante] =\` siguiente. Un \`while (i < lim)\` que arranca en una constante no negativa, solo suma uno a \`i\` al final, no llama y no toma direcciones, omite el chequeo de límites del array local cuando el arreglo tiene al menos \`lim\` elementos. El producto \`s = s + a[i*n+k] * b[k*n+j]\` con \`k\` de 0 a \`n\` camina las dos filas con punteros si \`i\` y \`j\` están en rango; si no, corre el bucle original. El desplazamiento \`j = i - 1; while (j >= 0 && a[j] > key) { a[j+1] = a[j]; j = j - 1; } a[j+1] = key\`, dentro de \`while (i < N)\` con \`N\` constante positiva, \`i\` desde una constante no negativa y el array \`i64\` de al menos \`N\` elementos, gira el bucle y no chequea el tope de \`j\`: \`j\` no baja de -1. \`a[j] > key && j >= 0\` no entra. Una función que no usa \`rbp\` y no empuja guarda los registros con \`push\`/\`pop\`. Un store de una constante que cabe en el elemento es un \`mov\` inmediato. Un llenado \`a[i] = C\` de un array \`u8\`/\`i8\`, con \`i\` desde 0 y el límite dentro del largo, es \`rep stosb\`. Una suma \`s = s + A*i + B\` con \`i\` de una constante a otra, paso 1, se sustituye por el total solo si cada producto y cada suma parcial cabe en i64 y los términos no cambian de signo; si puede envolver, el bucle se ejecuta. Una multiplicación de un registro por 3, 5 o 9 es un \`lea\`. Una racha de al menos dos \`x = (x + y) & imm\`, con \`imm\` entre 0 y 2147483647 y sin que \`x\` ni \`y\` se hayan escrito antes en la racha, emite los \`add\` y después los \`and\`. No invierte el \`while\` (medido, no bajó \`arith\`) y no desenrolla el producto interno (medido, no bajó \`matmul\`). Un bucle \`k\` probado al final, con \`imul\` desde memoria, también se midió y no bajó \`matmul\`. No borra un bucle arbitrario y no reescribe \`fib\`. \`-O0\`, \`--freestanding\`, \`--flat\` y \`--boot\` no usan eso.
+- Copihue \`-O2\` en hosted pliega constantes, reescribe \`*\`, \`/\` y \`%\` por potencias de dos, evalúa una operación de operandos simples directo en el registro del local (o en \`rax\`/\`rbx\` si hace falta un temporal), mantiene hasta cuatro locales escalares en \`r12\`–\`r15\` y, cuando ninguna llamada cae dentro del rango de uso, dos más en \`r10\` y \`r11\`, direcciona un array con \`base+índice*escala\` en una instrucción, y si la función abre con \`if (param <op> hoja) return param\` compara el registro de entrada y retorna antes de armar el frame. Una llamada directa del mismo programa, con a lo más seis argumentos que quepan en \`rdi\`–\`r9\`, los deja en esos registros; \`syscall\`, los builtins y un argumento que es otra llamada siguen con \`push\`/\`pop\`. Un \`if\` o \`while\` cuya condición es una comparación de escalares, o de un elemento de array, salta con las banderas y no materializa 0/1; \`&&\` y \`||\` también, y \`&&\` no evalúa la derecha si la izquierda ya falla. Esa carga se reutiliza en el \`a[i]\` o \`a[i±constante] =\` siguiente. Un \`while (i < lim)\` que arranca en una constante no negativa, solo suma uno a \`i\` al final, no llama y no toma direcciones, omite el chequeo de límites del array local cuando el arreglo tiene al menos \`lim\` elementos. El producto \`s = s + a[i*n+k] * b[k*n+j]\` con \`k\` de 0 a \`n\` camina las dos filas con punteros si \`i\` y \`j\` están en rango; si no, corre el bucle original. El desplazamiento \`j = i - 1; while (j >= 0 && a[j] > key) { a[j+1] = a[j]; j = j - 1; } a[j+1] = key\`, dentro de \`while (i < N)\` con \`N\` constante positiva, \`i\` desde una constante no negativa y el array \`i64\` de al menos \`N\` elementos, gira el bucle y no chequea el tope de \`j\`: \`j\` no baja de -1. \`a[j] > key && j >= 0\` no entra. Una función que no usa \`rbp\` y no empuja guarda los registros con \`push\`/\`pop\`. Un store de una constante que cabe en el elemento es un \`mov\` inmediato. Un llenado \`a[i] = C\` de un array \`u8\`/\`i8\`, con \`i\` desde 0 y el límite dentro del largo, es \`rep stosb\`. Una suma \`s = s + A*i + B\` con \`i\` de una constante a otra, paso 1, se sustituye por el total solo si cada producto y cada suma parcial cabe en i64 y los términos no cambian de signo; si puede envolver, el bucle se ejecuta. Una multiplicación de un registro por 3, 5 o 9 es un \`lea\`. Una racha de al menos dos \`x = (x + y) & imm\`, con \`imm\` entre 0 y 2147483647 y sin que \`x\` ni \`y\` se hayan escrito antes en la racha, emite los \`add\` y después los \`and\`. No invierte el \`while\` (medido, no bajó \`arith\`) y no desenrolla el producto interno (medido, no bajó \`matmul\`). Un bucle \`k\` probado al final, con \`imul\` desde memoria, también se midió y no bajó \`matmul\`. No borra un bucle arbitrario y no reescribe \`fib\`. Una copia \`dst[i] = src[i]\` no pasa a \`rep movs\` (\`rep movsb\` sigue siendo el builtin, y \`rep stosb\` solo el llenado constante). El \`matmul\` de gcc \`-O2\` vectoriza el producto con \`pmuludq\` y no cambia el orden \`i, j, k\`; eso no se emite. El \`fib\` de gcc \`-O2\` parte la recurrencia en pares e impares (\`sub rsp, 200\`, una sola llamada); no es una limpieza de \`mov\` del prólogo directo, y tampoco se emite. \`-O0\`, \`--freestanding\`, \`--flat\` y \`--boot\` no usan eso.
 - C usa \`long\` ($long_bit bits aquí). Rust usa \`i64\`. OCaml usa \`int\` nativo, que en amd64 es 63 bits con etiqueta. Las cargas caben en ese rango: las cuatro salidas coincidieron. El desborde de \`rustc -O\` envuelve, igual que un binario release; no es el modo debug.
-- No hay intrínsecos, \`unsafe\`, pragmas, \`-march=native\` ni \`-C opt-level=3\`. Los flags son los pedidos: \`gcc -O2\`, \`rustc -O\`, \`ocamlopt -O3\`, \`copihue -O2\`.
+- No hay intrínsecos, \`unsafe\`, pragmas, \`-march=native\` ni \`-C opt-level=3\`. Los flags son los pedidos: \`gcc -O2\`, \`rustc -O\`, \`ocamlopt -O3\`, \`copihue -O2\`. \`list.rs\` deriva \`Copy\` y \`Clone\` solo para poder construir el array fijo.
+- \`fill\`, \`copy\`, \`hash\` y \`parse\` recorren bytes. En Copihue y en C el buffer es una global (\`.bss\`, un byte por elemento). En Rust es un array en la pila. En OCaml es \`Bytes\` en el heap. \`list\` es un array de nodos \`{val, next}\` con \`next\` entero y centinela \`-1\`. OCaml guarda el par en un array plano (\`2*i\`, \`2*i+1\`) porque un record es un bloque con cabecera, no 16 bytes contiguos; la cadena de índices es la misma. No hay \`malloc\`.
 - Esta copia de ocamlopt no trae Flambda. \`-O3\` se pasa igual; no activa Flambda.
 
 ## Tablas
@@ -518,6 +604,12 @@ Se buscó ese decimal en el ensamblado (\`gcc -O2 -S\`, \`rustc -O --emit=asm\`,
 
 Un bucle de 500000000 vueltas no cabe en unos pocos milisegundos a ninguna frecuencia plausible de esta máquina (a 1 ciclo por vuelta y ${cpu_mhz} MHz harían falta unos $(awk -v mhz="$cpu_mhz" 'BEGIN { printf "%.0f", 500000000 / (mhz * 1000) }') ms). Quien tiene el decimal en el \`.s\` no ejecutó el bucle: el trabajo se hizo al compilar. Quien no lo tiene hay que leerlo en la tabla de tiempos, no suponerlo.
 
+## \`fill\`, \`copy\`, \`hash\`, \`parse\` y \`list\`: el decimal en el \`.s\`
+
+La misma búsqueda, con la salida de cada programa. \`sí\` quiere decir que ese decimal está en el ensamblado y el tiempo no es el del bucle.
+
+$(cat "$WORK/sys_imm.md")
+
 ## Array local y array global, solo Copihue
 
 \`bench/src/array_global.lap\` es el mismo algoritmo que \`array\`, con el arreglo en una global. Una carga de un array local emite un chequeo de límites, salvo el \`while (i < lim)\` de la metodología: el bucle interno de \`array\` y su suma final son de esa forma, así que no lo emiten. La global no lo emite. La salida coincidió con \`array\`.
@@ -529,15 +621,17 @@ Un bucle de 500000000 vueltas no cabe en unos pocos milisegundos a ninguna frecu
 
 ## Lectura de esta corrida
 
-El cociente Copihue/C más alto es \`$worst_name\` ($worst_ratio×) y el más bajo es \`$best_name\` ($best_ratio×). Un cociente menor que 1 quiere decir que, en esa fila, la mediana de Copihue quedó por debajo de la de C; el mínimo y el máximo de la tabla dicen si los rangos se separan. En \`fold\` la tabla del decimal dice gcc $fold_c_imm, rustc $fold_rs_imm, Copihue $fold_lap_imm y OCaml $fold_ml_imm. Quien lo tiene no ejecutó las 500000000 vueltas, y ese tiempo es el de arrancar el proceso. Quien no lo tiene sí ejecuta el bucle; el cociente Copihue/OCaml es el de la tabla. \`chain\` es una cadena dependiente de multiplicar: el cociente está en la tabla, no se supone. El hueco que queda, en los bucles que los cuatro ejecutan, está en \`fib\`, \`sieve\`, \`matmul\`, \`arith\`, \`array\` y \`sort\`.
+El cociente Copihue/C más alto es \`$worst_name\` ($worst_ratio×) y el más bajo es \`$best_name\` ($best_ratio×). Un cociente menor que 1 quiere decir que, en esa fila, la mediana de Copihue quedó por debajo de la de C; el mínimo y el máximo de la tabla dicen si los rangos se separan. En \`fold\` la tabla del decimal dice gcc $fold_c_imm, rustc $fold_rs_imm, Copihue $fold_lap_imm y OCaml $fold_ml_imm. Quien lo tiene no ejecutó las 500000000 vueltas, y ese tiempo es el de arrancar el proceso. Quien no lo tiene sí ejecuta el bucle; el cociente Copihue/OCaml es el de la tabla. \`chain\` es una cadena dependiente de multiplicar: el cociente está en la tabla, no se supone.
+
+$gap_txt
 
 $(if [ "$compile_win" = 1 ]; then
-    echo "En tiempo de compilación de estos archivos chicos, la mediana de Copihue es la más baja en las ocho filas. Eso mide el arranque de un compilador de una pasada más nasm y ld, no un proyecto grande."
+    echo "En tiempo de compilación de estos archivos chicos, la mediana de Copihue es la más baja en las $nbench filas. Eso mide el arranque de un compilador de una pasada más nasm y ld, no un proyecto grande."
 else
     echo "En tiempo de compilación Copihue no fue el más rápido en todas las filas; hay que leer la tabla."
 fi)
 
-El fichero de Copihue es el más chico de cada fila. \`file\` marca los binarios de Rust y de OCaml con información de depuración; la columna \`text\` de \`size\` es el código, y también ahí Copihue es el más chico. El binario de C está enlazado con libc y el de Copihue no: el tamaño no es "bytes del algoritmo".
+$size_note El binario de C está enlazado con libc y el de Copihue no: el tamaño no es "bytes del algoritmo".
 
 La mediana del array local y la del global están en la tabla de arriba. El hueco que quede entre las dos está medido ahí; el perfil de más abajo cuenta las instrucciones del bucle interno.
 
@@ -548,7 +642,7 @@ La mediana del array local y la del global están en la tabla de arriba. El huec
 - El tiempo de ejecución incluye crear el proceso, tocar la pila y escribir una línea. No es un bucle interno cronometrado con \`rdtsc\`.
 - Máquina virtual. La mediana recorta un pico, no convierte el número en una cifra de hardware físico.
 - No se midió código freestanding, ni un programa grande, ni el uso de memoria.
-- Copihue reserva en la pila 8 bytes por elemento aunque el elemento sea \`u8\` (el hueco se redondea al número de elementos). La criba local de 400000 bytes lógicos ocupa unos 3.2 MB de marco. Cabe en el \`ulimit -s\` de esta corrida.
+- Copihue reserva en la pila 8 bytes por elemento aunque el elemento sea \`u8\` (el hueco se redondea al número de elementos). La criba local de 400000 bytes lógicos ocupa unos 3.2 MB de marco. Cabe en el \`ulimit -s\` de esta corrida. \`fill\`, \`copy\`, \`hash\` y \`parse\` no usan ese marco: el buffer es global y el elemento ocupa un byte. \`list\` reserva 32768 nodos de 16 bytes en \`.bss\`.
 - Un \`let\` vive hasta el fin de su bloque. Declarar el mismo nombre dos veces en un bloque es un error. Los programas de esta suite declaran cada nombre una vez.
 
 Los datos crudos, en nanosegundos, están en \`bench/results.tsv\`.

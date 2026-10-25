@@ -1,0 +1,42 @@
+// BENCH: parse n=65536 reps=512
+// Buffer global de dígitos ASCII y comas: nueve dígitos y una coma, en
+// ciclo. Cada vuelta recorre el buffer, acumula un entero y lo suma al
+// encontrar una coma. El resto, después de la última coma, se suma una vez.
+let buf: [u8; 65536];
+
+fn main() -> i32 {
+    let n = 65536;
+    let reps = 512;
+    let i = 0;
+    let r = 0;
+    let c = 0;
+    let v = 0;
+    let sum = 0;
+    while (i < n) {
+        if ((i % 10) == 9) {
+            buf[i] = 44;
+        } else {
+            buf[i] = 48 + (i % 10);
+        }
+        i = i + 1;
+    }
+    while (r < reps) {
+        i = 0;
+        v = 0;
+        while (i < n) {
+            c = buf[i];
+            if (c == 44) {
+                sum = sum + v;
+                v = 0;
+            } else {
+                v = v * 10 + (c - 48);
+            }
+            i = i + 1;
+        }
+        sum = sum + v;
+        r = r + 1;
+    }
+    print_int(sum);
+    println("");
+    return 0;
+}
