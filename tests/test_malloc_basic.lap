@@ -15,7 +15,7 @@ fn main() -> i32 {
 
     println("✓ malloc(40) succeeded");
     print("  ptr = 0x");
-    print_int(ptr);
+    print_int(ptr as i64);
     println("");
 
     // 2. Write values to allocated memory

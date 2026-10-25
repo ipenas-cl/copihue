@@ -22,7 +22,7 @@ fn main() -> i64 {
     cont.ptr = arr;
 
     print("cont.ptr addr = ");
-    print_int(cont.ptr);
+    print_int(cont.ptr as i64);
     println("");
 
     // Try to index through struct field pointer

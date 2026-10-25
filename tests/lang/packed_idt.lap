@@ -22,7 +22,7 @@ fn main() -> i32 {
     e.off_hi = 0x11223344;
     e.zero = 0;
 
-    let b: *u8 = &e;
+    let b: *u8 = &e as *u8;
     let i = 0;
     while (i < 16) {
         print_int(b[i]);
@@ -45,7 +45,7 @@ fn main() -> i32 {
     table[1].off_mid = 0;
     table[1].off_hi = 0;
     table[1].zero = 0;
-    let p: *u8 = &table[0];
+    let p: *u8 = &table[0] as *u8;
     print_int(p[18]); println("");
     print_int(p[21]); println("");
     print_int(table[1].sel); println("");
@@ -53,7 +53,7 @@ fn main() -> i32 {
     let d: DescPtr;
     d.limit = 0x1FF;
     d.base = 0x10000;
-    let q: *u8 = &d;
+    let q: *u8 = &d as *u8;
     print_int(q[0]); println("");
     print_int(q[1]); println("");
     print_int(q[2]); println("");

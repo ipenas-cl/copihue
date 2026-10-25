@@ -1,7 +1,7 @@
 struct Point { x: i64, y: i64 }
 
 fn exc_name(vec: i64) -> *u8 {
-    return vec;
+    return vec as *u8;
 }
 
 fn as_mut(p: *u8) -> *mut u8 {
@@ -13,7 +13,7 @@ fn as_vol(p: *u8) -> *volatile mut u8 {
 }
 
 fn nested(p: *u8) -> **u8 {
-    return p;
+    return p as **u8;
 }
 
 fn bytes() -> [u8; 4] {
@@ -32,7 +32,7 @@ fn main() -> i32 {
     let buf: [u8; 2];
     buf[0] = 65;
     buf[1] = 66;
-    let p: *u8 = exc_name(buf);
+    let p: *u8 = exc_name(buf as i64);
     print_int(p[0]);
     println("");
     let q: *u8 = as_mut(p);
@@ -43,8 +43,8 @@ fn main() -> i32 {
     println("");
 
     let table: [i64; 2];
-    table[0] = p;
-    let pp: **u8 = nested(table);
+    table[0] = p as i64;
+    let pp: **u8 = nested(table as *u8);
     let inner: *u8 = pp[0];
     print_int(inner[0]);
     println("");

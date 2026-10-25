@@ -6,7 +6,7 @@ struct Container {
 
 fn store_ptr(cont: *Container, p: *i8) -> i64 {
     print("  In store_ptr: p addr = ");
-    print_int(p);
+    print_int(p as i64);
     println("");
     print("  In store_ptr: p[0] = ");
     print_int(p[0]);
@@ -15,7 +15,7 @@ fn store_ptr(cont: *Container, p: *i8) -> i64 {
     cont.ptr = p;
 
     print("  After assignment: cont.ptr = ");
-    print_int(cont.ptr);
+    print_int(cont.ptr as i64);
     println("");
     print("  After assignment: cont.ptr[0] = ");
     print_int(cont.ptr[0]);
@@ -42,7 +42,7 @@ fn main() -> i64 {
     store_ptr(&cont, arr);
 
     print("After store_ptr: cont.ptr = ");
-    print_int(cont.ptr);
+    print_int(cont.ptr as i64);
     println("");
     print("After store_ptr: cont.ptr[0] = ");
     print_int(cont.ptr[0]);

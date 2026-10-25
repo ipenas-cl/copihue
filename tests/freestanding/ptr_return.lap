@@ -2,10 +2,10 @@
 // `-> *u8` is a real type in freestanding code, not a single token after `->`.
 
 fn exc_name(vec: i64) -> *u8 {
-    return vec;
+    return vec as *u8;
 }
 
 fn load(p: *u8) -> i64 {
-    let q: *u8 = exc_name(p);
+    let q: *u8 = exc_name(p as i64);
     return q[0];
 }

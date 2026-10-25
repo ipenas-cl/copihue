@@ -13,8 +13,8 @@ fn alloc(n: i64) -> i64 {
 fn main() -> i32 {
     let a = alloc(4);
     let b = alloc(4);
-    let p: *u8 = a;
-    let q: *u8 = b;
+    let p: *u8 = a as *u8;
+    let q: *u8 = b as *u8;
     p[0] = 42;
     q[0] = 7;
     p[3] = 9;

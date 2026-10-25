@@ -1,0 +1,12 @@
+struct Point { x: i64, y: i64 }
+
+fn take(p: *u8) -> i64 {
+    return p[0];
+}
+
+fn main() -> i32 {
+    let pt: Point;
+    let p: *u8 = &pt;
+    take(&pt);
+    return p[0];
+}
