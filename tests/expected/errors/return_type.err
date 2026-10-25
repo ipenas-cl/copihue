@@ -1,0 +1,3 @@
+tests/errors/return_type.lap:1:28: error: expected a type, found '{'
+      1 | fn exc_name(vec: i64) -> * {
+        |                            ^
