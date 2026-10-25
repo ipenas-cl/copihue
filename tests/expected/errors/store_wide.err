@@ -1,0 +1,4 @@
+tests/errors/store_wide.lap:3:23: error: an 8-byte store is not available in bits 16
+      3 |     *(0x1000 as *u64) = 1;
+        |                       ^
+1 error, compilation failed

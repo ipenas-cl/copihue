@@ -1,0 +1,4 @@
+tests/errors/naked_params.lap:1:10: error: a naked function takes at most 6 register parameters
+      1 | naked fn f(a: i64, b: i64, c: i64, d: i64, e: i64, f2: i64, g: i64) -> i64 {
+        |          ^
+1 error, compilation failed

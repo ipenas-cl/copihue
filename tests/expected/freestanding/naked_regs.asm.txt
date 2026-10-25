@@ -1,0 +1,67 @@
+section .data
+section .text
+msg:
+    db 90, 0
+bits 16
+real_mode:
+    mov ax, 0
+    movzx eax, ax
+    mov ds, ax
+    movzx eax, ax
+    mov es, ax
+    movzx eax, ax
+    mov ss, ax
+    movzx eax, ax
+    mov fs, ax
+    movzx eax, ax
+    mov gs, ax
+    mov ax, ds
+    movzx eax, ax
+    mov sp, 31744
+    mov ah, 14
+    mov al, 67
+    mov dl, 128
+    mov si, msg
+    mov di, 32772
+    mov eax, 59424
+    mov ecx, 24
+    mov edx, 1397571920
+    mov esp, 589824
+    mov eax, 8195
+    mov dword [4096], eax
+    jmp 0x8200
+    ret
+bits 64
+bits 32
+protected:
+    mov ecx, eax
+    mov eax, ecx
+    ret
+    ret
+bits 64
+bits 64
+long_mode:
+    mov rax, 1
+    mov rbx, 2
+    mov rsp, 589824
+    mov rbp, 524288
+    mov rax, 7
+    mov [rbp+136], rax
+    mov rax, [rbp+128]
+    push 24
+    lea rax, [.L0]
+    push rax
+    retfq
+.L0:
+    retfq
+    ret
+bits 64
+add1:
+    mov rax, rdi
+    push rax
+    mov rax, 1
+    mov rbx, rax
+    pop rax
+    add rax, rbx
+    ret
+    ret

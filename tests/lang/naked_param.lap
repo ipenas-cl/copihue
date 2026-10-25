@@ -1,0 +1,22 @@
+// A naked parameter is the incoming register. No frame is built, so a
+// 64-bit caller's rdi/rsi still hold the arguments when the body reads them.
+// A local named ax is that variable, not the register.
+
+naked fn inc(n: i64) -> i64 {
+    return n + 1;
+}
+
+naked fn add(a: i64, b: i64) -> i64 {
+    return a + b;
+}
+
+fn main() -> i64 {
+    let ax = 7;
+    print_int(inc(41));
+    println("");
+    print_int(add(20, 22));
+    println("");
+    print_int(ax);
+    println("");
+    return 0;
+}

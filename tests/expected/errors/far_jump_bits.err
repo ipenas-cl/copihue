@@ -1,0 +1,4 @@
+tests/errors/far_jump_bits.lap:3:5: error: far_jump() is a 64-bit far return; use ljmp(selector, label) in bits 16 or 32
+      3 |     far_jump(8);
+        |     ^
+1 error, compilation failed

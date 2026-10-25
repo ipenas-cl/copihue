@@ -2,6 +2,19 @@
 
 Todos los cambios importantes del proyecto.
 
+## [0.26.0] - 2026-10-25
+
+### Added
+- Named registers are lvalues and rvalues inside a `naked` function, in every bit mode: `ds`/`es`/`ss`/`fs`/`gs`, `al`/`ah`/`dl`, `ax`/`sp`/`si`/`di`, `eax`/`ecx`/`edx`/`esp`, and `rax`/`rbx`/`rsp`/`rbp`. Outside a naked function the error is `register 'ax' is only available in a naked function`. A 64-bit name in `bits 16` or `bits 32` is `register 'rax' is not available in bits 16`. A local or a global of the same name is that variable. `cs` is not one of these names. An immediate writes that register only (`mov ah, 14`, `mov sp, 31744`), so the other bytes of `eax` survive. Any other right-hand side is computed in the accumulator first, which clears those bytes. A segment write still evaluates the right-hand side and then emits `mov ds, ax`, so `ds = 0` is unchanged. Reading a segment is `mov ax, ds` and then a zero-extend, because `movzx eax, ds` does not assemble.
+- `jmp 0x8200` jumps to that address. The number is copied as written. `jmp other` jumps to a function or a data label in this assembly unit. `jmp(...)` is still a call. An unknown name is `unknown jump target 'name'`. There is no indirect jump.
+- A naked function may take parameters. There is no frame and no prologue move: the name is the incoming register. 64-bit code, including a naked function with no `bits`, uses `rdi`, `rsi`, `rdx`, `rcx`, `r8`, `r9` (at most 6), the same registers a Copihue call already fills. `bits 32` uses `eax`, `ecx`, `edx`, `esi` (at most 4). `bits 16` uses `ax`, `cx`, `dx`, `si` (at most 4). `ax` and `eax` are the accumulator, so a later expression overwrites that parameter. `bx`/`ebx`/`rbx` stay scratch and are not parameter registers. One parameter too many is `a naked function takes at most 6 register parameters`. A struct parameter is `a naked parameter must be an integer or a pointer`. `&param` is `naked parameter 'n' has no address`. A scalar or pointer local is still the 0.25.2 slot.
+- `*(0x1000 as *u32) = 0x2003` and `*(rbp + 136) = x` store through an address that is not a bare name. `*p = v` is unchanged. The width is the cast pointee (`u8` is 1 byte, `u16` is 2, `u32` is 4, `u64` and `i64` are 8). With no cast the store is 4 bytes in `bits 16` and `bits 32`, and 8 bytes otherwise. A number, a naked register, or `reg+disp` / `reg-disp` is one memory operand. Anything else is computed, saved, and the value is stored through `ebx` or `rbx`. An 8-byte load or store in `bits 16` or `bits 32` is `an 8-byte store is not available in bits 16`. A literal that does not fit the pointee is the usual `expected u8, found integer literal 300`. An 8-bit or 16-bit load through this form zero-extends, and a 32-bit load is `mov eax`.
+- `far_jump(selector)` reloads `CS` in 64-bit freestanding, flat, or boot code. It pushes the selector, the address of the next instruction, and `retfq`. Execution continues there. The two pushes are popped, so a frame above them stays. It clobbers `rax`. In `bits 16` or `bits 32` the error is `far_jump() is a 64-bit far return; use ljmp(selector, label) in bits 16 or 32`, because `ljmp` already emits `jmp sel:label` there. `retfq()` emits `retfq`, or `retf` in `bits 16` and `bits 32`. `jmp sel:label` is not an encoding in 64-bit mode.
+- `tests/freestanding/naked_regs.lap` is the instruction stream at `-O0` and `-O2`. It is assembled, not booted. `tests/boot/jmp_sp.lap` sets the segments and `sp`, jumps to a label, and writes `COPIHUE` to COM1. QEMU checks that string. `jmp 0x8200` is assembled after the halt loop (`org 0x7C00`, a 16-bit near jump) and is not executed. `tests/lang/naked_param.lap` runs under Linux: a naked `inc` and `add` print 42, and a local named `ax` prints 7.
+
+### Changed
+- Language version is 0.26.0.
+
 ## [0.25.2] - 2026-10-25
 
 ### Added

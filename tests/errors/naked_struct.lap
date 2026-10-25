@@ -1,0 +1,5 @@
+struct Point { x: i64, y: i64 }
+
+naked fn f(p: Point) -> i64 {
+    return 0;
+}
