@@ -61,7 +61,8 @@ Old `.ch` files are still accepted, with a deprecation warning.
 
 The full language reference is in [docs/REFERENCE.md](docs/REFERENCE.md).
 
-- Functions, recursion, up to 16 parameters, return types `*T`, `**T`, and `[T; N]`, structs passed by value (copied) or by pointer
+- Functions, recursion, up to 16 parameters, return types `*T`, `**T`, and `[T; N]` (hosted, freestanding, and flat), structs passed by value (copied) or by pointer
+- Block scope: a `let` lives until the end of its block, a nested block may shadow it, and the same name twice in one block is a compile error
 - `let` locals, globals, `let volatile` globals, `*volatile T` pointers, `volatile` struct fields, integer types `i8 i16 i32 i64 u8 u16 u32 u64`, typed arrays, pointers, `&`, `*`, `->`
 - `struct`s, including nested structs, arrays of structs, nested struct literals, and assignment `a = b` (exact size, packed records included)
 - `packed struct` for hardware records (an x86-64 IDT gate is 16 bytes, not eight slots of 8)
@@ -92,17 +93,18 @@ The full language reference is in [docs/REFERENCE.md](docs/REFERENCE.md).
 
 | Suite | What it checks |
 |---|---|
-| 139 test programs + 18 examples | compiled at `-O0` and `-O2`, run, and stdout + exit code compared to golden files in `tests/expected/` |
-| 23 error tests | the compiler rejects the program with the exact expected message |
-| 11 freestanding tests | `--freestanding` output has no `_start`/syscalls and assembles; the instruction stream is golden. Three of them also require the same stream at `-O2` |
-| 2 flat-binary tests | `--flat` puts `_start` at offset 0; the raw image matches a golden hexdump |
+| 140 test programs + 18 examples | compiled at `-O0` and `-O2`, run, and stdout + exit code compared to golden files in `tests/expected/` |
+| 25 error tests | the compiler rejects the program with the exact expected message |
+| 13 freestanding tests | `--freestanding` output has no `_start`/syscalls and assembles; the instruction stream is golden. Five of them also require the same stream at `-O2` |
+| 3 flat-binary tests | `--flat` puts `_start` at offset 0; the raw image matches a golden hexdump. One of them also requires the same image at `-O2` |
 | 1 boot sector | `--boot` at `-O0` and `-O2` is the same 512-byte image ending in `55 aa`, compared to a golden hexdump. If `qemu-system-x86_64` is installed, the image is booted and COM1 must contain `COPIHUE`. CI installs QEMU; without it the hexdump test still runs |
 | `make net-test` | starts `examples/simple_api_server.lap`, queries it with `curl` and with two Copihue HTTP clients, then stops it |
 
 ### Known limitations
 
 - Ordinary struct fields still occupy 8 bytes each. Only `packed struct` uses the real width of `u8`/`u16`/`u32`. There is no padding or alignment attribute beyond packed-or-not. `a = b` copies the whole struct; it does not check anything beyond the struct type name.
-- Call checking is the function name and the argument count. Argument types, return types, assignment types, and `const` are not checked. A return type of `*u8` or `[u8; 4]` parses; the bits still come back in `rax`. Function pointers are integer addresses, not a typed `fn` type, and an indirect call is not arity-checked.
+- Call checking is the function name and the argument count. Argument types, return types, assignment types, and `const` are not checked. A return type of `*u8` or `[u8; 4]` parses in hosted, freestanding, and flat code; the bits still come back in `rax`. Function pointers are integer addresses, not a typed `fn` type, and an indirect call is not arity-checked.
+- Locals are block-scoped. Two `let`s of the same name in sibling blocks are different slots, so a use reads the one that is in scope. The stack slot is not reused after the block ends.
 - Integer arithmetic is always 64-bit and overflow wraps. Narrow types only change loads and stores. There are no bounds checks on pointer indexing.
 - A kernel is still one translation unit: there are no modules and no relocatable ELF objects. `bits 16` and `bits 32` are naked functions only: there is no 16-bit frame, and the `read_cr*` / `write_cr*` builtins are the 64-bit `mov rax, crN` form. `tests/boot/boot_sector.lap` reaches protected mode. It does not enter long mode; a page table does not fit as static data in 512 bytes.
 - `syscall fn` switches stacks and returns with `sysret`, but it does not program `STAR`, `LSTAR`, or `EFER`. The kernel does that with `wrmsr` (or `asm`) and must call `set_syscall_stack` with a 16-byte-aligned top before any entry. There is no TSS or IST setup.

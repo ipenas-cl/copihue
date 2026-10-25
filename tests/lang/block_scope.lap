@@ -1,0 +1,54 @@
+// Two `let b` in sibling blocks are different variables. The first used to
+// win every lookup, so a later `put_hex(b)` read the other block's slot
+// (AtomicOS #PF printed 0xfffffff9, which is -7, instead of the loaded byte).
+
+fn put_hex(b: i64) -> i64 {
+    return b;
+}
+
+fn main() -> i32 {
+    {
+        let b = -7;
+        print_int(put_hex(b));
+        println("");
+    }
+    {
+        let cell: [u8; 2];
+        cell[0] = 0xAB;
+        let b = cell[0];
+        print_int(put_hex(b));
+        println("");
+    }
+
+    let missed = 0;
+    if (0) {
+        let b = -7;
+        missed = put_hex(b);
+    }
+    if (1) {
+        let cell: [u8; 2];
+        cell[0] = 0xAB;
+        let b = cell[0];
+        missed = put_hex(b);
+    }
+    print_int(missed);
+    println("");
+
+    let b = 3;
+    {
+        let b = 9;
+        print_int(b);
+        println("");
+    }
+    print_int(b);
+    println("");
+
+    let i = 1;
+    for (let i = 0; i < 3; i = i + 1) {
+        print_int(i);
+    }
+    println("");
+    print_int(i);
+    println("");
+    return 0;
+}
