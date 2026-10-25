@@ -1,0 +1,61 @@
+section .data
+bias: dq 1
+section .text
+probe:
+    mov rax, 8
+    syscall
+.L0:
+    push rax
+    mov rax, 0
+    mov rbx, rax
+    pop rax
+    cmp rax, rbx
+    jne .L1
+    mov rax, 8
+    syscall
+.L2:
+    jmp .L0
+.L1:
+    mov byte [4200200], 0
+    push rax
+    mov rax, 0
+    push rax
+    mov rax, [bias]
+    mov rbx, rax
+    pop rax
+    sub rax, rbx
+    mov rbx, rax
+    pop rax
+    cmp rax, rbx
+    jne .L3
+    mov rdi, rax
+    jmp .L4
+.L3:
+.L4:
+    ret
+saved:
+    mov rax, 8
+    syscall
+    mov [__loc_saved_0], rax
+    mov byte [4200200], 0
+    mov rax, [__loc_saved_0]
+    push rax
+    mov rax, 0
+    push rax
+    mov rax, [bias]
+    mov rbx, rax
+    pop rax
+    sub rax, rbx
+    mov rbx, rax
+    pop rax
+    cmp rax, rbx
+    jne .L5
+    mov rax, 1
+    ret
+    jmp .L6
+.L5:
+.L6:
+    mov rax, [__loc_saved_0]
+    ret
+    ret
+__loc_saved_0: dq 0

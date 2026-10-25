@@ -35,10 +35,7 @@ sys_write:
     mov rbx, rax
     pop rax
     cmp rax, rbx
-    sete al
-    movzx rax, al
-    test rax, rax
-    jz .L0
+    jne .L0
     mov rax, [rbp-16]
     push rax
     mov rax, [rbp-56]

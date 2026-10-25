@@ -20,10 +20,7 @@ serial_putc:
     mov rbx, rax
     pop rax
     cmp rax, rbx
-    sete al
-    movzx rax, al
-    test rax, rax
-    jz .L1
+    jne .L1
     pause
 .L2:
     jmp .L0
