@@ -1,0 +1,4 @@
+tests/errors/int_not_literal.lap:4:5: error: int(n) takes one integer literal
+      4 |     int(n);
+        |     ^
+1 error, compilation failed

@@ -15,7 +15,7 @@
 **A small systems programming language with its own compiler, written from scratch in C and x86-64 assembly.**
 Copihue compiles a C-family language to native Linux x86-64 ELF executables with **no libc and no runtime**.
 It can also emit **freestanding** code, with no OS, for kernels and bare-metal programs.
-[AtomicOS](https://github.com/ipenas-cl/AtomicOS) is built with `--flat`, with no assembly in the kernel.
+[AtomicOS](https://github.com/ipenas-cl/AtomicOS) is built with `--flat`, with no assembly in the kernel. A boot sector can be built with `--boot`.
 
 > **Status: not production-ready yet.** The goal is to become a real alternative for systems programming.
 > Today Copihue is a working, tested compiler for a small language. Memory safety and determinism are
@@ -50,10 +50,10 @@ copihue hello.lap -o hello && ./hello
 ```
 
 ```
-copihue [-O0|-O1|-O2] [-o out] [-S] [--freestanding | --flat ADDR] [-v] file.lap
+copihue [-O0|-O1|-O2] [-o out] [-S] [--freestanding | --flat ADDR | --boot] [-v] file.lap
 ```
 
-`-S` stops after writing NASM assembly. `--freestanding` emits assembly for use without an OS (see below).
+`-S` stops after writing NASM assembly. `--freestanding` emits assembly for use without an OS (see below). `--boot` writes a 512-byte sector.
 The value returned by `main` becomes the process exit code.
 Old `.ch` files are still accepted, with a deprecation warning.
 
@@ -67,6 +67,10 @@ The full language reference is in [docs/REFERENCE.md](docs/REFERENCE.md).
 - `packed struct` for hardware records (an x86-64 IDT gate is 16 bytes, not eight slots of 8)
 - Function addresses (`&timer`) and indirect calls, so a table of handlers can be installed from the language
 - `interrupt fn` (full GPR save, optional CPU error code, `iretq`) and `syscall fn` (`syscall`/`sysret` entry, up to 7 arguments)
+- `naked fn` and `bits 16` / `bits 32` / `bits 64` on a function, so real mode and protected mode have no 64-bit frame
+- `data name { db/dw/dd/dq ... }` for a GDT, a disk packet, or a string. `asm()` still splits on `;`, so raw bytes go here
+- `ljmp(selector, label)` and `int(n)` for a far jump and a BIOS interrupt
+- `--boot`: a sector at `0x7C00`, padded to 512 bytes, with signature `0xAA55`
 - `if`/`else if`/`else`, `while`, `for`, `break`/`continue`
 - Arithmetic with signed division and remainder that truncate toward zero, comparisons, `&&`/`||` (short-circuit),
   and bitwise `& | ^ ~ << >>` with Rust-like precedence. Hex `0xFF`, binary `0b1010`, `1_000_000` and `'A'` literals
@@ -76,7 +80,7 @@ The full language reference is in [docs/REFERENCE.md](docs/REFERENCE.md).
 - Freestanding built-ins: `inb/inw/inl`, `outb/outw/outl`, `cli`, `sti`, `hlt`, `pause`, `swapgs`,
   `lidt`/`lgdt`/`invlpg` (any address expression, including a variable), `rdmsr`/`wrmsr`,
   `read_cr0`/`read_cr2`/`read_cr3`/`read_cr4`, `write_cr0`/`write_cr3`/`write_cr4`,
-  `set_syscall_stack`, and inline `asm("...")`. The control-register builtins are a compile error in hosted mode
+  `set_syscall_stack`, `ljmp`, `int`, and inline `asm("...")`. The control-register builtins, `ljmp`, and `int` are a compile error in hosted mode. `read_cr*` / `write_cr*` are 64-bit forms; 16-bit code uses `asm("mov eax, cr0")`
 - Diagnostics in the form `file:line:col: error: ...`, with the source line and a caret. They cover syntax errors,
   undeclared variables, indexing a non-array, unknown struct fields, unknown functions, a call with the wrong
   number of arguments, an interrupt function with the wrong shape, bad escapes, and hosted-only calls in freestanding code
@@ -89,9 +93,10 @@ The full language reference is in [docs/REFERENCE.md](docs/REFERENCE.md).
 | Suite | What it checks |
 |---|---|
 | 138 test programs + 18 examples | compiled at `-O0` and `-O2`, run, and stdout + exit code compared to golden files in `tests/expected/` |
-| 17 error tests | the compiler rejects the program with the exact expected message |
-| 10 freestanding tests | `--freestanding` output has no `_start`/syscalls and assembles; the instruction stream is golden. Two of them also require the same stream at `-O2` |
+| 22 error tests | the compiler rejects the program with the exact expected message |
+| 11 freestanding tests | `--freestanding` output has no `_start`/syscalls and assembles; the instruction stream is golden. Three of them also require the same stream at `-O2` |
 | 2 flat-binary tests | `--flat` puts `_start` at offset 0; the raw image matches a golden hexdump |
+| 1 boot sector | `--boot` at `-O0` and `-O2` is the same 512-byte image ending in `55 aa`, compared to a golden hexdump. If `qemu-system-x86_64` is installed, the image is booted and COM1 must contain `COPIHUE`. CI installs QEMU; without it the hexdump test still runs |
 | `make net-test` | starts `examples/simple_api_server.lap`, queries it with `curl` and with two Copihue HTTP clients, then stops it |
 
 ### Known limitations
@@ -99,7 +104,7 @@ The full language reference is in [docs/REFERENCE.md](docs/REFERENCE.md).
 - Ordinary struct fields still occupy 8 bytes each. Only `packed struct` uses the real width of `u8`/`u16`/`u32`. There is no padding or alignment attribute beyond packed-or-not. `a = b` copies the whole struct; it does not check anything beyond the struct type name.
 - Call checking is the function name and the argument count. Argument types, assignment types, and `const` are not checked. Function pointers are integer addresses, not a typed `fn` type, and an indirect call is not arity-checked.
 - Integer arithmetic is always 64-bit and overflow wraps. Narrow types only change loads and stores. There are no bounds checks on pointer indexing.
-- A kernel is still one translation unit: there are no modules and no relocatable ELF objects. There is no 16-bit or 32-bit code generation, so a bootloader that leaves long mode stays assembly.
+- A kernel is still one translation unit: there are no modules and no relocatable ELF objects. `bits 16` and `bits 32` are naked functions only: there is no 16-bit frame, and the `read_cr*` / `write_cr*` builtins are the 64-bit `mov rax, crN` form. `tests/boot/boot_sector.lap` reaches protected mode. It does not enter long mode; a page table does not fit as static data in 512 bytes.
 - `syscall fn` switches stacks and returns with `sysret`, but it does not program `STAR`, `LSTAR`, or `EFER`. The kernel does that with `wrmsr` (or `asm`) and must call `set_syscall_stack` with a 16-byte-aligned top before any entry. There is no TSS or IST setup.
 - `volatile` on a global scalar, a `*volatile T` pointee, or a struct field is reloaded and stored on every use, including inside a loop at `-O2`, at the access's real width. It is not a memory model: there are no atomics, and `let volatile` on a local scalar does not change codegen. `let volatile` on a struct or an array is a compile error.
 - Indexing a local array in hosted mode emits a bounds check (`syscall` + `exit`). `--freestanding` and `--flat` index the same local array without that trap. Pointer indexing is never checked.
@@ -152,6 +157,28 @@ fn set_gate(n: i64, handler: i64) -> i64 {
 
 `copihue --flat 0x10000 -o kernel.bin kernel.lap` goes one step further: it builds a raw binary (via `nasm -f bin`) meant to be loaded at the given address, with **no assembly entry stub**. Execution starts at the first byte, which is always `fn _start` (it is emitted first wherever it is defined; a missing `_start` is an error). Two extra built-ins, `bss_start()` and `bss_end()`, return the bounds of the zero-initialized globals so `_start` can clear them. The [AtomicOS](https://github.com/ipenas-cl/AtomicOS) kernel is built this way. Add `-S` to see the assembly instead.
 
+### Boot sector (`--boot`)
+
+`copihue --boot -o boot.bin boot.lap` builds that same kind of raw image at `org 0x7C00`, pads it to 512 bytes, and writes the signature `0xAA55`. `--flat` and `--boot` cannot be combined. `_start` must be `bits 16 naked fn`: the BIOS enters the first byte in real mode, and a normal function prologue uses 64-bit registers. The output is the sector itself, not an ELF.
+
+`naked` drops the prologue and the epilogue. The function takes no parameters and cannot have locals. `return`, and falling off the end, are a bare `ret`. `bits 16` or `bits 32` may be written before or after `naked`. After a 16-bit or 32-bit function the compiler emits `bits 64`, so a later function is 64-bit again. A function that is not marked `bits` emits no `bits` directive.
+
+```copihue
+data banner { db "Copihue", 13, 10, 0; }
+
+bits 16 naked fn _start() {
+    cli();
+    int(0x10);          // assembles as `int 16` (CD 10)
+    ljmp(0x08, pm);     // assembles as `jmp 8:pm`
+}
+
+bits 32 naked fn pm() { hlt(); }
+```
+
+`data` blocks are raw NASM in the text stream: `db`, `dw`, `dd`, `dq`, `times N db|dw|dd|dq value`, `align N` (zero padding), and `label:`. A string becomes its bytes, so a `;` inside the text is data. Integer literals in a data block are passed through as written (`dw 0xFFFF` stays hex). `int` and `ljmp` go through the expression parser, so `0x10` is emitted as decimal `16`; NASM treats that as the same number. `ljmp` takes a selector literal and a label name, not `&label`.
+
+`tests/boot/boot_sector.lap` is a complete sector: BIOS teletype of `Copihue`, then a far jump into 32-bit protected mode that writes `COPIHUE` to COM1. Its GDT is its own (selector `0x08` is 32-bit code, `0x10` is data). That is not the AtomicOS loader GDT, whose 64-bit code selector is `0x18`. The control registers in that sector are `asm("mov eax, cr0")`, because `read_cr0()` emits `mov rax, cr0`, which nasm rejects in 16-bit mode. The image stops in protected mode. Long mode needs page tables built in memory outside the sector; `bits 64 naked fn` is how that stub would be written. Uninitialized `let` globals are not placed in the sector: use `data`.
+
 ## Repository layout
 
 - `compiler/bootstrap-c/copihue.c`: the compiler, a single C file
@@ -173,9 +200,9 @@ fn set_gate(n: i64, handler: i64) -> i64 {
 Correctness and tooling come before new features. All items below are **planned**.
 
 - **Types:** checking assignments and argument types (calls already reject an unknown name or the wrong count), `const`, warnings for unused variables
-- **Narrow arithmetic:** `u8`/`i32` operations (everything still computes in 64 bits), struct copy assignment, defined overflow behavior
+- **Narrow arithmetic:** `u8`/`i32` operations (everything still computes in 64 bits) and defined overflow behavior
 - **Memory safety:** bounds-checked arrays, null-free references (`Option<T>`), and later an ownership model
-- **Still needed for a larger [AtomicOS](https://github.com/ipenas-cl/AtomicOS):** separate compilation, a way to name sections and load addresses, and 16/32-bit codegen so the bootloader can leave assembly. User mode can be written with `wrmsr` and `syscall fn`, but the compiler does not build a TSS or program `STAR`/`LSTAR`/`EFER` for you
+- **Still needed for a larger [AtomicOS](https://github.com/ipenas-cl/AtomicOS):** separate compilation and a way to name sections. A boot sector and a protected-mode stub can be written with `--boot`, `naked`, and `bits`. A long-mode transition still has to build its page tables in code; the checked example does not. User mode can be written with `wrmsr` and `syscall fn`, but the compiler does not build a TSS or program `STAR`/`LSTAR`/`EFER` for you
 - **Longer term:** a module system, self-hosting, and an ARM64 back end
 
 Version history: [CHANGELOG.md](CHANGELOG.md). Older design notes: [docs/VISION.md](docs/VISION.md), [ROADMAP.md](ROADMAP.md).

@@ -1,0 +1,88 @@
+// A 512-byte real-mode sector written only in Copihue.
+// BIOS loads it at 0x7C00 and jumps to the first byte.
+//
+// This sector installs its own GDT. Selector 0x08 is a 32-bit code
+// segment and 0x10 is data, both base 0. That is not the AtomicOS
+// loader GDT (whose 64-bit code selector is 0x18). Nothing here is a
+// generic image for that loader.
+//
+// The 16-bit entry prints `banner` with BIOS teletype (int 0x10),
+// enables protected mode, and far-jumps to `pm`. `pm` writes "COPIHUE"
+// to COM1 (0x3F8). Control-register builtins are 64-bit (`mov rax, cr0`);
+// this 16-bit code uses asm("mov eax, cr0") instead.
+
+data banner {
+    db "Copihue", 13, 10, 0;
+}
+
+data serial_msg {
+    db "COPIHUE", 0;
+}
+
+data gdt {
+    dq 0;
+    code32:
+    dw 0xFFFF;
+    dw 0;
+    db 0;
+    db 0x9A;
+    db 0xCF;
+    db 0;
+    data32:
+    dw 0xFFFF;
+    dw 0;
+    db 0;
+    db 0x92;
+    db 0xCF;
+    db 0;
+}
+
+data gdtr {
+    dw 23;
+    dd gdt;
+}
+
+bits 16 naked fn _start() {
+    cli();
+    asm("xor ax, ax");
+    asm("mov ds, ax");
+    asm("mov es, ax");
+    asm("mov ss, ax");
+    asm("mov sp, 0x7C00");
+    asm("mov si, banner");
+    asm(".bios: lodsb");
+    asm("test al, al");
+    asm("jz .bios_done");
+    asm("mov ah, 0x0E");
+    asm("mov bh, 0");
+    int(0x10);
+    asm("jmp .bios");
+    asm(".bios_done:");
+    asm("lgdt [gdtr]");
+    asm("mov eax, cr0");
+    asm("or al, 1");
+    asm("mov cr0, eax");
+    ljmp(0x08, pm);
+}
+
+bits 32 naked fn pm() {
+    asm("mov ax, 0x10");
+    asm("mov ds, ax");
+    asm("mov es, ax");
+    asm("mov ss, ax");
+    asm("mov esi, serial_msg");
+    asm(".ser: lodsb");
+    asm("test al, al");
+    asm("jz .ser_done");
+    asm("mov bl, al");
+    asm(".wait: mov dx, 0x3FD");
+    asm("in al, dx");
+    asm("test al, 0x20");
+    asm("jz .wait");
+    asm("mov al, bl");
+    asm("mov dx, 0x3F8");
+    asm("out dx, al");
+    asm("jmp .ser");
+    asm(".ser_done:");
+    hlt();
+}

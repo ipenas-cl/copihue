@@ -2,6 +2,19 @@
 
 Todos los cambios importantes del proyecto.
 
+## [0.22.0] - 2026-10-25
+
+### Added
+- `naked fn` emits no prologue and no `leave`. `return` and falling off the end are a bare `ret`. A naked function takes no parameters and cannot have locals. It cannot be `interrupt` or `syscall`.
+- `bits 16`, `bits 32`, and `bits 64`, in either order with `naked`, select the NASM mode for that function. `bits 16` and `bits 32` must be naked, because the frame uses 64-bit registers. The compiler emits `bits 64` afterwards. A function without `bits` emits no mode directive.
+- `data name { ... }` emits labeled raw bytes in the text stream: `db`, `dw`, `dd`, `dq`, `times`, `align` (zero fill), and labels. A string expands to its bytes, so `;` inside the text is data. `asm()` still splits on `;`.
+- `ljmp(selector, label)` emits `jmp sel:name`. `int(n)` emits `int N` from one integer literal (`int(0x10)` is `int 16`, encoding `CD 10`). Both are a compile error in hosted mode.
+- `--boot` writes a 512-byte sector at `org 0x7C00`, padded with `times 510-($-$$) db 0` and signed `dw 0xAA55`. `_start` must be `bits 16 naked fn`. `--flat` and `--boot` cannot be combined.
+- `tests/boot/boot_sector.lap`: a sector written only in Copihue. It prints with BIOS teletype and jumps to 32-bit protected mode, which writes `COPIHUE` to COM1. The hexdump is golden at `-O0` and `-O2`. CI boots it with QEMU when `qemu-system-x86_64` is installed.
+
+### Changed
+- Language version is 0.22.0.
+
 ## [0.21.0] - 2026-10-25
 
 ### Added
