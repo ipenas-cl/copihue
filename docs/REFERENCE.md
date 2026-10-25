@@ -1,4 +1,4 @@
-# Copihue Language Reference (v0.23.0)
+# Copihue Language Reference (v0.24.1)
 
 This document describes the language that `copihue` accepts today. Anything not listed here is not supported.
 Planned features are in the README roadmap.
@@ -133,7 +133,7 @@ naked fn stub64() { cli(); }
 
 `naked` emits no prologue and no `leave`. `return`, and falling off the end, are a single `ret` (no `xor rax, rax`). A naked function takes no parameters and cannot contain `let`. It cannot also be `interrupt` or `syscall`. Those two stay 64-bit.
 
-`bits 16` and `bits 32` require `naked`. The ordinary frame uses `rbp` and `rax`, which nasm rejects in 16-bit mode (`instruction not supported in 16-bit mode`). After a 16-bit or 32-bit function the compiler emits `bits 64`, so the next function is 64-bit again. `bits 64` emits that one directive before the function and no extra restore after it.
+`bits 16` and `bits 32` require `naked`. The ordinary frame uses `rbp` and `rax`, which nasm rejects in 16-bit mode (`instruction not supported in 16-bit mode`). Inside those functions the compiler evaluates integers in `eax` / `ebx` / `ecx` / `edx`, so `while (1)`, `if (e)`, `inb`, `outb`, `read_cr0`, and `wrmsr` assemble. A naked function still cannot contain `let`, and it still takes no parameters. `ds = 0` is not an assignment. A call from `bits 16` or `bits 32` to another Copihue function is still the 64-bit `push rax` / `call` sequence. After a 16-bit or 32-bit function the compiler emits `bits 64`, so the next function is 64-bit again. `bits 64` emits that one directive before the function and no extra restore after it.
 
 ### Raw data
 
@@ -158,7 +158,7 @@ data banner { db "Copihue", 13, 10, 0; }
 
 | Directive | Emitted |
 |---|---|
-| `db`, `dw`, `dd`, `dq` | that NASM directive. A string expands to decimal bytes, so a `;` inside the text is data. Escapes are `\n \t \r \0 \\ \" \'`. An integer literal is copied as written (`0xFFFF` stays hex). A name is a label (`dd gdt`) |
+| `db`, `dw`, `dd`, `dq` | that NASM directive. A string expands to decimal bytes, so a `;` inside the text is data. Escapes are `\n \t \r \0 \\ \" \'`. An integer literal is copied as written (`0xFFFF` stays hex). A name is a label (`dd gdt`). A label and an integer may be added or subtracted (`dq page + 3`, `dq page - 8`, `dq page + 0x83`); NASM evaluates the address. `1 * 2` is not an operand |
 | `times N db\|dw\|dd\|dq value` | `times N dir value` |
 | `align N` | `align N, db 0`. The fill is zero, including inside a code section, so a GDT is not padded with `NOP` |
 | `label:` | a NASM label |
@@ -168,7 +168,8 @@ data banner { db "Copihue", 13, 10, 0; }
 ## Statements
 
 `let`, assignment (`x = e`, `a[i] = e`, `s.f = e`, `p->f = e`), compound assignment (`+= -= *= /= %=`), `x++`, `x--`,
-a block `{ ... }`, `if (c) { } else if (d) { } else { }`, `while (c) { }`, `for (init; cond; step) { }`, `break;`, `continue;`, `return e;`, and expression statements (calls).
+a block `{ ... }`, `if (c) { } else if (d) { } else { }`, `if carry { } else { }`, `while (c) { }`, `for (init; cond; step) { }`, `break;`, `continue;`, `return e;`, and expression statements (calls).
+`if carry` has no parentheses. It branches on CF (`jnc` skips the body). `if (carry)` is still a call. CF must still be set: `println` and most arithmetic clear it before a later `int_carry()`.
 In a `for` loop, `step` can be any simple statement (`i++`, `i += 2`, `i = i * 2`). `continue` jumps to `step`.
 
 ## Operators (highest precedence first)
@@ -213,11 +214,14 @@ Hosted built-ins are a compile error. These built-ins are available:
 | `inb(port)`, `inw(port)`, `inl(port)` | `in al/ax/eax, dx` (zero-extended) |
 | `outb(port, v)`, `outw(port, v)`, `outl(port, v)` | `out dx, al/ax/eax` |
 | `cli()`, `sti()`, `hlt()`, `pause()`, `swapgs()` | the matching instruction |
-| `lidt(ptr)`, `lgdt(ptr)`, `invlpg(ptr)` | `lidt/lgdt/invlpg [rax]`. `ptr` is any address expression, including a local variable |
-| `read_cr0()`, `read_cr2()`, `read_cr3()`, `read_cr4()` | `mov rax, crN`. The result is an `i64` |
-| `write_cr0(v)`, `write_cr3(v)`, `write_cr4(v)` | `mov crN, rax`. The written value stays in `rax`, so the call is an `i64` expression |
-| `rdmsr(msr)` | returns the 64-bit MSR value |
-| `wrmsr(msr, value)` | writes a 64-bit MSR |
+| `lidt(ptr)`, `lgdt(ptr)`, `invlpg(ptr)` | `lidt/lgdt/invlpg [rax]` in 64-bit code. `ptr` is any address expression, including a local variable. `&name` or `name` may be a `data` label (`lgdt(&gdtr)`). In `bits 16` / `bits 32` a label is `lgdt [gdtr]`; another address is `lgdt [bx]` or `lgdt [ebx]` |
+| `read_cr0()`, `read_cr2()`, `read_cr3()`, `read_cr4()` | `mov rax, crN` in 64-bit code. In `bits 16` and `bits 32`, `mov eax, crN`. There is no `mov ax, crN` |
+| `write_cr0(v)`, `write_cr3(v)`, `write_cr4(v)` | `mov crN, rax` in 64-bit code, `mov crN, eax` in `bits 16` / `bits 32`. The written value stays in the accumulator |
+| `rdmsr(msr)` | in 64-bit code, returns the 64-bit MSR (`shl rdx, 32` / `or rax, rdx`). In `bits 16` / `bits 32`, leaves the low half in `eax` and the high half in `edx` |
+| `wrmsr(msr, value)` | in 64-bit code, writes a 64-bit value. In `bits 16` / `bits 32`, writes `edx:eax`. ORing a small integer into `rdmsr(m)` keeps the high half; any other value is written with `edx = 0` |
+| `cpuid(leaf)` | `cpuid`, returns `eax`. Also allowed in hosted code. `cpuid()` with no argument is `cpuid(leaf) takes 1 argument` |
+| `cpuid_edx(leaf)` | same instruction, returns `edx` (long-mode bit is `1 << 29` of leaf `0x80000001`) |
+| `int_carry()` | `setc`; 1 if CF is set, else 0. Also allowed in hosted code. `if carry` is the branch form |
 | `ltr(selector)` | `ltr ax`. `selector` is the TSS selector (for example `0x28`), not the address of the TSS |
 | `iretq()` | `iretq`, for a frame the kernel pushed itself. An `interrupt fn` already ends with this instruction |
 | `sysretq()` | `o64 sysret` (NASM's spelling of `sysretq`). `rcx` must be the user RIP and `r11` the user RFLAGS. A `syscall fn` already ends with this instruction |
@@ -271,7 +275,7 @@ Syscall MSRs, written with the existing `rdmsr` / `wrmsr`:
 
 `tests/flat/user_syscall.lap` is that sequence plus `ltr` and `set_rsp0`, assembled at `-O0` and `-O2`. It is not executed. `tests/usermode/kernel.lap` is the same sequence in a kernel QEMU boots from `tests/usermode/boot.lap`. The 2MB identity map in that kernel is marked user-accessible so ring 3 can fetch its instructions. COM1 shows `USER`: a syscall, an `int 0x80` (iretq back to ring 3), a syscall that stores a new `rsp0`, and a second `int 0x80` whose frame is on that new stack. `ltr`, `iretq`, `sysret`, and the MSR writes run on that QEMU CPU. The freestanding and flat goldens only assemble them.
 
-`read_cr*` and `write_cr*` emit `mov rax, crN` and `mov crN, rax`. That form is 64-bit. In `bits 16` or `bits 32`, use `asm`, for example `asm("mov eax, cr0")` and `asm("mov cr0, eax")`.
+`read_cr*` and `write_cr*` emit `mov rax, crN` and `mov crN, rax` in a 64-bit function. In `bits 16` or `bits 32` they emit `mov eax, crN` and `mov crN, eax`. `outb(0x92, inb(0x92) | 2)`, `write_cr4(read_cr4() | 32)`, and `wrmsr(0xC0000080, rdmsr(0xC0000080) | 0x100)` assemble in the mode of the function that contains them. `if carry` after `int(0x13)` is the disk-error branch. `cpuid(0x80000000)` and `cpuid_edx(0x80000001)` are the long-mode check.
 
 Memory-mapped I/O uses typed pointers. A device register should be `*volatile`, so the access is not removed:
 
@@ -312,5 +316,5 @@ The regression suite compares the hexdump at `-O0` and `-O2`. When `qemu-system-
 - Direct calls check the function name and the argument count. Assignments, argument types, return types, and indirect calls are not type-checked. There is no bounds checking on pointer indexing.
 - Ordinary struct fields still occupy 8 bytes each. Only `packed struct` uses the real width of `u8`/`u16`/`u32`. There is no padding or alignment attribute beyond packed-or-not. Struct assignment copies the whole value; it does not assign field by field in the source. Nested fields (`r.b.x`) use the real offset.
 - Indexing a local array in hosted mode inserts a bounds check that exits the process. `--freestanding` and `--flat` omit that check. Pointer indexing is never checked.
-- There are no modules or imports and no relocatable objects. A program is a single file. `bits 16` and `bits 32` exist only as naked functions: there is no 16-bit or 32-bit frame, and `read_cr*` / `write_cr*` are not valid in those modes. The hosted suite assembles `iretq`, `sysret`, `ltr`, and the control-register moves and does not execute them. The boot-sector test executes real mode and protected mode under QEMU. `tests/usermode` executes long mode, `ltr`, the syscall MSRs, `iretq` to ring 3, `syscall`/`sysret`, and `iretq` from an interrupt, also under QEMU.
+- There are no modules or imports and no relocatable objects. A program is a single file. `bits 16` and `bits 32` exist only as naked functions: there is no 16-bit or 32-bit frame, so `let` is rejected and segment registers cannot be assigned. Integer expressions there use `eax`. Calls to other Copihue functions still use the 64-bit sequence. The hosted suite assembles `iretq`, `sysret`, `ltr`, and the 64-bit control-register moves and does not execute them; it does execute `cpuid` and `int_carry`. The boot-sector tests execute real mode and protected mode under QEMU, including `lgdt(&gdtr)`, `write_cr0`, `if carry`, and `outb` on `tests/boot/realmode_builtins.lap`. `tests/freestanding/bits32_regs.lap` assembles `write_cr4`, `rdmsr` / `wrmsr`, and `cpuid` in `bits 32` and is not booted. `tests/usermode` executes long mode, `ltr`, the syscall MSRs, `iretq` to ring 3, `syscall`/`sysret`, and `iretq` from an interrupt, also under QEMU.
 - `syscall fn` does not program `STAR`, `LSTAR`, `SFMASK`, or `EFER`, and it does not emit `swapgs`. The kernel does that with `wrmsr` and `asm`. The `syscall` stack is `set_syscall_stack`, not `TSS.rsp0`. `volatile` is per access, as described above. It is not a memory model. `let volatile` on a local scalar keeps the stack slot at hosted `-O2`.

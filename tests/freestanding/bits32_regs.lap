@@ -1,0 +1,48 @@
+// also-o2
+// bits 16/32 forms that nasm rejects when they are encoded with rax.
+// This file is assembled, not booted. The boot-sector test executes the
+// same instructions.
+
+data page {
+    dq 0;
+}
+
+data pt {
+    dq page + 3;
+    dq page + 0x83;
+}
+
+data gdt {
+    dq 0;
+    dw 0xFFFF, 0, 0x9A00, 0x00CF;
+}
+
+data gdtr {
+    dw 23;
+    dd gdt;
+}
+
+bits 16 naked fn real_mode() {
+    outb(0x92, inb(0x92) | 2);
+    lgdt(&gdtr);
+    write_cr0(read_cr0() | 1);
+    asm("stc");
+    if carry {
+        hlt();
+    }
+    while (1) {
+        hlt();
+    }
+}
+
+bits 32 naked fn protected() {
+    write_cr4(read_cr4() | 32);
+    wrmsr(0xC0000080, rdmsr(0xC0000080) | 0x100);
+    write_cr0(read_cr0() | 0x80000000);
+    cpuid(0x80000000);
+    cpuid_edx(0x80000001);
+    while ((inb(0x3FD) & 0x20) == 0) {
+        pause();
+    }
+    outb(0x3F8, 67);
+}

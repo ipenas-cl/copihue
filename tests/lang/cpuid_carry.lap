@@ -1,0 +1,25 @@
+// CF and cpuid run as a Linux process. cpuid(0) is leaf 0; the value
+// depends on the CPU, so the test only checks that the call returns.
+
+fn main() -> i64 {
+    asm("stc");
+    print_int(int_carry());
+    println("");
+    asm("stc");
+    if carry {
+        println("carry");
+    }
+    asm("clc");
+    if carry {
+        println("still");
+    } else {
+        println("clear");
+    }
+    asm("clc");
+    print_int(int_carry());
+    println("");
+    cpuid(0);
+    cpuid_edx(0x80000001);
+    println("cpuid");
+    return 0;
+}
