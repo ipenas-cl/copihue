@@ -1,0 +1,156 @@
+section .data
+sink: dq 0
+section .bss
+ctx: resb 64
+section .text
+irq:
+    push rax
+    push rcx
+    push rdx
+    push rbx
+    push rbp
+    push rsi
+    push rdi
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    push r13
+    push r14
+    push r15
+    mov rbp, rsp
+    sub rsp, __frame_irq
+    lea rax, [rbp+120]
+    mov [rbp-8], rax
+    mov rax, [rbp-8]
+    mov rax, [rax+8]
+    mov [sink], rax  ; volatile
+    mov rax, [sink]  ; volatile
+    push rax
+    pop rcx
+    mov rbx, [rbp-8]
+    mov [rbx], rcx
+.Lret_irq:
+    mov rax, [rbp-8]
+    lea rsp, [rax-120]
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rbp
+    pop rbx
+    pop rdx
+    pop rcx
+    pop rax
+    iretq
+__frame_irq equ 80
+pf:
+    push rax
+    push rcx
+    push rdx
+    push rbx
+    push rbp
+    push rsi
+    push rdi
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    push r13
+    push r14
+    push r15
+    push rax
+    mov rbp, rsp
+    sub rsp, __frame_pf
+    lea rax, [rbp+128]
+    mov [rbp-8], rax
+    mov rax, [rbp-8]
+    mov rax, [rax]
+    mov [sink], rax  ; volatile
+    mov rax, [sink]  ; volatile
+    push rax
+    pop rcx
+    mov rbx, [rbp-8]
+    mov [rbx+8], rcx
+.Lret_pf:
+    mov rax, [rbp-8]
+    lea rsp, [rax-120]
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rbp
+    pop rbx
+    pop rdx
+    pop rcx
+    pop rax
+    add rsp, 8
+    iretq
+__frame_pf equ 80
+kmain:
+    push rbp
+    mov rbp, rsp
+    sub rsp, __frame_kmain
+    lea r11, [ctx]
+    mov [r11+8], rsp
+    mov [r11+16], rbp
+    mov [r11+24], rbx
+    mov [r11+32], r12
+    mov [r11+40], r13
+    mov [r11+48], r14
+    mov [r11+56], r15
+    lea rax, [.L2]
+    mov [r11], rax
+    xor eax, eax
+    jmp .L3
+.L2:
+    mov eax, 1
+.L3:
+    push rax
+    mov rax, 0
+    mov rbx, rax
+    pop rax
+    cmp rax, rbx
+    sete al
+    movzx rax, al
+    test rax, rax
+    jz .L0
+    lea rax, [there]
+    push rax
+    pop rcx
+    mov [ctx], rcx
+    lea r11, [ctx]
+    mov rax, [r11]
+    mov rbx, [r11+24]
+    mov r12, [r11+32]
+    mov r13, [r11+40]
+    mov r14, [r11+48]
+    mov r15, [r11+56]
+    mov rbp, [r11+16]
+    mov rsp, [r11+8]
+    jmp rax
+    jmp .L1
+.L0:
+.L1:
+there:
+    mov rax, 0
+    leave
+    ret
+    xor rax, rax
+    leave
+    ret
+__frame_kmain equ 64

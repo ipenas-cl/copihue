@@ -1,0 +1,4 @@
+tests/errors/save_context_bits.lap:4:5: error: save_context() is a 64-bit context switch
+      4 |     save_context(&ctx);
+        |     ^
+1 error, compilation failed

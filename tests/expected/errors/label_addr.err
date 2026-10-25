@@ -1,0 +1,4 @@
+tests/errors/label_addr.lap:2:13: error: unknown label 'nope'
+      2 |     let a = label_addr(nope);
+        |             ^
+1 error, compilation failed

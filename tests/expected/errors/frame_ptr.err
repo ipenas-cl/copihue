@@ -1,0 +1,4 @@
+tests/errors/frame_ptr.lap:1:19: error: an interrupt frame parameter must point at a struct
+      1 | interrupt fn boom(p: *i64) {
+        |                   ^
+1 error, compilation failed

@@ -1,0 +1,4 @@
+tests/errors/frame_layout.lap:5:19: error: interrupt frame 'Tiny' needs 5 fields
+      5 | interrupt fn boom(frame: *Tiny) {
+        |                   ^
+1 error, compilation failed

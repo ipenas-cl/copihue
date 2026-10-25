@@ -16,6 +16,7 @@
 # 4. Flat binaries: tests/flat/*.lap at --flat 0x10000.
 # 5. Boot sectors: tests/boot/*.lap, and QEMU must print COPIHUE.
 # 6. User mode: tests/usermode, and QEMU must print USER.
+# 7. Context switch: tests/ctx, and QEMU must print COPIHUE.
 set -u
 cd "$(dirname "$0")/.."
 ROOT=$PWD
@@ -45,7 +46,7 @@ check() {  # $1 = name, $2 = golden file, $3 = actual file
   else fail=$((fail+1)); failed+=("$1"); echo "FAIL $1"; [ -f "$2" ] && diff "$2" "$3" | head -10; fi
 }
 
-for src in $(ls tests/*.lap tests/*/*.lap examples/*.lap | grep -v -e '^tests/errors/' -e '^tests/freestanding/' -e "^tests/flat/" -e "^tests/boot/" -e '^tests/usermode/'); do
+for src in $(ls tests/*.lap tests/*/*.lap examples/*.lap | grep -v -e '^tests/errors/' -e '^tests/freestanding/' -e "^tests/flat/" -e "^tests/boot/" -e '^tests/usermode/' -e '^tests/ctx/'); do
   case "$SKIP" in *" $src "*) continue ;; esac
   golden=tests/expected/${src%.lap}.out
   run_program "$src" -O0 > "$WORK/o0"
@@ -188,6 +189,51 @@ if [ -f tests/usermode/boot.lap ] && [ -f tests/usermode/kernel.lap ]; then
               -serial file:"$WORK/userial.txt" </dev/null >/dev/null 2>&1 || true
             if ! grep -q USER "$WORK/userial.txt"; then
               fail=$((fail+1)); failed+=("tests/usermode $kern qemu"); echo "FAIL tests/usermode $kern: QEMU serial did not contain USER"; od -An -tx1c "$WORK/userial.txt" | head; continue
+            fi
+            pass=$((pass+1))
+          done
+        fi
+      fi
+    fi
+  fi
+fi
+
+# 7. Context switch: same disk layout as tests/usermode (sector plus 16
+#    sectors at 0x8000). QEMU must print COPIHUE: a #PF handler rewrites
+#    the frame, an IRQ handler switches stacks, and restore_context returns.
+if [ -f tests/ctx/boot.lap ] && [ -f tests/ctx/kernel.lap ]; then
+  if ! ( cd "$WORK" && "$CC" --boot -o cboot.bin "$ROOT/tests/ctx/boot.lap" 2>err.txt && "$CC" -O2 --boot -o cboot2.bin "$ROOT/tests/ctx/boot.lap" 2>>err.txt ); then
+    fail=$((fail+1)); failed+=("tests/ctx/boot.lap"); echo "FAIL tests/ctx/boot.lap:"; cat "$WORK/err.txt"
+  elif ! cmp -s "$WORK/cboot.bin" "$WORK/cboot2.bin"; then
+    fail=$((fail+1)); failed+=("tests/ctx/boot.lap (-O0 vs -O2)"); echo "FAIL tests/ctx/boot.lap: -O0 and -O2 images differ"
+  elif [ "$(wc -c < "$WORK/cboot.bin")" -ne 512 ] || [ "$(tail -c 2 "$WORK/cboot.bin" | od -An -tx1 | tr -d ' \n')" != "55aa" ]; then
+    fail=$((fail+1)); failed+=("tests/ctx/boot.lap"); echo "FAIL tests/ctx/boot.lap: not a 512-byte sector with signature 55 aa"
+  else
+    od -An -tx1 -v "$WORK/cboot.bin" > "$WORK/cboot.hex"
+    check "tests/ctx/boot.lap" "tests/expected/ctx/boot.hex" "$WORK/cboot.hex"
+    if ! ( cd "$WORK" && "$CC" --flat 0x8000 -o ckernel.bin "$ROOT/tests/ctx/kernel.lap" 2>err.txt && "$CC" -O2 --flat 0x8000 -o ckernel2.bin "$ROOT/tests/ctx/kernel.lap" 2>>err.txt ); then
+      fail=$((fail+1)); failed+=("tests/ctx/kernel.lap"); echo "FAIL tests/ctx/kernel.lap:"; cat "$WORK/err.txt"
+    else
+      ksz=$(wc -c < "$WORK/ckernel.bin")
+      ksz2=$(wc -c < "$WORK/ckernel2.bin")
+      if ! cmp -s "$WORK/ckernel.bin" "$WORK/ckernel2.bin"; then
+        fail=$((fail+1)); failed+=("tests/ctx/kernel.lap (-O0 vs -O2)"); echo "FAIL tests/ctx/kernel.lap: -O0 and -O2 images differ"
+      elif [ "$ksz" -gt 8192 ] || [ "$ksz2" -gt 8192 ]; then
+        fail=$((fail+1)); failed+=("tests/ctx/kernel.lap"); echo "FAIL tests/ctx/kernel.lap: image is larger than 16 sectors ($ksz / $ksz2)"
+      else
+        od -An -tx1 -v "$WORK/ckernel.bin" > "$WORK/ckernel.hex"
+        check "tests/ctx/kernel.lap" "tests/expected/ctx/kernel.hex" "$WORK/ckernel.hex"
+        if command -v qemu-system-x86_64 >/dev/null 2>&1; then
+          for kern in ckernel.bin ckernel2.bin; do
+            dd if=/dev/zero of="$WORK/cpad.bin" bs=8192 count=1 status=none
+            dd if="$WORK/$kern" of="$WORK/cpad.bin" conv=notrunc status=none
+            cat "$WORK/cboot.bin" "$WORK/cpad.bin" > "$WORK/cdisk.img"
+            rm -f "$WORK/cserial.txt"
+            timeout 8 qemu-system-x86_64 -display none -boot a \
+              -drive file="$WORK/cdisk.img",format=raw,if=floppy,index=0 \
+              -serial file:"$WORK/cserial.txt" </dev/null >/dev/null 2>&1 || true
+            if ! grep -q COPIHUE "$WORK/cserial.txt"; then
+              fail=$((fail+1)); failed+=("tests/ctx $kern qemu"); echo "FAIL tests/ctx $kern: QEMU serial did not contain COPIHUE"; od -An -tx1c "$WORK/cserial.txt" | head; continue
             fi
             pass=$((pass+1))
           done
