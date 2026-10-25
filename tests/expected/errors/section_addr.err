@@ -1,0 +1,4 @@
+tests/errors/section_addr.lap:5:1: error: section '.a' already has load address 0x1000
+      5 | section ".a" @ 0x2000 {
+        | ^
+1 error, compilation failed

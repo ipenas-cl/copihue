@@ -1,0 +1,4 @@
+// flags: --freestanding
+section "boot rom" {
+    fn f() -> i64 { return 0; }
+}

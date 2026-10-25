@@ -1,0 +1,31 @@
+// also-o2
+// Named sections and their load bounds. Assembled, not booted.
+// `@` is NASM vstart. nasm -f elf64 keeps the directive and does not apply it.
+
+section ".extra" @ 0x8000 {
+    let val: i64 = 65;
+    data blob { db 1; db 2; }
+    fn piece() -> i64 {
+        return val;
+    }
+}
+
+section ".extra" {
+    fn more() -> i64 { return val; }
+}
+
+section ".bss" {
+    let zeroed: i64;
+}
+
+fn bounds() -> i64 {
+    let a = section_start(".extra");
+    let b = section_end(".extra");
+    let t0 = section_start(".text");
+    let t1 = section_end(".text");
+    let d0 = section_start(".data");
+    let d1 = section_end(".data");
+    let z0 = section_start(".bss");
+    let z1 = section_end(".bss");
+    return a + b + t0 + t1 + d0 + d1 + z0 + z1 + piece();
+}

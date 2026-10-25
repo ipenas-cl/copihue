@@ -1,0 +1,4 @@
+tests/errors/section_nested.lap:3:5: error: a section cannot contain another section
+      3 |     section ".b" {
+        |     ^
+1 error, compilation failed
