@@ -1,0 +1,35 @@
+// BENCH: copy n=262144 reps=192
+// Copia src en dst, suma dst, y luego suma 1 a cada byte de src. Globales,
+// un byte por elemento. La suma lee dst después de la copia, así que el
+// store no está muerto.
+let src: [u8; 262144];
+let dst: [u8; 262144];
+
+fn main() -> i32 {
+    let n = 262144;
+    let reps = 192;
+    let i = 0;
+    let r = 0;
+    let sum = 0;
+    while (i < n) {
+        src[i] = i & 255;
+        i = i + 1;
+    }
+    while (r < reps) {
+        i = 0;
+        while (i < n) {
+            dst[i] = src[i];
+            i = i + 1;
+        }
+        i = 0;
+        while (i < n) {
+            sum = sum + dst[i];
+            src[i] = (src[i] + 1) & 255;
+            i = i + 1;
+        }
+        r = r + 1;
+    }
+    print_int(sum);
+    println("");
+    return 0;
+}

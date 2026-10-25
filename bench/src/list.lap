@@ -1,0 +1,34 @@
+// BENCH: list n=32768 reps=512
+// Array de nodos. next es el índice del siguiente, o -1. El recorrido es
+// while (i >= 0), no un bucle contado. No hay malloc: la tabla es global
+// y cada nodo ocupa 16 bytes.
+struct Node { val: i64, next: i64 }
+let nodes: [Node; 32768];
+
+fn main() -> i32 {
+    let n = 32768;
+    let reps = 512;
+    let i = 0;
+    let last = 0;
+    let r = 0;
+    let sum = 0;
+    last = n - 1;
+    while (i < last) {
+        nodes[i].val = i;
+        nodes[i].next = i + 1;
+        i = i + 1;
+    }
+    nodes[last].val = last;
+    nodes[last].next = -1;
+    while (r < reps) {
+        i = 0;
+        while (i >= 0) {
+            sum = sum + nodes[i].val;
+            i = nodes[i].next;
+        }
+        r = r + 1;
+    }
+    print_int(sum);
+    println("");
+    return 0;
+}

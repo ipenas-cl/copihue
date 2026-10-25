@@ -1,0 +1,31 @@
+// BENCH: fill n=262144 reps=128
+// Rellena un buffer global de bytes. Cada vuelta suma (i + r) al byte y
+// enmascara con 255, y después suma el buffer. Un u8[n] local reservaría
+// n*8 bytes de pila; esta global ocupa un byte por elemento. La suma
+// mantiene vivo cada store. No es un memset de una constante, así que no
+// es rep stosb.
+let buf: [u8; 262144];
+
+fn main() -> i32 {
+    let n = 262144;
+    let reps = 128;
+    let i = 0;
+    let r = 0;
+    let sum = 0;
+    while (r < reps) {
+        i = 0;
+        while (i < n) {
+            buf[i] = (buf[i] + i + r) & 255;
+            i = i + 1;
+        }
+        i = 0;
+        while (i < n) {
+            sum = sum + buf[i];
+            i = i + 1;
+        }
+        r = r + 1;
+    }
+    print_int(sum);
+    println("");
+    return 0;
+}

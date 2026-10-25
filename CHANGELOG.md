@@ -2,6 +2,16 @@
 
 Todos los cambios importantes del proyecto.
 
+## [0.29.2] - 2026-10-25
+
+### Added
+- Five hosted benchmarks in `bench/`: `fill` (add `(i + r)` into each byte, mask with 255, then sum the buffer), `copy` (copy bytes, sum the destination, then add 1 to each source byte), `hash` (FNV-1, offset basis `2166136261` masked to 31 bits, prime `16777619`, mask `2147483647` after every byte), `parse` (ASCII digits and commas, nine digits then a comma), and `list` (an array of `{val, next}` nodes, `next` an index, sentinel `-1`). The `.lap`, `.c`, `.rs`, and `.ml` sources share the algorithm, the limits, and the one-integer output. Copihue and C keep the byte buffers in `.bss`, one byte per element. A local `u8[n]` would reserve `n * 8` stack bytes. Rust uses a stack array. OCaml uses `Bytes` on the heap. OCaml `list` stores the pair in a flat int array (`2 * i`, `2 * i + 1`) because a record is a heap block, not 16 contiguous bytes. The index chain is the same. There is no `malloc`.
+
+### Changed
+- Language version is 0.29.2. The code generator is unchanged. `-O0`, `--freestanding`, `--flat`, and `--boot` match 0.29.1 except the version line. The eight previous `-O2` programs match 0.29.1 except the version line.
+- gcc `-O2` of `matmul.c` keeps the `i, j, k` order and vectorizes the inner product with `pmuludq` and `paddq`. The result buffer is cleared with `memset`. SSE is not emitted. The even unroll of the inner product and the bottom-tested `k` loop stay out; both were slower when measured.
+- gcc `-O2` of `fib.c` is 416 lines. It splits the recurrence into even and odd steps (`sub rsp, 200`, one `call fib`). That is not a deletion of redundant moves in the direct prologue. The rewrite is not emitted. For `n >= 2` the prologue stays 16 instructions: `mov r12, rdi` holds `n` across the two calls, and `sub rsp, 8` is the alignment adjustment.
+
 ## [0.29.1] - 2026-10-25
 
 ### Added
