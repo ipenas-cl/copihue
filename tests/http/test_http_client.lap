@@ -36,7 +36,7 @@ fn setup_sockaddr(port: i32) -> i32 {
     return 0;
 }
 
-fn test_endpoint(path_str: i32) -> i32 {
+fn test_endpoint(path_str: *u8) -> i32 {
     println("========================================");
     println("Testing endpoint: ");
     println(path_str);

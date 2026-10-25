@@ -37,7 +37,7 @@ fn setup_sockaddr_ip(a: i32, b: i32, c: i32, d: i32, port: i32) -> i32 {
 }
 
 fn http_get(host_a: i32, host_b: i32, host_c: i32, host_d: i32, 
-            port: i32, path: i32) -> i32 {
+            port: i32, path: *u8) -> i32 {
     
     let sockfd = syscall6(SYS_SOCKET, AF_INET, SOCK_STREAM, 0, 0, 0, 0);
     if (sockfd < 0) {
@@ -192,7 +192,7 @@ fn print_separator() -> i32 {
     return 0;
 }
 
-fn print_header(title: i32) -> i32 {
+fn print_header(title: *u8) -> i32 {
     print_separator();
     print("  ");
     println(title);
@@ -200,7 +200,7 @@ fn print_header(title: i32) -> i32 {
     return 0;
 }
 
-fn print_field(label: i32, value: i32) -> i32 {
+fn print_field(label: *u8, value: *i8) -> i32 {
     print("  ");
     print(label);
     print(": ");

@@ -212,7 +212,7 @@ fn test_tokens(lex: *Lexer, expected: *i64, count: i64) -> i64 {
     let failed = 0;
 
     print("  [DEBUG] expected ptr: ");
-    print_int(expected);
+    print_int(expected as i64);
     print(", expected[0]: ");
     print_int(expected[0]);
     println("");

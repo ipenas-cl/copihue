@@ -1,0 +1,4 @@
+tests/errors/return_mismatch.lap:2:12: error: return value: expected *u8, found i64
+      2 |     return vec;
+        |            ^
+1 error, compilation failed

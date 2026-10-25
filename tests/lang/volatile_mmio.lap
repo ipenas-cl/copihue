@@ -13,7 +13,7 @@ fn main() -> i32 {
     let i = 0;
     while (i < 16) { buf[i] = 0; i = i + 1; }
 
-    let p: *volatile u32 = buf;
+    let p: *volatile u32 = buf as *volatile u32;
     p[1] = 34;
     p[0] = 17;
     print_int(p[0]); println("");
@@ -52,7 +52,7 @@ fn main() -> i32 {
     print_int(n); println("");
     print_int(d.dat); println("");
 
-    gp = cell;
+    gp = cell as *volatile u32;
     gp[1] = 22;
     gp[0] = 11;
     print_int(gp[0]); println("");

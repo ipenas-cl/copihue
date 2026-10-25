@@ -1,0 +1,16 @@
+tests/errors/literal_range.lap:4:17: error: expected u8, found integer literal 300
+      4 |     let a: u8 = 300;
+        |                 ^
+tests/errors/literal_range.lap:5:17: error: expected i8, found integer literal 200
+      5 |     let b: i8 = 200;
+        |                 ^
+tests/errors/literal_range.lap:6:18: error: expected u16, found integer literal 65536
+      6 |     let c: u16 = 65536;
+        |                  ^
+tests/errors/literal_range.lap:7:18: error: expected i32, found integer literal 3000000000
+      7 |     let d: i32 = 3000000000;
+        |                  ^
+tests/errors/literal_range.lap:9:11: error: expected u8, found integer literal 300
+      9 |     s.b = 300;
+        |           ^
+5 errors, compilation failed
