@@ -1,0 +1,17 @@
+// Sector that writes ds/es and keeps one local. QEMU must show COPIHUE.
+// The local is a slot in the image, so it stays valid after ds = 0.
+
+bits 16 naked fn _start() {
+    ds = 0;
+    es = 0;
+    let ch: i64 = 67;
+    while ((inb(0x3FD) & 0x20) == 0) { pause(); }
+    outb(0x3F8, ch);
+    outb(0x3F8, 79);
+    outb(0x3F8, 80);
+    outb(0x3F8, 73);
+    outb(0x3F8, 72);
+    outb(0x3F8, 85);
+    outb(0x3F8, 69);
+    while (1) { hlt(); }
+}

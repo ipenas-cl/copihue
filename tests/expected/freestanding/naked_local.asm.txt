@@ -1,0 +1,55 @@
+section .data
+section .text
+bits 16
+real_mode:
+    mov eax, 0
+    mov ds, ax
+    mov eax, 0
+    mov es, ax
+    mov eax, 67
+    mov [__loc_real_mode_0], eax
+    mov eax, [__loc_real_mode_0]
+    push eax
+    push edx
+    mov eax, 1
+    mov ebx, eax
+    pop edx
+    pop eax
+    add eax, ebx
+    mov [__loc_real_mode_0], eax
+    mov eax, 1016
+    push eax
+    mov eax, [__loc_real_mode_0]
+    pop edx
+    out dx, al
+    ret
+__loc_real_mode_0: dd 0
+bits 64
+bits 32
+protected:
+    mov eax, 16
+    mov ds, ax
+    mov eax, 128
+    mov edx, eax
+    xor eax, eax
+    in al, dx
+    movzx eax, al
+    mov [__loc_protected_0], eax
+    mov eax, 128
+    push eax
+    mov eax, [__loc_protected_0]
+    pop edx
+    out dx, al
+    ret
+__loc_protected_0: dd 0
+bits 64
+stub64:
+    mov rax, 0
+    mov [__loc_stub64_0], rax
+    mov rax, 1
+    mov [__loc_stub64_1], rax
+    mov rax, [__loc_stub64_1]
+    ret
+    ret
+__loc_stub64_0: dq 0
+__loc_stub64_1: dq 0
