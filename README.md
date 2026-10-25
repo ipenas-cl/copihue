@@ -50,7 +50,7 @@ copihue hello.lap -o hello && ./hello
 ```
 
 ```
-copihue [-O0|-O1|-O2] [-o out] [-S] [--freestanding | --flat ADDR | --boot] [-v] file.lap
+copihue [-O0|-O1|-O2] [-o out] [-S] [--freestanding | --flat ADDR | --boot] [-v] file.lap [more.lap ...]
 ```
 
 `-S` stops after writing NASM assembly. `--freestanding` emits assembly for use without an OS (see below). `--boot` writes a 512-byte sector.
@@ -95,8 +95,8 @@ The full language reference is in [docs/REFERENCE.md](docs/REFERENCE.md).
 
 | Suite | What it checks |
 |---|---|
-| 144 test programs + 18 examples | compiled at `-O0` and `-O2`, run, and stdout + exit code compared to golden files in `tests/expected/` |
-| 34 error tests | the compiler rejects the program with the exact expected message |
+| 145 test programs + 18 examples | compiled at `-O0` and `-O2`, run, and stdout + exit code compared to golden files in `tests/expected/`. One program `import`s a second file. The suite also compiles two files given on the command line |
+| 38 error tests | the compiler rejects the program with the exact expected message. Four of them are a duplicate name, a duplicate across an import, an import cycle, and a missing import. A fifth check rejects the same name in two command-line files |
 | 15 freestanding tests | `--freestanding` output has no `_start`/syscalls and assembles; the instruction stream is golden. Seven of them also require the same stream at `-O2` |
 | 4 flat-binary tests | `--flat` puts `_start` at offset 0; the raw image matches a golden hexdump. Two of them also require the same image at `-O2` |
 | 2 boot sectors | `--boot` at `-O0` and `-O2` is the same 512-byte image ending in `55 aa`, compared to a golden hexdump. If `qemu-system-x86_64` is installed, each image is booted and COM1 must contain `COPIHUE`. CI installs QEMU; without it the hexdump test still runs |
@@ -109,7 +109,7 @@ The full language reference is in [docs/REFERENCE.md](docs/REFERENCE.md).
 - Direct calls check the name, the argument count, and the argument types. An assignment and an integer or pointer `return` are checked against the declared type. `as` is the explicit conversion. An integer literal may initialize a pointer (`0xB8000`); an integer variable may not, without `as`. `*i8` and `*u8` match. Indirect calls, comparisons, array and struct returns, and `const` are not checked. The bits still come back in `rax`. Function pointers are integer addresses, not a typed `fn` type.
 - Locals are block-scoped. Two `let`s of the same name in sibling blocks are different slots, so a use reads the one that is in scope. The stack slot is not reused after the block ends.
 - Integer arithmetic is always 64-bit and overflow wraps. Storing into an `i8`/`u8`/`i16`/`u16`/`i32`/`u32` variable or field truncates: unsigned keeps the low bits, signed sign-extends. A literal that does not fit is a compile error. There are no bounds checks on pointer indexing.
-- A kernel is still one translation unit: there are no modules and no relocatable ELF objects. `bits 16` and `bits 32` are naked functions only: there is no 16-bit frame, so `let` is still rejected there, and `ds = 0` is not an assignment. Arithmetic in those functions is 32-bit (`eax`). A call to another Copihue function from `bits 16` or `bits 32` is still the 64-bit call sequence. `tests/boot/boot_sector.lap` and `tests/boot/realmode_builtins.lap` reach protected mode. They do not enter long mode; a page table does not fit as static data in 512 bytes.
+- Several source files compile into one assembly unit and one namespace (`import "path.lap"` or more than one file on the command line). There is no separate module namespace, no visibility, and no relocatable object file: nasm and ld still see one assembly file. `bits 16` and `bits 32` are naked functions only: there is no 16-bit frame, so `let` is still rejected there, and `ds = 0` is not an assignment. Arithmetic in those functions is 32-bit (`eax`). A call to another Copihue function from `bits 16` or `bits 32` is still the 64-bit call sequence. `tests/boot/boot_sector.lap` and `tests/boot/realmode_builtins.lap` reach protected mode. They do not enter long mode; a page table does not fit as static data in 512 bytes.
 - `syscall fn` switches stacks with `set_syscall_stack` and returns with `o64 sysret` (sysretq). It does not program `STAR`, `LSTAR`, `SFMASK`, or `EFER`, and it does not emit `swapgs`. `TSS.rsp0` is a packed-struct store the kernel performs; the compiler does not build the GDT descriptor. The `syscall` instruction does not read the TSS.
 - `volatile` on a global scalar, a `*volatile T` pointee, or a struct field is reloaded and stored on every use, including inside a loop at `-O2`, at the access's real width. It is not a memory model: there are no atomics. `let volatile` on a local scalar keeps that local in its stack slot at `-O2` (a non-volatile scalar may live in a register). At `-O0` and in freestanding code every local is on the stack, so the keyword does not change those. `let volatile` on a struct or an array is a compile error.
 - Indexing a local array in hosted mode emits a bounds check (`syscall` + `exit`). `--freestanding` and `--flat` index the same local array without that trap. Pointer indexing is never checked.

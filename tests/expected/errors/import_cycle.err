@@ -1,0 +1,4 @@
+tests/errors/parts/cycle_b.lap:1:8: error: import of 'tests/errors/parts/cycle_a.lap' is a cycle
+      1 | import "cycle_a.lap";
+        |        ^
+1 error, compilation failed

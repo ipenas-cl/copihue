@@ -2,6 +2,18 @@
 
 Todos los cambios importantes del proyecto.
 
+## [0.25.0] - 2026-10-25
+
+### Added
+- `copihue` accepts more than one source file. The files share one namespace and one assembly unit, in the order given. This replaces concatenating `.lap` files with `cat`.
+- A top-level `import "path.lap";` compiles that file at that point. The path is relative to the directory of the file that contains the import. An absolute path is used as written. Importing a file that is already loaded is a no-op, including a second `import` of the same path. `import` is only recognized at the top level and only when the next token is a string, so a function may still be named `import`.
+- A second definition of the same top-level function, global, struct, or `data` name is `function 'f' is already defined at file:line:col` (the word is `global`, `struct`, or `data` for those declarations). The message names the earlier file and line, and the caret is on the new definition. A forward declaration (`fn f();`) and a later definition are one function, in either order, including across files.
+- A cycle is `import of 'path' is a cycle`. A missing file is `cannot open import 'path'` from an import, or `copihue: error: cannot open 'path'` from the command line. The path compared is the string, not a canonical real path: `a.lap` and `./a.lap` are not the same file.
+- `tests/lang/multi_file.lap` imports a sibling and prints 42. The suite also compiles two files from the command line and rejects a duplicate name across them.
+
+### Changed
+- Language version is 0.25.0.
+
 ## [0.24.1] - 2026-10-25
 
 ### Added

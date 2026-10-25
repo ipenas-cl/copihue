@@ -14,7 +14,7 @@
 
 // ==== NAMING (single place to change when the language is renamed) ====
 #define LANG_NAME     "Copihue"
-#define LANG_VERSION  "0.24.1"
+#define LANG_VERSION  "0.25.0"
 #define COMPILER_BIN  "copihue"
 #define SRC_EXT       ".lap"   /* Lapageria rosea, the copihue */
 #define OLD_SRC_EXT   ".cph"   /* v0.18.x extension, still accepted with a warning */
@@ -43,6 +43,24 @@ static void print_source_line(int line, int col) {
     fprintf(stderr, "        | ");
     for (int i = 1; i < col; i++) fputc(p[i - 1] == '\t' ? '\t' : ' ', stderr);
     fprintf(stderr, "^\n");
+}
+
+#define MAX_LOADED 64
+typedef struct { char* name; char* text; } LoadedSrc;
+static LoadedSrc g_loaded[MAX_LOADED];
+static int g_nloaded = 0;
+static char* g_import_stack[MAX_LOADED];
+static int g_import_depth = 0;
+
+static void focus_file(const char* file) {
+    if (!file) return;
+    for (int i = 0; i < g_nloaded; i++) {
+        if (g_loaded[i].name == file) {
+            g_src_file = g_loaded[i].name;
+            g_src_text = g_loaded[i].text;
+            return;
+        }
+    }
 }
 
 // Report an error at line:col in "file:line:col: error: message" form
@@ -152,6 +170,7 @@ typedef struct AstNode {
     int flags;            // AF_PACKED, AF_VOLATILE, AF_INTERRUPT, AF_SYSCALL, AF_NAKED
     int bits;             // 0 = default 64 (no directive); else 16, 32, or 64
     int line, col;        // Source position (for diagnostics)
+    const char* file;     // Source file (several files share one program)
 } AstNode;
 
 #define AF_PACKED     1
@@ -732,6 +751,7 @@ AstNode* ast_new(AstType type) {
     n->type = type;
     n->line = g_cur_line;
     n->col = g_cur_col;
+    n->file = g_src_file;
     return n;
 }
 
@@ -1934,38 +1954,190 @@ static AstNode* parse_bits_naked_fn(Parser* p) {
     return fn;
 }
 
-AstNode* parse(Parser* p) {
-    AstNode* prog = ast_new(AST_PROGRAM);
+typedef struct {
+    char* name;
+    const char* file;
+    int line, col;
+    int forward;
+} DeclSite;
+static DeclSite* g_decls = NULL;
+static int g_ndecls = 0, g_decl_cap = 0;
+
+static void note_top(AstNode* n) {
+    if (!n || !n->name) return;
+    const char* what = NULL;
+    int fwd = 0;
+    if (n->type == AST_FUNCTION) { what = "function"; fwd = n->is_forward_decl; }
+    else if (n->type == AST_GLOBAL_VAR) what = "global";
+    else if (n->type == AST_STRUCT_DEF) what = "struct";
+    else if (n->type == AST_DATA) what = "data";
+    else return;
+    for (int i = 0; i < g_ndecls; i++) {
+        if (strcmp(g_decls[i].name, n->name)) continue;
+        if (fwd) return;
+        if (g_decls[i].forward) {
+            g_decls[i].forward = 0;
+            g_decls[i].file = g_src_file;
+            g_decls[i].line = n->line;
+            g_decls[i].col = n->col;
+            return;
+        }
+        diag_error(n->line, n->col, "%s '%s' is already defined at %s:%d:%d",
+                   what, n->name, g_decls[i].file, g_decls[i].line, g_decls[i].col);
+        return;
+    }
+    if (g_ndecls >= g_decl_cap) {
+        g_decl_cap = g_decl_cap ? g_decl_cap * 2 : 64;
+        g_decls = safe_realloc(g_decls, sizeof(DeclSite) * g_decl_cap);
+    }
+    g_decls[g_ndecls].name = strdup(n->name);
+    g_decls[g_ndecls].file = g_src_file;
+    g_decls[g_ndecls].line = n->line;
+    g_decls[g_ndecls].col = n->col;
+    g_decls[g_ndecls].forward = fwd;
+    g_ndecls++;
+}
+
+static void parse_into(Parser* p, AstNode* prog);
+
+static char* path_dir(const char* path) {
+    const char* slash = strrchr(path, '/');
+    if (!slash) return strdup(".");
+    if (slash == path) return strdup("/");
+    size_t n = (size_t)(slash - path);
+    char* d = malloc(n + 1);
+    memcpy(d, path, n);
+    d[n] = '\0';
+    return d;
+}
+
+static char* path_join(const char* dir, const char* rel) {
+    if (rel[0] == '/') return strdup(rel);
+    size_t nd = strlen(dir), nr = strlen(rel);
+    char* s = malloc(nd + nr + 2);
+    memcpy(s, dir, nd);
+    s[nd] = '/';
+    memcpy(s + nd + 1, rel, nr + 1);
+    return s;
+}
+
+static int import_active(const char* path) {
+    for (int i = 0; i < g_import_depth; i++)
+        if (!strcmp(g_import_stack[i], path)) return 1;
+    return 0;
+}
+
+static int import_done(const char* path) {
+    for (int i = 0; i < g_nloaded; i++)
+        if (!strcmp(g_loaded[i].name, path)) return 1;
+    return 0;
+}
+
+static int parse_file_into(AstNode* prog, const char* path, int from_import, int line, int col) {
+    if (import_active(path)) {
+        diag_error(line, col, "import of '%s' is a cycle", path);
+        return 0;
+    }
+    if (import_done(path)) return 1;
+    FILE* f = fopen(path, "r");
+    if (!f) {
+        if (from_import) diag_error(line, col, "cannot open import '%s'", path);
+        else fprintf(stderr, COMPILER_BIN ": error: cannot open '%s'\n", path);
+        return 0;
+    }
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (sz < 0) sz = 0;
+    char* src = malloc((size_t)sz + 1);
+    size_t got = fread(src, 1, (size_t)sz, f);
+    src[got] = '\0';
+    fclose(f);
+    if (g_nloaded >= MAX_LOADED) {
+        diag_error(line, col, "too many source files (maximum %d)", MAX_LOADED);
+        free(src);
+        return 0;
+    }
+    g_loaded[g_nloaded].name = strdup(path);
+    g_loaded[g_nloaded].text = src;
+    const char* saved_file = g_src_file;
+    const char* saved_text = g_src_text;
+    g_src_file = g_loaded[g_nloaded].name;
+    g_src_text = src;
+    g_import_stack[g_import_depth++] = g_loaded[g_nloaded].name;
+    g_nloaded++;
+    int count = 0;
+    Tok* toks = tokenize(src, &count);
+    Parser parser = {toks, 0, count};
+    parse_into(&parser, prog);
+    g_import_depth--;
+    g_src_file = saved_file;
+    g_src_text = saved_text;
+    return 1;
+}
+
+static void parse_import(Parser* p, AstNode* prog) {
+    Tok kw = advance_tok(p);
+    Tok str = advance_tok(p);
+    if (str.t != T_STR || str.len < 2) {
+        diag_error(kw.line, kw.col, "import needs a string path");
+        return;
+    }
+    char* rel = decode_string_literal(str.s + 1, str.len - 2);
+    char* dir = path_dir(g_src_file);
+    char* full = path_join(dir, rel);
+    expect(p, T_SEMI);
+    parse_file_into(prog, full, 1, str.line, str.col);
+    free(rel);
+    free(dir);
+    free(full);
+}
+
+static void parse_into(Parser* p, AstNode* prog) {
     while (!check_tok(p, T_EOF)) {
         // Contextual words, so `syscall(...)` and a variable named `packed` still parse.
-        if (peek_word(p, "packed") && peek_tok_at(p, 1, T_STRUCT)) {
+        if (peek_word(p, "import") && peek_tok_at(p, 1, T_STR)) {
+            parse_import(p, prog);
+        } else if (peek_word(p, "packed") && peek_tok_at(p, 1, T_STRUCT)) {
             advance_tok(p);
             AstNode* sd = parse_struct_def(p);
             sd->flags |= AF_PACKED;
+            note_top(sd);
             ast_add(prog, sd);
         } else if (peek_word(p, "interrupt") && peek_tok_at(p, 1, T_FN)) {
             advance_tok(p);
             AstNode* fn = parse_func(p);
             fn->flags |= AF_INTERRUPT;
+            note_top(fn);
             ast_add(prog, fn);
         } else if (peek_word(p, "syscall") && peek_tok_at(p, 1, T_FN)) {
             advance_tok(p);
             AstNode* fn = parse_func(p);
             fn->flags |= AF_SYSCALL;
+            note_top(fn);
             ast_add(prog, fn);
         } else if (peek_word(p, "data") && peek_tok_at(p, 1, T_IDENT)) {
-            ast_add(prog, parse_data(p));
+            AstNode* d = parse_data(p);
+            note_top(d);
+            ast_add(prog, d);
         } else if (peek_word(p, "bits") || peek_word(p, "naked")) {
-            ast_add(prog, parse_bits_naked_fn(p));
+            AstNode* fn = parse_bits_naked_fn(p);
+            note_top(fn);
+            ast_add(prog, fn);
         } else if (check_tok(p, T_STRUCT)) {
-            ast_add(prog, parse_struct_def(p));
+            AstNode* sd = parse_struct_def(p);
+            note_top(sd);
+            ast_add(prog, sd);
         } else if (check_tok(p, T_LET)) {
-            ast_add(prog, parse_global_var(p));
+            AstNode* g = parse_global_var(p);
+            note_top(g);
+            ast_add(prog, g);
         } else {
-            ast_add(prog, parse_func(p));
+            AstNode* fn = parse_func(p);
+            note_top(fn);
+            ast_add(prog, fn);
         }
     }
-    return prog;
 }
 
 // ==== CODEGEN ====
@@ -4081,6 +4253,7 @@ static void emit_binop_rax_rbx(Codegen* cg, const char* op) {
 
 void gen_expr(Codegen* cg, AstNode* n) {
     if (!n) return;  // Null safety guard
+    if (n->file) focus_file(n->file);
     if (n->type == AST_NUMBER) {
         if (legacy_bits()) emit(cg, "    mov eax, %s\n", n->value);
         else emit(cg, "    mov rax, %s\n", n->value);
@@ -5037,6 +5210,7 @@ void gen_stmt(Codegen* cg, AstNode* n);
 
 void gen_stmt(Codegen* cg, AstNode* n) {
     if (!n) return;  // Null safety
+    if (n->file) focus_file(n->file);
     if (n->type == AST_BLOCK) {
         // Names declared here hide outer ones and disappear at the closing brace.
         symtab_enter(cg->symtab);
@@ -5325,6 +5499,7 @@ static void bind_param(Codegen* cg, AstNode* par, const char* src_reg, int stack
 void gen_func(Codegen* cg, AstNode* n) {
     g_reg_local_n = 0;
     if (!n || !n->name) return;  // Null safety
+    if (n->file) focus_file(n->file);
     int param_count = n->child_count - 1;
     int is_int = (n->flags & AF_INTERRUPT) != 0;
     int is_sys = (n->flags & AF_SYSCALL) != 0;
@@ -5891,7 +6066,7 @@ void codegen(AstNode* ast, const char* file, StringTable* strtab, TypeTable* typ
 
 static void usage(FILE* o) {
     fprintf(o,
-        "Usage: " COMPILER_BIN " [options] <file" SRC_EXT ">\n"
+        "Usage: " COMPILER_BIN " [options] <file" SRC_EXT "> [file" SRC_EXT " ...]\n"
         "\n"
         "Options:\n"
         "  -O0 | -O1 | -O2     optimization level (default -O0)\n"
@@ -5916,7 +6091,8 @@ static int run_cmd(const char* fmt, const char* a, const char* b) {
 }
 
 int main(int argc, char** argv) {
-    const char* input = NULL;
+    const char* inputs[MAX_LOADED];
+    int ninputs = 0;
     const char* out = NULL;
     int only_asm = 0, verbose = 0;
 
@@ -5944,11 +6120,14 @@ int main(int argc, char** argv) {
             out = argv[++i];
         }
         else if (a[0] == '-') { fprintf(stderr, COMPILER_BIN ": error: unknown option '%s'\n", a); usage(stderr); return 2; }
-        else if (!input) input = a;
-        else { fprintf(stderr, COMPILER_BIN ": error: more than one input file\n"); return 2; }
+        else if (ninputs >= MAX_LOADED) {
+            fprintf(stderr, COMPILER_BIN ": error: too many input files (maximum %d)\n", MAX_LOADED);
+            return 2;
+        } else inputs[ninputs++] = a;
     }
-    if (!input) { usage(stderr); return 2; }
-    {
+    if (ninputs == 0) { usage(stderr); return 2; }
+    for (int i = 0; i < ninputs; i++) {
+        const char* input = inputs[i];
         size_t il = strlen(input), ol = strlen(OLD_SRC_EXT), ol2 = strlen(OLDER_SRC_EXT);
         if (il > ol && !strcmp(input + il - ol, OLD_SRC_EXT))
             fprintf(stderr, "%s: warning: the '" OLD_SRC_EXT "' extension is deprecated; rename the file to '" SRC_EXT "'\n", input);
@@ -5956,28 +6135,30 @@ int main(int argc, char** argv) {
             fprintf(stderr, "%s: warning: the '" OLDER_SRC_EXT "' extension is deprecated (the language was renamed from Chronos); use '" SRC_EXT "'\n", input);
     }
 
-    FILE* f = fopen(input, "r");
-    if (!f) { fprintf(stderr, COMPILER_BIN ": error: cannot open '%s'\n", input); return 1; }
-    fseek(f, 0, SEEK_END);
-    long size = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    char* src = malloc(size + 1);
-    size_t got = fread(src, 1, size, f);
-    src[got] = '\0';
-    fclose(f);
-    g_src_file = input;
-    g_src_text = src;
-
     const char* asm_out = only_asm ? (out ? out : "output.asm") : "output.asm";
     const char* exe_out = out ? out : "a.out";
 
-    if (verbose) fprintf(stderr, LANG_NAME " " LANG_VERSION ": compiling %s (-O%d%s)\n",
-                         input, optimization_level, g_freestanding ? ", freestanding" : "");
+    if (verbose) {
+        fprintf(stderr, LANG_NAME " " LANG_VERSION ": compiling %s (-O%d%s)\n",
+                inputs[0], optimization_level, g_freestanding ? ", freestanding" : "");
+        for (int i = 1; i < ninputs; i++)
+            fprintf(stderr, "  + %s\n", inputs[i]);
+    }
 
-    int count;
-    Tok* toks = tokenize(src, &count);
-    Parser parser = {toks, 0, count};
-    AstNode* ast = parse(&parser);
+    AstNode* ast = ast_new(AST_PROGRAM);
+    for (int i = 0; i < ninputs; i++) {
+        if (!parse_file_into(ast, inputs[i], 0, 1, 1)) {
+            if (g_error_count > 0)
+                fprintf(stderr, "%d error%s, compilation failed\n", g_error_count, g_error_count == 1 ? "" : "s");
+            return 1;
+        }
+    }
+    // parse_file_into restores the previous buffer. Program-level errors
+    // (a missing _start) name the first file, the same as a one-file compile.
+    if (g_nloaded > 0) {
+        g_src_file = g_loaded[0].name;
+        g_src_text = g_loaded[0].text;
+    }
 
     TypeTable* types = typetab_new();
     build_type_table(types, ast);
