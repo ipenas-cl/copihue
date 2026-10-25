@@ -1,0 +1,4 @@
+tests/errors/syscall_bits.lap:3:5: error: syscall() is a 64-bit instruction
+      3 |     syscall();
+        |     ^
+1 error, compilation failed

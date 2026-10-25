@@ -1,0 +1,4 @@
+tests/errors/syscall_args.lap:3:5: error: syscall() takes no arguments with --freestanding; set rax, rdi, rsi and rdx first
+      3 |     syscall(1);
+        |     ^
+1 error, compilation failed
