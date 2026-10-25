@@ -212,7 +212,7 @@ Storing a non-literal into an 8, 16, or 32-bit variable or field truncates. Unsi
 
 Scalar locals, globals, and ordinary struct fields still occupy 8-byte slots when they live in memory. Hosted `-O2` may keep a scalar local in `r12`–`r15`; the mask or sign-extend is applied before the value is written to that register or to the slot. A `packed` field, a `volatile` field, and a store through a pointer or an array element already write only the real width, which is the truncation.
 
-Not checked: indirect calls, comparisons, bitwise mixes, `mut` used as a permission, `volatile` as a type error, and array or struct return types. An untyped `let x = e` infers `i64` from an integer, the pointer type from a pointer, and an address from `malloc`. An expression the compiler cannot type is accepted.
+Not checked: indirect calls, comparisons, bitwise mixes, `mut` used as a permission, `volatile` as a type error, and array or struct return types. An untyped `let x = e` infers `i64` from an integer, including a narrow load, the pointer type from a pointer, and an address from `malloc`. It does not infer a struct onto that slot: write `let p: Point = ...` or a struct literal. An expression the compiler cannot type is accepted.
 
 ## Built-ins (hosted mode)
 

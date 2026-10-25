@@ -5004,8 +5004,13 @@ void gen_stmt(Codegen* cg, AstNode* n) {
             VTy src_ty = expr_ty(cg, n->children[0]);
             if (n->value)
                 check_types(n->children[0], "", ty_decl(cg, 0, 0, n->value), src_ty);
-            else if (cg->symtab && cg->symtab->count > 0)
+            else if (cg->symtab && cg->symtab->count > 0 && src_ty.kind != VK_STRUCT) {
+                // An untyped integer is i64. Inferring u8 from a byte load would
+                // mask the slot and change code that only stored the widened value.
+                // A struct is not inferred onto this 8-byte slot.
+                if (src_ty.kind == VK_INT) src_ty = ty_i64();
                 bind_vty(&cg->symtab->symbols[cg->symtab->count - 1], src_ty);
+            }
             gen_expr(cg, n->children[0]);
             if (n->children[0]->type != AST_ARRAY_LITERAL) {
                 Symbol* sym = &cg->symtab->symbols[cg->symtab->count - 1];
