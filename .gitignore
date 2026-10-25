@@ -57,6 +57,12 @@ output.o
 # Copihue build outputs
 a.out
 /copihue
+
+# Benchmark binaries and assembler leftovers
+bench/out/
+bench/src/*.cmi
+bench/src/*.cmx
+bench/src/*.s
 compiler/bootstrap-c/copihue
 data.txt
 data_copy.txt
