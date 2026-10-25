@@ -1,0 +1,168 @@
+// Hosted -O2: register arguments, direct comparisons, reused array loads,
+// a proven index, and the matmul running pointer. -O0 prints the same lines.
+// The last call is out of range on purpose and must still trap.
+
+fn fib(n: i64) -> i64 {
+    if (n < 2) {
+        return n;
+    }
+    return fib(n - 1) + fib(n - 2);
+}
+
+fn add3(a: i64, b: i64, c: i64) -> i64 {
+    return a + b + c;
+}
+
+fn g(x: i64) -> i64 {
+    return x + 1;
+}
+
+fn f(a: i64, b: i64) -> i64 {
+    return a + b;
+}
+
+fn classify(a: i64, b: i64) -> i64 {
+    if (a > 10 || b > 10) {
+        return 1;
+    } else {
+        return 0;
+    }
+}
+
+fn sorted_sum() -> i64 {
+    let n = 3;
+    let a: [i64; 3];
+    a[0] = 5;
+    a[1] = 4;
+    a[2] = 3;
+    let i = 1;
+    while (i < n) {
+        let key = a[i];
+        let j = i - 1;
+        while (j >= 0 && a[j] > key) {
+            a[j + 1] = a[j];
+            j = j - 1;
+        }
+        a[j + 1] = key;
+        i = i + 1;
+    }
+    let sorted = 0;
+    i = 0;
+    while (i < n) {
+        sorted = sorted + a[i] * (i + 1);
+        i = i + 1;
+    }
+    return sorted;
+}
+
+fn scan() -> i64 {
+    let b: [i64; 3];
+    b[0] = 1;
+    b[1] = 2;
+    b[2] = 3;
+    let j = -1;
+    let hits = 0;
+    while (j >= 0 && b[j] > 0) {
+        hits = hits + b[j];
+        j = j - 1;
+    }
+    j = 2;
+    while (j >= 0 && b[j] > 0) {
+        hits = hits + b[j];
+        j = j - 1;
+    }
+    return hits * 10 + (j + 1);
+}
+
+fn fill_sum() -> i64 {
+    let m = 8;
+    let xs: [i64; 8];
+    let acc = 0;
+    let t = 0;
+    while (t < m) {
+        xs[t] = t + 1;
+        t = t + 1;
+    }
+    t = 0;
+    while (t < m) {
+        acc = acc + xs[t];
+        t = t + 1;
+    }
+    return acc;
+}
+
+fn dots() -> i64 {
+    let N = 2;
+    let A: [i64; 4];
+    let B: [i64; 4];
+    let ii = 0;
+    let jj = 0;
+    let kk = 0;
+    let s = 0;
+    let dot = 0;
+    A[0] = 1;
+    A[1] = 2;
+    A[2] = 3;
+    A[3] = 4;
+    B[0] = 5;
+    B[1] = 6;
+    B[2] = 7;
+    B[3] = 8;
+    while (ii < N) {
+        jj = 0;
+        while (jj < N) {
+            s = 0;
+            kk = 0;
+            while (kk < N) {
+                s = s + A[ii * N + kk] * B[kk * N + jj];
+                kk = kk + 1;
+            }
+            dot = dot + s;
+            jj = jj + 1;
+        }
+        ii = ii + 1;
+    }
+    return dot;
+}
+
+fn trap() -> i64 {
+    let bad: [i64; 2];
+    let lim = 4;
+    bad[0] = 0;
+    bad[1] = 0;
+    let p = 0;
+    while (p < lim) {
+        bad[p] = bad[p] + 1;
+        p = p + 1;
+    }
+    return p;
+}
+
+fn main() -> i32 {
+    print_int(fib(10));
+    println("");
+    print_int(add3(1, 2, 3));
+    println("");
+    print_int(f(g(3), 4));
+    println("");
+    print_int(classify(1, 2));
+    println("");
+    print_int(classify(11, 0));
+    println("");
+    print_int(classify(0, 11));
+    println("");
+    let cmp = 3 < 5;
+    print_int(cmp);
+    println("");
+    print_int(sorted_sum());
+    println("");
+    print_int(scan());
+    println("");
+    print_int(fill_sum());
+    println("");
+    print_int(dots());
+    println("");
+    print_int(trap());
+    println("");
+    return 0;
+}
