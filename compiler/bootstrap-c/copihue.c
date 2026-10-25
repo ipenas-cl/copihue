@@ -6187,6 +6187,9 @@ static int imm_store_enc(int elem, long long v, long long* enc) {
 
 static int emit_imm_store(Codegen* cg, AstNode* value, const char* mem, int el) {
     long long v, enc;
+    // bits 16/32 have no 8-byte store. Leave that to emit_acc_store so the
+    // error stays `an 8-byte store is not available in bits 16`.
+    if (el >= 8 && legacy_bits()) return 0;
     if (!value || value->type != AST_NUMBER || !parse_i64(value->value, &v)) return 0;
     if (!imm_store_enc(el, v, &enc)) return 0;
     if (el == 1) emit(cg, "    mov byte [%s], %lld\n", mem, enc);
