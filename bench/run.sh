@@ -251,11 +251,12 @@ for name in $BENCHES array_global; do
 done
 fi
 
-# Did gcc/rustc/ocamlopt keep fold's result as an immediate?
+# Did gcc/rustc/ocamlopt/copihue keep fold's result as an immediate?
 fold_out=$(tr -d '\n' < "$WORK/stdout/fold_c")
 gcc -O2 -S -o "$WORK/fold_c.s" "$ROOT/bench/src/fold.c"
 rustc -O --emit=asm -o "$WORK/fold_rs.s" "$ROOT/bench/src/fold.rs"
 (cd "$WORK" && ocamlopt -O3 -S -o "$WORK/fold_ml.s" "$ROOT/bench/src/fold.ml") >/dev/null 2>&1 || true
+"$ROOT/copihue" -O2 -S -o "$WORK/fold_lap.s" "$ROOT/bench/src/fold.lap"
 rm -f "$WORK/fold.cmi" "$WORK/fold.cmx" "$WORK/fold.o" \
     "$ROOT/bench/src/fold.cmi" "$ROOT/bench/src/fold.cmx" "$ROOT/bench/src/fold.o" \
     "$ROOT/bench/src/fold.s"
@@ -274,6 +275,7 @@ fold_note() {
 fold_c_imm=$(fold_note "$WORK/fold_c.s")
 fold_rs_imm=$(fold_note "$WORK/fold_rs.s")
 fold_ml_imm=$(fold_note "$WORK/fold_ml.s")
+fold_lap_imm=$(fold_note "$WORK/fold_lap.s")
 
 cpu_model=$(awk -F: '/model name/{gsub(/^ +/, "", $2); print $2; exit}' /proc/cpuinfo)
 cpu_mhz=$(awk -F: '/cpu MHz/{gsub(/^ +/, "", $2); print $2; exit}' /proc/cpuinfo)
@@ -505,15 +507,16 @@ EOF
 
 La salida común es \`$fold_out\`.
 
-Se buscó ese decimal en el ensamblado (\`gcc -O2 -S\`, \`rustc -O --emit=asm\`, \`ocamlopt -O3 -S\`):
+Se buscó ese decimal en el ensamblado (\`gcc -O2 -S\`, \`rustc -O --emit=asm\`, \`ocamlopt -O3 -S\`, \`copihue -O2 -S\`):
 
 | Compilador | El decimal aparece en el \`.s\` |
 |---|---|
 | gcc | $fold_c_imm |
 | rustc | $fold_rs_imm |
 | ocamlopt | $fold_ml_imm |
+| copihue | $fold_lap_imm |
 
-Un bucle de 500000000 vueltas no cabe en unos pocos milisegundos a ninguna frecuencia plausible de esta máquina (a 1 ciclo por vuelta y ${cpu_mhz} MHz harían falta unos $(awk -v mhz="$cpu_mhz" 'BEGIN { printf "%.0f", 500000000 / (mhz * 1000) }') ms). Si C o Rust están muy por debajo de eso, no ejecutaron el bucle: el trabajo se hizo al compilar. OCaml y Copihue hay que leerlos en la tabla, no suponerlo.
+Un bucle de 500000000 vueltas no cabe en unos pocos milisegundos a ninguna frecuencia plausible de esta máquina (a 1 ciclo por vuelta y ${cpu_mhz} MHz harían falta unos $(awk -v mhz="$cpu_mhz" 'BEGIN { printf "%.0f", 500000000 / (mhz * 1000) }') ms). Quien tiene el decimal en el \`.s\` no ejecutó el bucle: el trabajo se hizo al compilar. Quien no lo tiene hay que leerlo en la tabla de tiempos, no suponerlo.
 
 ## Array local y array global, solo Copihue
 
@@ -526,7 +529,7 @@ Un bucle de 500000000 vueltas no cabe en unos pocos milisegundos a ninguna frecu
 
 ## Lectura de esta corrida
 
-El cociente Copihue/C más alto es \`$worst_name\` ($worst_ratio×) y el más bajo es \`$best_name\` ($best_ratio×). Un cociente menor que 1 quiere decir que, en esa fila, la mediana de Copihue quedó por debajo de la de C; el mínimo y el máximo de la tabla dicen si los rangos se separan. En \`fold\` el decimal del resultado está en el ensamblado de gcc y de rustc, y el tiempo de esos dos es el de arrancar el proceso; OCaml sí ejecuta el bucle y ahí el cociente es el de la tabla (Copihue/OCaml). \`chain\` es una cadena dependiente de multiplicar: el cociente está en la tabla, no se supone. El hueco que queda, en los bucles que los cuatro ejecutan, está en \`sort\`, \`array\`, \`fib\`, \`matmul\` y \`arith\`.
+El cociente Copihue/C más alto es \`$worst_name\` ($worst_ratio×) y el más bajo es \`$best_name\` ($best_ratio×). Un cociente menor que 1 quiere decir que, en esa fila, la mediana de Copihue quedó por debajo de la de C; el mínimo y el máximo de la tabla dicen si los rangos se separan. En \`fold\` la tabla del decimal dice gcc $fold_c_imm, rustc $fold_rs_imm, Copihue $fold_lap_imm y OCaml $fold_ml_imm. Quien lo tiene no ejecutó las 500000000 vueltas, y ese tiempo es el de arrancar el proceso. Quien no lo tiene sí ejecuta el bucle; el cociente Copihue/OCaml es el de la tabla. \`chain\` es una cadena dependiente de multiplicar: el cociente está en la tabla, no se supone. El hueco que queda, en los bucles que los cuatro ejecutan, está en \`fib\`, \`sieve\`, \`matmul\`, \`arith\`, \`array\` y \`sort\`.
 
 $(if [ "$compile_win" = 1 ]; then
     echo "En tiempo de compilación de estos archivos chicos, la mediana de Copihue es la más baja en las ocho filas. Eso mide el arranque de un compilador de una pasada más nasm y ld, no un proyecto grande."
@@ -555,6 +558,7 @@ EOF
 # Static profile and the before/after note. make bench replaces the tables
 # above; this file is the write-up of the 0.22.2 -> 0.22.3 measurement.
 if [ -f "$ROOT/bench/profile.md" ]; then
+    printf '\n' >> "$ROOT/bench/RESULTS.md"
     cat "$ROOT/bench/profile.md" >> "$ROOT/bench/RESULTS.md"
 fi
 
