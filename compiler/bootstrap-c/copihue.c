@@ -16,7 +16,7 @@
 
 // ==== NAMING (single place to change when the language is renamed) ====
 #define LANG_NAME     "Copihue"
-#define LANG_VERSION  "0.29.1"
+#define LANG_VERSION  "0.29.2"
 #define COMPILER_BIN  "copihue"
 #define SRC_EXT       ".lap"   /* Lapageria rosea, the copihue */
 #define OLD_SRC_EXT   ".cph"   /* v0.18.x extension, still accepted with a warning */
@@ -288,6 +288,10 @@ typedef struct {
 // Kind of the function currently being generated (for return/epilogue).
 static int g_fn_flags = 0;
 static int g_fn_bits = 0;   // 0 or 64: rax. 16 or 32: eax (legacy mode)
+// 1 while an if/while condition is being emitted in bits 16 or bits 32.
+// The compare saves ebx around `cmp eax, ebx`. A binary operator inside
+// the condition push/pops ebx, and a shift push/pops ecx, before the jump.
+static int g_in_cond = 0;
 static char g_fn_name[128];
 static AstNode* g_cur_fn = NULL;   // Function whose body is being generated
 // A naked local is a labeled slot in the image. A stack frame at the first
@@ -5561,9 +5565,13 @@ static void emit_rbx(Codegen* cg, AstNode* n) {
 // eax/ebx form for bits 16 and bits 32. edx is not touched, so an rdmsr
 // high half survives `rdmsr(m) | imm`.
 static void emit_binop_legacy(Codegen* cg, const char* op) {
-    if (!strcmp(op, "<<")) emit(cg, "    mov ecx, ebx\n    shl eax, cl\n");
-    else if (!strcmp(op, ">>")) emit(cg, "    mov ecx, ebx\n    sar eax, cl\n");
-    else if (op[0] == '&') emit(cg, "    and eax, ebx\n");
+    // A shift count lives in cl. Inside an if/while condition that ecx is a
+    // named register (the E820 buffer size), so put it back before the jump.
+    if (!strcmp(op, "<<") || !strcmp(op, ">>")) {
+        if (g_in_cond) emit(cg, "    push ecx\n");
+        emit(cg, "    mov ecx, ebx\n    %s eax, cl\n", op[0] == '<' ? "shl" : "sar");
+        if (g_in_cond) emit(cg, "    pop ecx\n");
+    } else if (op[0] == '&') emit(cg, "    and eax, ebx\n");
     else if (op[0] == '|') emit(cg, "    or eax, ebx\n");
     else if (op[0] == '^') emit(cg, "    xor eax, ebx\n");
     else if (op[0] == '+') emit(cg, "    add eax, ebx\n");
@@ -6464,7 +6472,11 @@ void gen_expr(Codegen* cg, AstNode* n) {
         } else {
             // Hosted -O2: a simple right-hand side lands in rbx. No push/pop.
             // bits 16/32 keep edx (the high half of an MSR) across the operator.
+            int saved_ebx = 0;
             if (legacy_bits()) {
+                // ebx is the ALU scratch and also a naked lvalue. A condition
+                // must not keep the scratch: the caller still needs the token.
+                if (g_in_cond) { emit(cg, "    push ebx\n"); saved_ebx = 1; }
                 emit(cg, "    push eax\n    push edx\n");
                 gen_expr(cg, n->children[1]);
                 emit(cg, "    mov ebx, eax\n    pop edx\n    pop eax\n");
@@ -6493,6 +6505,7 @@ void gen_expr(Codegen* cg, AstNode* n) {
                 emit(cg, "    mov rbx, rax\n    pop rax\n");
             }
             emit_binop_rax_rbx(cg, n->op);
+            if (saved_ebx) emit(cg, "    pop ebx\n");
         }
     } else if (n->type == AST_COMPARE) {
         if (o2_hosted() && emit_cmp_raw(cg, n)) {
@@ -8909,10 +8922,14 @@ static void emit_acc_jcc(Codegen* cg, int lab, int jump_if_zero) {
 static void emit_cmp_acc(Codegen* cg, AstNode* n) {
     gen_expr(cg, n->children[0]);
     if (legacy_bits()) {
-        emit(cg, "    push eax\n    push edx\n");
+        // ebx holds the right-hand side for `cmp eax, ebx`. It is also a
+        // naked lvalue (the INT 15h continuation token). Save it first, and
+        // pop it after the compare: pop does not change the flags.
+        emit(cg, "    push ebx\n    push eax\n    push edx\n");
         gen_expr(cg, n->children[1]);
         emit(cg, "    mov ebx, eax\n    pop edx\n    pop eax\n");
         emit(cg, "    cmp eax, ebx\n");
+        emit(cg, "    pop ebx\n");
     } else if (optimization_level >= 2 && !g_freestanding && can_emit_rbx(cg, n->children[1])) {
         emit_rbx(cg, n->children[1]);
         emit(cg, "    cmp rax, rbx\n");
@@ -8943,53 +8960,49 @@ static int emit_cmp_jcc(Codegen* cg, AstNode* n, int lab, int succeed) {
 }
 
 static void branch_fail(Codegen* cg, AstNode* n, int fail_lab) {
+    int prev;
     if (!n) return;
+    prev = g_in_cond;
+    if (legacy_bits()) g_in_cond = 1;
     if (cond_is_not(n)) {
         branch_succeed(cg, n->children[0], fail_lab);
-        return;
+    } else if (emit_cmp_jcc(cg, n, fail_lab, 0)) {
+    } else if (n->type == AST_LOGICAL && n->op && n->child_count == 2 && !strcmp(n->op, "&&")) {
+        branch_fail(cg, n->children[0], fail_lab);
+        branch_fail(cg, n->children[1], fail_lab);
+    } else if (n->type == AST_LOGICAL && n->op && n->child_count == 2 && !strcmp(n->op, "||")) {
+        int ok = new_label(cg);
+        branch_succeed(cg, n->children[0], ok);
+        branch_fail(cg, n->children[1], fail_lab);
+        emit(cg, ".L%d:\n", ok);
+    } else {
+        gen_expr(cg, n);
+        emit_acc_jcc(cg, fail_lab, 1);
     }
-    if (emit_cmp_jcc(cg, n, fail_lab, 0)) return;
-    if (n->type == AST_LOGICAL && n->op && n->child_count == 2) {
-        if (!strcmp(n->op, "&&")) {
-            branch_fail(cg, n->children[0], fail_lab);
-            branch_fail(cg, n->children[1], fail_lab);
-            return;
-        }
-        if (!strcmp(n->op, "||")) {
-            int ok = new_label(cg);
-            branch_succeed(cg, n->children[0], ok);
-            branch_fail(cg, n->children[1], fail_lab);
-            emit(cg, ".L%d:\n", ok);
-            return;
-        }
-    }
-    gen_expr(cg, n);
-    emit_acc_jcc(cg, fail_lab, 1);
+    g_in_cond = prev;
 }
 
 static void branch_succeed(Codegen* cg, AstNode* n, int ok_lab) {
+    int prev;
     if (!n) return;
+    prev = g_in_cond;
+    if (legacy_bits()) g_in_cond = 1;
     if (cond_is_not(n)) {
         branch_fail(cg, n->children[0], ok_lab);
-        return;
+    } else if (emit_cmp_jcc(cg, n, ok_lab, 1)) {
+    } else if (n->type == AST_LOGICAL && n->op && n->child_count == 2 && !strcmp(n->op, "||")) {
+        branch_succeed(cg, n->children[0], ok_lab);
+        branch_succeed(cg, n->children[1], ok_lab);
+    } else if (n->type == AST_LOGICAL && n->op && n->child_count == 2 && !strcmp(n->op, "&&")) {
+        int fail = new_label(cg);
+        branch_fail(cg, n->children[0], fail);
+        branch_succeed(cg, n->children[1], ok_lab);
+        emit(cg, ".L%d:\n", fail);
+    } else {
+        gen_expr(cg, n);
+        emit_acc_jcc(cg, ok_lab, 0);
     }
-    if (emit_cmp_jcc(cg, n, ok_lab, 1)) return;
-    if (n->type == AST_LOGICAL && n->op && n->child_count == 2) {
-        if (!strcmp(n->op, "||")) {
-            branch_succeed(cg, n->children[0], ok_lab);
-            branch_succeed(cg, n->children[1], ok_lab);
-            return;
-        }
-        if (!strcmp(n->op, "&&")) {
-            int fail = new_label(cg);
-            branch_fail(cg, n->children[0], fail);
-            branch_succeed(cg, n->children[1], ok_lab);
-            emit(cg, ".L%d:\n", fail);
-            return;
-        }
-    }
-    gen_expr(cg, n);
-    emit_acc_jcc(cg, ok_lab, 0);
+    g_in_cond = prev;
 }
 
 void gen_stmt(Codegen* cg, AstNode* n) {
