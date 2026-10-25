@@ -1,0 +1,25 @@
+// Real mode: zero the segments, set sp, and jump to the writer.
+// QEMU checks COPIHUE on COM1. -O0 and -O2 are the same image.
+// `jmp 0x8200` sits after the halt loop, so it is assembled into the
+// sector (org 0x7C00) and never executed.
+
+bits 16 naked fn _start() {
+    ax = 0;
+    ds = ax;
+    es = ax;
+    ss = ax;
+    sp = 0x7C00;
+    jmp say;
+}
+
+bits 16 naked fn say() {
+    outb(0x3F8, 67);
+    outb(0x3F8, 79);
+    outb(0x3F8, 80);
+    outb(0x3F8, 73);
+    outb(0x3F8, 72);
+    outb(0x3F8, 85);
+    outb(0x3F8, 69);
+    while (1) { hlt(); }
+    jmp 0x8200;
+}
