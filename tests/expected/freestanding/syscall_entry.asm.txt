@@ -54,8 +54,7 @@ sys_write:
     xor rax, rax
 .Lret_sys_write:
     leave
-    pop rax
-    pop r9
+    add rsp, 16
     pop r11
     pop rcx
     pop rsp

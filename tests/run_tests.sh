@@ -12,6 +12,9 @@
 #    diagnostics must match tests/expected/errors/<name>.err.
 # 3. Freestanding tests: tests/freestanding/*.lap compile with --freestanding,
 #    the output must assemble with nasm, and contain no _start or syscall.
+# 4. Flat binaries: tests/flat/*.lap at --flat 0x10000.
+# 5. Boot sectors: tests/boot/*.lap, and QEMU must print COPIHUE.
+# 6. User mode: tests/usermode, and QEMU must print USER.
 set -u
 cd "$(dirname "$0")/.."
 ROOT=$PWD
@@ -41,7 +44,7 @@ check() {  # $1 = name, $2 = golden file, $3 = actual file
   else fail=$((fail+1)); failed+=("$1"); echo "FAIL $1"; [ -f "$2" ] && diff "$2" "$3" | head -10; fi
 }
 
-for src in $(ls tests/*.lap tests/*/*.lap examples/*.lap | grep -v -e '^tests/errors/' -e '^tests/freestanding/' -e "^tests/flat/" -e "^tests/boot/"); do
+for src in $(ls tests/*.lap tests/*/*.lap examples/*.lap | grep -v -e '^tests/errors/' -e '^tests/freestanding/' -e "^tests/flat/" -e "^tests/boot/" -e '^tests/usermode/'); do
   case "$SKIP" in *" $src "*) continue ;; esac
   golden=tests/expected/${src%.lap}.out
   run_program "$src" -O0 > "$WORK/o0"
@@ -112,6 +115,7 @@ for src in tests/flat/*.lap; do
 done
 
 # 5. Boot sectors: tests/boot/*.lap build with --boot into a 512-byte image
+# 6. tests/usermode: boot sector plus a flat kernel. QEMU must print USER.
 #    (org 0x7C00, signature 0xAA55). -O0 and -O2 must match. When QEMU is
 #    installed, the image is booted from the floppy and COM1 must show COPIHUE.
 for src in tests/boot/*.lap; do
@@ -138,6 +142,52 @@ for src in tests/boot/*.lap; do
     pass=$((pass+1))
   fi
 done
+
+# 6. User mode: a 512-byte real-mode sector plus a flat kernel at 0x8000.
+#    The sector reads 16 sectors (8192 bytes) to 0x8000. -O0 and -O2 must
+#    match for the sector and for the kernel. QEMU, when installed, must
+#    print USER on COM1 for both images.
+if [ -f tests/usermode/boot.lap ] && [ -f tests/usermode/kernel.lap ]; then
+  if ! ( cd "$WORK" && "$CC" --boot -o uboot.bin "$ROOT/tests/usermode/boot.lap" 2>err.txt && "$CC" -O2 --boot -o uboot2.bin "$ROOT/tests/usermode/boot.lap" 2>>err.txt ); then
+    fail=$((fail+1)); failed+=("tests/usermode/boot.lap"); echo "FAIL tests/usermode/boot.lap:"; cat "$WORK/err.txt"
+  elif ! cmp -s "$WORK/uboot.bin" "$WORK/uboot2.bin"; then
+    fail=$((fail+1)); failed+=("tests/usermode/boot.lap (-O0 vs -O2)"); echo "FAIL tests/usermode/boot.lap: -O0 and -O2 images differ"
+  elif [ "$(wc -c < "$WORK/uboot.bin")" -ne 512 ] || [ "$(tail -c 2 "$WORK/uboot.bin" | od -An -tx1 | tr -d ' \n')" != "55aa" ]; then
+    fail=$((fail+1)); failed+=("tests/usermode/boot.lap"); echo "FAIL tests/usermode/boot.lap: not a 512-byte sector with signature 55 aa"
+  else
+    od -An -tx1 -v "$WORK/uboot.bin" > "$WORK/uboot.hex"
+    check "tests/usermode/boot.lap" "tests/expected/usermode/boot.hex" "$WORK/uboot.hex"
+    if ! ( cd "$WORK" && "$CC" --flat 0x8000 -o ukernel.bin "$ROOT/tests/usermode/kernel.lap" 2>err.txt && "$CC" -O2 --flat 0x8000 -o ukernel2.bin "$ROOT/tests/usermode/kernel.lap" 2>>err.txt ); then
+      fail=$((fail+1)); failed+=("tests/usermode/kernel.lap"); echo "FAIL tests/usermode/kernel.lap:"; cat "$WORK/err.txt"
+    else
+      ksz=$(wc -c < "$WORK/ukernel.bin")
+      ksz2=$(wc -c < "$WORK/ukernel2.bin")
+      if ! cmp -s "$WORK/ukernel.bin" "$WORK/ukernel2.bin"; then
+        fail=$((fail+1)); failed+=("tests/usermode/kernel.lap (-O0 vs -O2)"); echo "FAIL tests/usermode/kernel.lap: -O0 and -O2 images differ"
+      elif [ "$ksz" -gt 8192 ] || [ "$ksz2" -gt 8192 ]; then
+        fail=$((fail+1)); failed+=("tests/usermode/kernel.lap"); echo "FAIL tests/usermode/kernel.lap: image is larger than 16 sectors ($ksz / $ksz2)"
+      else
+        od -An -tx1 -v "$WORK/ukernel.bin" > "$WORK/ukernel.hex"
+        check "tests/usermode/kernel.lap" "tests/expected/usermode/kernel.hex" "$WORK/ukernel.hex"
+        if command -v qemu-system-x86_64 >/dev/null 2>&1; then
+          for kern in ukernel.bin ukernel2.bin; do
+            dd if=/dev/zero of="$WORK/upad.bin" bs=8192 count=1 status=none
+            dd if="$WORK/$kern" of="$WORK/upad.bin" conv=notrunc status=none
+            cat "$WORK/uboot.bin" "$WORK/upad.bin" > "$WORK/udisk.img"
+            rm -f "$WORK/userial.txt"
+            timeout 8 qemu-system-x86_64 -display none -boot a \
+              -drive file="$WORK/udisk.img",format=raw,if=floppy,index=0 \
+              -serial file:"$WORK/userial.txt" </dev/null >/dev/null 2>&1 || true
+            if ! grep -q USER "$WORK/userial.txt"; then
+              fail=$((fail+1)); failed+=("tests/usermode $kern qemu"); echo "FAIL tests/usermode $kern: QEMU serial did not contain USER"; od -An -tx1c "$WORK/userial.txt" | head; continue
+            fi
+            pass=$((pass+1))
+          done
+        fi
+      fi
+    fi
+  fi
+fi
 
 rm -f "$CC"
 echo

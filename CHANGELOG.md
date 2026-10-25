@@ -2,6 +2,22 @@
 
 Todos los cambios importantes del proyecto.
 
+## [0.23.0] - 2026-10-25
+
+### Added
+- `ltr(selector)` loads the task register (`ltr ax`). The argument is the selector value, not the address of the TSS. In hosted mode the error is `ltr() is only available with --freestanding, --flat, or --boot`.
+- `iretq()` and `sysretq()` emit the instructions a kernel uses to enter or leave ring 3 on a frame it built itself. NASM has no `sysretq` mnemonic; the text is `o64 sysret` (REX.W SYSRET, encoding `48 0F 07`), which loads RIP from `rcx` and RFLAGS from `r11` and enters ring 3.
+- A 64-bit TSS is a `packed struct` of 104 bytes: `rsp0` at offset 4, `ist1` at 36, and the I/O map base at 102. `tss.rsp0 = sp` (or `p->rsp0 = sp`) is the context-switch write. An ordinary struct would put every field in an 8-byte slot and would not match the CPU.
+- `tests/flat/user_syscall.lap` programs `EFER.SCE`, `STAR`, `LSTAR`, and `SFMASK` with `rdmsr` / `wrmsr`, then `ltr`.
+- `tests/usermode` is a floppy image QEMU boots. The sector loads a flat kernel at `0x8000`. The kernel enters long mode, loads a TSS, programs the syscall MSRs, `iretq`s to ring 3, and the user code does `syscall` and `int 0x80`. COM1 shows `USER`. The second interrupt runs only after `tss.rsp0` is changed, on that new stack.
+
+### Fixed
+- A `syscall fn` with 7 parameters popped its return value into `rax` before `sysret`. The spacer and the seventh argument are dropped with `add rsp, 16`, so ring 3 receives the value the body returned.
+
+### Changed
+- `interrupt fn` still ends in `iretq`. That returns to ring 3 when the CPU frame's `CS.RPL` is 3; the epilogue does not build the frame. `syscall fn` still ends in `o64 sysret`, which is the 64-bit return to ring 3. The `syscall` instruction does not switch stacks through the TSS; `set_syscall_stack` still does. `TSS.rsp0` is what the CPU loads on an interrupt from ring 3.
+- Language version is 0.23.0.
+
 ## [0.22.2] - 2026-10-25
 
 ### Fixed

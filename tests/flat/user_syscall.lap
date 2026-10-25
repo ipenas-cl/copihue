@@ -1,0 +1,55 @@
+// also-o2
+// Minimal long-mode setup for a user syscall. The image does not boot
+// by itself: tests/usermode is the one QEMU runs. STAR here is
+// (0x10 << 48) | (0x08 << 32): SYSCALL uses kernel CS 0x08 and SS 0x10,
+// SYSRET uses user SS 0x18 and user CS 0x20 (RPL forced to 3).
+packed struct Tss {
+    reserved0: u32,
+    rsp0: u64,
+    rsp1: u64,
+    rsp2: u64,
+    reserved1: u64,
+    ist1: u64,
+    ist2: u64,
+    ist3: u64,
+    ist4: u64,
+    ist5: u64,
+    ist6: u64,
+    ist7: u64,
+    reserved2: u64,
+    reserved3: u16,
+    iomap: u16
+}
+
+let tss: Tss;
+let kstack: [u8; 256];
+
+fn set_rsp0(sp: i64) -> i64 {
+    tss.rsp0 = sp;
+    tss.ist1 = sp;
+    tss.iomap = 104;
+    return tss.rsp0;
+}
+
+fn program_syscall(entry: i64) -> i64 {
+    let efer = rdmsr(0xC0000080);
+    wrmsr(0xC0000080, efer | 1);
+    wrmsr(0xC0000081, 0x0010000800000000);
+    wrmsr(0xC0000082, entry);
+    wrmsr(0xC0000084, 0x200);
+    ltr(0x28);
+    return set_rsp0(kstack + 256);
+}
+
+syscall fn sys_write(nr: i64, ch: i64) -> i64 {
+    return ch;
+}
+
+interrupt fn fault(err: i64) {
+    tss.rsp0 = err;
+}
+
+fn _start() -> i64 {
+    set_syscall_stack(kstack + 256);
+    return program_syscall(&sys_write);
+}
