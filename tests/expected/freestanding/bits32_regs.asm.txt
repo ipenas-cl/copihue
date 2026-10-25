@@ -116,10 +116,7 @@ protected:
     pop edx
     pop eax
     cmp eax, ebx
-    sete al
-    movzx eax, al
-    test eax, eax
-    jz .L6
+    jne .L6
     pause
 .L7:
     jmp .L5

@@ -27,8 +27,7 @@ real_mode:
     mov ecx, 24
     mov edx, 1397571920
     mov esp, 589824
-    mov eax, 8195
-    mov dword [4096], eax
+    mov dword [4096], 8195
     jmp 0x8200
     ret
 bits 64
@@ -45,8 +44,7 @@ long_mode:
     mov rbx, 2
     mov rsp, 589824
     mov rbp, 524288
-    mov rax, 7
-    mov [rbp+136], rax
+    mov qword [rbp+136], 7
     mov rax, [rbp+128]
     push 24
     lea rax, [.L0]

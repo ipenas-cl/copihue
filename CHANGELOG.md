@@ -2,6 +2,18 @@
 
 Todos los cambios importantes del proyecto.
 
+## [0.28.1] - 2026-10-25
+
+### Fixed
+- An `if` or `while` whose condition is a comparison, `&&`, `||`, or `!` jumps on the flags. It does not write 0 or 1 into `rax` (`eax` in `bits 16` and `bits 32`). `while (rax == 0)` leaves the compared value in `rax` when the loop ends, and the body of `if (rax == 0 - 1)` still sees it. A comparison used as a value still writes 0 or 1. Hosted `-O2` already branched on scalar flags; that path is unchanged. `if carry` still reads CF.
+- `*(addr) = imm` is `mov size [addr], imm` when the address is a number, a naked register, or `reg+disp` / `reg-disp` and the literal fits the pointee. The constant is not moved through `rax` first. Any other store still evaluates the value in the accumulator.
+
+### Added
+- `tests/freestanding/rax_branch.lap` checks the instruction stream at `-O0` and `-O2`: `syscall`, `while (rax == 0)`, `mov byte [4200200], 0`, and `if (rax == 0 - bias)` leaving `rax` for `rdi = rax`. `let r = syscall(8)` stores the slot before that byte store, and `return r` reloads it. The file is assembled, not booted. `syscall` itself is not executed.
+- `tests/boot/rax_keep.lap` is a 512-byte sector. `ax` is the character, a false `if` and a false `while` do not replace it, and `*(addr) = 0` does not either. QEMU reads `COPIHUE` on COM1.
+
+### Changed
+- Language version is 0.28.1, on top of 0.28.0.
 ## [0.28.0] - 2026-10-25
 
 ### Added
