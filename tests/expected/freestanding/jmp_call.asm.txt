@@ -1,0 +1,79 @@
+section .data
+resume_rip: dq 0
+section .text
+bits 64
+go:
+    mov rax, 0
+    mov [__loc_go_0], rax
+    cld
+    std
+    jmp qword [resume_rip]
+    jmp qword [__loc_go_0]
+    jmp rax
+    jmp rbx
+    mov rax, 65
+    push rax
+    mov rax, 1
+    push rax
+    mov rax, 1
+    push rax
+    pop rdx
+    pop rsi
+    pop rdi
+    mov rax, 1
+    syscall
+    ret
+__loc_go_0: dq 0
+bits 16
+add16:
+    movzx eax, ax
+    mov bx, ax
+    movzx eax, cx
+    mov bp, ax
+    movzx eax, bx
+    ret
+    ret
+bits 64
+bits 16
+run16:
+    mov si, 1
+    mov di, 2
+    mov bx, 3
+    mov bp, 4
+    jmp bx
+    movzx eax, bx
+    push ax
+    movzx eax, di
+    push ax
+    pop cx
+    pop ax
+    call add16
+    ret
+bits 64
+bits 32
+add32:
+    ret
+    ret
+bits 64
+bits 32
+run32:
+    mov ebx, 1
+    mov ebp, 2
+    mov esi, 3
+    mov edi, 4
+    jmp ebx
+    mov eax, ebx
+    push eax
+    mov eax, ebp
+    push eax
+    mov eax, esi
+    push eax
+    mov eax, edi
+    push eax
+    pop esi
+    pop edx
+    pop ecx
+    pop eax
+    call add32
+    ret
+bits 64

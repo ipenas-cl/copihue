@@ -1,0 +1,4 @@
+tests/errors/reg_legacy.lap:2:9: error: register 'ebx' is not available in bits 64
+      2 |     ebx = 1;
+        |         ^
+1 error, compilation failed

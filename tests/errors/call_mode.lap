@@ -1,0 +1,7 @@
+fn other() -> i64 {
+    return 1;
+}
+
+bits 16 naked fn k() {
+    other();
+}

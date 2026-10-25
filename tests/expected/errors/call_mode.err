@@ -1,0 +1,4 @@
+tests/errors/call_mode.lap:6:5: error: a bits 16 call cannot target a 64-bit function
+      6 |     other();
+        |     ^
+1 error, compilation failed

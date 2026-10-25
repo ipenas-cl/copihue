@@ -1,0 +1,4 @@
+tests/errors/jmp_indirect.lap:4:5: error: an indirect jmp is only available in a naked function
+      4 |     jmp rax;
+        |     ^
+1 error, compilation failed
