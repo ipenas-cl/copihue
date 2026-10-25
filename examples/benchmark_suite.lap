@@ -7,7 +7,7 @@ let iterations = 1000000;
 // BENCHMARK 1: Arithmetic Operations
 // ============================================
 
-fn benchmark_addition() -> i32 {
+fn benchmark_addition() -> i64 {
     println("Benchmark 1: Addition (1M iterations)");
     
     let sum = 0;
@@ -23,7 +23,7 @@ fn benchmark_addition() -> i32 {
     return sum;
 }
 
-fn benchmark_multiplication() -> i32 {
+fn benchmark_multiplication() -> i64 {
     println("Benchmark 2: Multiplication (1M iterations)");
     
     let product = 1;
@@ -40,7 +40,7 @@ fn benchmark_multiplication() -> i32 {
     return product;
 }
 
-fn benchmark_division() -> i32 {
+fn benchmark_division() -> i64 {
     println("Benchmark 3: Division (100K iterations)");
     
     let result = 1000000;
@@ -57,7 +57,7 @@ fn benchmark_division() -> i32 {
     return result;
 }
 
-fn benchmark_modulo() -> i32 {
+fn benchmark_modulo() -> i64 {
     println("Benchmark 4: Modulo (100K iterations)");
     
     let sum = 0;
@@ -79,13 +79,13 @@ fn benchmark_modulo() -> i32 {
 
 let array: [i32; 1000];
 
-fn benchmark_array_access() -> i32 {
+fn benchmark_array_access() -> i64 {
     println("Benchmark 5: Array Access (100K iterations)");
     
     // Initialize array
     let i = 0;
     while (i < 1000) {
-        array[i] = i;
+        array[i] = i as i32;
         i++;
     }
     
@@ -108,7 +108,7 @@ fn benchmark_array_access() -> i32 {
 // BENCHMARK 3: Power of 2 Operations
 // ============================================
 
-fn benchmark_power_of_2() -> i32 {
+fn benchmark_power_of_2() -> i64 {
     println("Benchmark 6: Power of 2 Operations");
     
     let x = 100000;
@@ -143,7 +143,7 @@ fn benchmark_power_of_2() -> i32 {
 // BENCHMARK 4: Loop Patterns
 // ============================================
 
-fn benchmark_nested_loops() -> i32 {
+fn benchmark_nested_loops() -> i64 {
     println("Benchmark 7: Nested Loops");
     
     let sum = 0;
@@ -167,7 +167,7 @@ fn benchmark_nested_loops() -> i32 {
 // MAIN
 // ============================================
 
-fn main() -> i32 {
+fn main() -> i64 {
     println("");
     println("========================================");
     println("  COPIHUE BENCHMARK SUITE");

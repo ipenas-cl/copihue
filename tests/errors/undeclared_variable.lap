@@ -1,4 +1,4 @@
-fn main() -> i32 {
+fn main() -> i64 {
     let total = 1;
     return totl + 1;
 }

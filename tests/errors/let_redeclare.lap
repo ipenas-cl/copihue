@@ -1,4 +1,4 @@
-fn main() -> i32 {
+fn main() -> i64 {
     let b = 1;
     let b = 2;
     return b;

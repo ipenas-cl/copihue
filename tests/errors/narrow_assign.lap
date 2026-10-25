@@ -1,0 +1,22 @@
+fn take_u8(x: u8) -> u8 {
+    return x;
+}
+
+fn give() -> u8 {
+    let n = 300;
+    return n;
+}
+
+fn take_ptr(p: *u16) -> i64 {
+    return 0;
+}
+
+fn main() -> i64 {
+    let n = 300;
+    let b: u8 = n;
+    let p: *u8 = 0;
+    let q: *u16 = p;
+    take_u8(n);
+    take_ptr(p);
+    return 0;
+}

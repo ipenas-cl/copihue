@@ -33,7 +33,7 @@ fn main() -> i32 {
     println("");
 
     let wide = 300;
-    let z: u8 = wide;
+    let z: u8 = wide as u8;
     print_int(z);
     println("");
 

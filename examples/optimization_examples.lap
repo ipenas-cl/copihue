@@ -5,7 +5,7 @@
 // EJEMPLO 1: Evitar Divisiones
 // ============================================
 
-fn unoptimized_division() -> i32 {
+fn unoptimized_division() -> i64 {
     let sum = 0;
     let i = 0;
     
@@ -19,7 +19,7 @@ fn unoptimized_division() -> i32 {
     return sum;
 }
 
-fn optimized_division() -> i32 {
+fn optimized_division() -> i64 {
     let sum = 0;
     let i = 0;
     
@@ -51,7 +51,7 @@ fn optimized_division() -> i32 {
 // EJEMPLO 2: Loop Unrolling
 // ============================================
 
-fn unoptimized_loop() -> i32 {
+fn unoptimized_loop() -> i64 {
     let sum = 0;
     let i = 0;
     
@@ -64,7 +64,7 @@ fn unoptimized_loop() -> i32 {
     return sum;
 }
 
-fn optimized_loop() -> i32 {
+fn optimized_loop() -> i64 {
     let sum = 0;
     let i = 0;
     
@@ -84,7 +84,7 @@ fn optimized_loop() -> i32 {
 // EJEMPLO 3: Usar Potencias de 2
 // ============================================
 
-fn unoptimized_powers() -> i32 {
+fn unoptimized_powers() -> i64 {
     let x = 12345;
     
     // ❌ Divisiones/multiplicaciones arbitrarias
@@ -95,7 +95,7 @@ fn unoptimized_powers() -> i32 {
     return a + b + c;
 }
 
-fn optimized_powers() -> i32 {
+fn optimized_powers() -> i64 {
     let x = 12345;
     
     // ✅ Usar potencias de 2 cuando posible
@@ -112,7 +112,7 @@ fn optimized_powers() -> i32 {
 
 let matrix: [i32; 10000];  // 100x100 matriz
 
-fn unoptimized_matrix() -> i32 {
+fn unoptimized_matrix() -> i64 {
     // ❌ Acceso por columnas (cache miss)
     let sum = 0;
     let j = 0;
@@ -128,7 +128,7 @@ fn unoptimized_matrix() -> i32 {
     return sum;
 }
 
-fn optimized_matrix() -> i32 {
+fn optimized_matrix() -> i64 {
     // ✅ Acceso por filas (cache hit)
     let sum = 0;
     let i = 0;
@@ -150,7 +150,7 @@ fn optimized_matrix() -> i32 {
 
 let data: [i32; 1000];
 
-fn unoptimized_checks() -> i32 {
+fn unoptimized_checks() -> i64 {
     let sum = 0;
     let i = 0;
     
@@ -165,7 +165,7 @@ fn unoptimized_checks() -> i32 {
     return sum;
 }
 
-fn optimized_checks() -> i32 {
+fn optimized_checks() -> i64 {
     let sum = 0;
     let i = 0;
     
@@ -185,7 +185,7 @@ fn optimized_checks() -> i32 {
 // EJEMPLO 6: Precalcular Constantes
 // ============================================
 
-fn unoptimized_constants() -> i32 {
+fn unoptimized_constants() -> i64 {
     let sum = 0;
     let i = 0;
     
@@ -201,7 +201,7 @@ fn unoptimized_constants() -> i32 {
     return sum;
 }
 
-fn optimized_constants() -> i32 {
+fn optimized_constants() -> i64 {
     let sum = 0;
     let i = 0;
     let limit = 100 * 100;  // ✅ Calculado una vez
@@ -218,7 +218,7 @@ fn optimized_constants() -> i32 {
 // COMPARACIÓN
 // ============================================
 
-fn compare_all() -> i32 {
+fn compare_all() -> i64 {
     println("========================================");
     println("  OPTIMIZATION EXAMPLES");
     println("========================================");
@@ -291,6 +291,6 @@ fn compare_all() -> i32 {
     return 0;
 }
 
-fn main() -> i32 {
+fn main() -> i64 {
     return compare_all();
 }

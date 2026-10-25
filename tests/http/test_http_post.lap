@@ -10,7 +10,7 @@ let buffer: [i8; 4096];
 let request_buffer: [i8; 1024];
 let len_str: [i8; 10];
 
-fn htons(hostshort: i32) -> i32 {
+fn htons(hostshort: i64) -> i64 {
     let low_div = hostshort / 256;
     let low = hostshort - low_div * 256;
     let high_div = (hostshort / 256) / 256;
@@ -18,7 +18,7 @@ fn htons(hostshort: i32) -> i32 {
     return (low * 256) + high;
 }
 
-fn setup_sockaddr(port: i32) -> i32 {
+fn setup_sockaddr(port: i64) -> i64 {
     let i = 0;
     while (i < 16) {
         sockaddr[i] = 0;
@@ -28,8 +28,8 @@ fn setup_sockaddr(port: i32) -> i32 {
     sockaddr[1] = 0;
     let port_be = htons(port);
     let port_be_div = port_be / 256;
-    sockaddr[2] = port_be_div;
-    sockaddr[3] = port_be - port_be_div * 256;
+    sockaddr[2] = port_be_div as i8;
+    sockaddr[3] = (port_be - port_be_div * 256) as i8;
     sockaddr[4] = 127;
     sockaddr[5] = 0;
     sockaddr[6] = 0;
@@ -37,7 +37,7 @@ fn setup_sockaddr(port: i32) -> i32 {
     return 0;
 }
 
-fn test_post(path_str: *u8, body_str: *u8) -> i32 {
+fn test_post(path_str: *u8, body_str: *u8) -> i64 {
     println("========================================");
     println("Testing POST: ");
     println(path_str);
@@ -109,7 +109,7 @@ fn test_post(path_str: *u8, body_str: *u8) -> i32 {
     while (num > 0) {
         let digit_div = num / 10;
         let digit = num - digit_div * 10;
-        len_str[len_pos] = 48 + digit;
+        len_str[len_pos] = (48 + digit) as i8;
         len_pos = len_pos + 1;
         num = digit_div;
     }
@@ -162,7 +162,7 @@ fn test_post(path_str: *u8, body_str: *u8) -> i32 {
     return 0;
 }
 
-fn main() -> i32 {
+fn main() -> i64 {
     println("");
     println("========================================");
     println("COPIHUE HTTP API - POST TESTS");
