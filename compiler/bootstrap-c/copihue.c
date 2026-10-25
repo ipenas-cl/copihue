@@ -14,7 +14,7 @@
 
 // ==== NAMING (single place to change when the language is renamed) ====
 #define LANG_NAME     "Copihue"
-#define LANG_VERSION  "0.22.1"
+#define LANG_VERSION  "0.22.2"
 #define COMPILER_BIN  "copihue"
 #define SRC_EXT       ".lap"   /* Lapageria rosea, the copihue */
 #define OLD_SRC_EXT   ".cph"   /* v0.18.x extension, still accepted with a warning */
@@ -173,10 +173,14 @@ typedef struct {
     int array_len;        // Declared element count when is_array (0 if unknown)
 } Symbol;
 
+#define MAX_BLOCK_SCOPE 64
+
 typedef struct {
     Symbol* symbols;
     int count;
     int stack_size;
+    int scope_base[MAX_BLOCK_SCOPE];
+    int scope_depth;
 } SymbolTable;
 
 // Global variable table
@@ -419,9 +423,33 @@ int symtab_add_pointer(SymbolTable* st, char* name) {
     return -st->stack_size;
 }
 
+// A block pushes the current count. Leaving it hides every name declared
+// inside, without giving those stack slots back: a later `let` of the same
+// name must not reuse the earlier slot, or a use would read the other one.
+static void symtab_enter(SymbolTable* st) {
+    if (!st || st->scope_depth >= MAX_BLOCK_SCOPE) return;
+    st->scope_base[st->scope_depth++] = st->count;
+}
+
+static void symtab_leave(SymbolTable* st) {
+    if (!st || st->scope_depth <= 0) return;
+    st->scope_depth--;
+    st->count = st->scope_base[st->scope_depth];
+}
+
+static int symtab_redeclared(SymbolTable* st, const char* name) {
+    if (!st || !name || st->scope_depth <= 0) return 0;
+    int base = st->scope_base[st->scope_depth - 1];
+    for (int i = base; i < st->count; i++) {
+        if (st->symbols[i].name && !strcmp(st->symbols[i].name, name)) return 1;
+    }
+    return 0;
+}
+
 Symbol* symtab_lookup_symbol(SymbolTable* st, char* name) {
-    for (int i = 0; i < st->count; i++) {
-        if (!strcmp(st->symbols[i].name, name)) {
+    if (!st) return NULL;
+    for (int i = st->count - 1; i >= 0; i--) {
+        if (st->symbols[i].name && !strcmp(st->symbols[i].name, name)) {
             return &st->symbols[i];
         }
     }
@@ -1191,6 +1219,7 @@ AstNode* parse_block(Parser* p);
 static void end_simple_stmt(Parser* p) { if (!g_no_semi) expect(p, T_SEMI); }
 
 AstNode* parse_stmt(Parser* p) {
+    if (check_tok(p, T_LBRACE)) return parse_block(p);
     if (match_tok(p, T_RET)) {
         AstNode* ret = ast_new(AST_RETURN);
         if (!check_tok(p, T_SEMI)) ast_add(ret, parse_expr(p));
@@ -3957,10 +3986,12 @@ void gen_stmt(Codegen* cg, AstNode* n);
 void gen_stmt(Codegen* cg, AstNode* n) {
     if (!n) return;  // Null safety
     if (n->type == AST_BLOCK) {
-        // Handle block statements (for 'for' loop desugaring)
+        // Names declared here hide outer ones and disappear at the closing brace.
+        symtab_enter(cg->symtab);
         for (int i = 0; i < n->child_count; i++) {
             gen_stmt(cg, n->children[i]);
         }
+        symtab_leave(cg->symtab);
         return;
     }
     if (n->type == AST_RETURN) {
@@ -3973,6 +4004,10 @@ void gen_stmt(Codegen* cg, AstNode* n) {
         else
             emit(cg, "    leave\n    ret\n");
     } else if (n->type == AST_LET) {
+        if (n->name && symtab_redeclared(cg->symtab, n->name)) {
+            diag_error(n->line, n->col, "redeclaration of '%s' in the same block", n->name);
+            return;
+        }
         int size = 1;
         char* type_name = NULL;
 
@@ -4098,13 +4133,10 @@ void gen_stmt(Codegen* cg, AstNode* n) {
         int end_lab = new_label(cg);
         gen_expr(cg, n->children[0]);
         emit(cg, "    test rax, rax\n    jz .L%d\n", else_lab);
-        for (int i = 0; i < n->children[1]->child_count; i++)
-            gen_stmt(cg, n->children[1]->children[i]);
+        gen_stmt(cg, n->children[1]);
         emit(cg, "    jmp .L%d\n.L%d:\n", end_lab, else_lab);
-        if (n->child_count > 2) {
-            for (int i = 0; i < n->children[2]->child_count; i++)
-                gen_stmt(cg, n->children[2]->children[i]);
-        }
+        if (n->child_count > 2)
+            gen_stmt(cg, n->children[2]);
         emit(cg, ".L%d:\n", end_lab);
     } else if (n->type == AST_WHILE) {
         int start_lab = new_label(cg);
@@ -4117,13 +4149,11 @@ void gen_stmt(Codegen* cg, AstNode* n) {
         g_loop_break[g_loop_depth] = end_lab;
         g_loop_cont[g_loop_depth] = cont_lab;
         g_loop_depth++;
-        for (int i = 0; i < n->children[1]->child_count; i++)
-            gen_stmt(cg, n->children[1]->children[i]);
+        gen_stmt(cg, n->children[1]);
         g_loop_depth--;
         emit(cg, ".L%d:\n", cont_lab);
-        if (n->child_count > 2)  // for-loop increment
-            for (int i = 0; i < n->children[2]->child_count; i++)
-                gen_stmt(cg, n->children[2]->children[i]);
+        if (n->child_count > 2)  // for-loop increment, its own block
+            gen_stmt(cg, n->children[2]);
         emit(cg, "    jmp .L%d\n.L%d:\n", start_lab, end_lab);
     } else if (n->type == AST_BREAK || n->type == AST_CONTINUE) {
         if (g_loop_depth == 0) {
@@ -4151,6 +4181,10 @@ static void emit_copy_param(Codegen* cg, const char* src_reg, int dst, int sz) {
 }
 
 static void bind_param(Codegen* cg, AstNode* par, const char* src_reg, int stack_disp, int from_stack) {
+    if (par->name && symtab_redeclared(cg->symtab, par->name)) {
+        diag_error(par->line, par->col, "redeclaration of '%s' in the same block", par->name);
+        return;
+    }
     int off;
     if (par->is_pointer) {
         off = symtab_add_pointer(cg->symtab, par->name);
@@ -4273,9 +4307,14 @@ void gen_func(Codegen* cg, AstNode* n) {
     const char* regs[] = {"rdi", "rsi", "rdx", "rcx", "r8", "r9"};
     SymbolTable* old_symtab = cg->symtab;
     cg->symtab = symtab_new();
+    // Parameters share the function body's scope, so `let x` next to them is a redeclaration.
+    symtab_enter(cg->symtab);
 
     if (is_int) {
         if (has_err) {
+            if (symtab_redeclared(cg->symtab, n->children[0]->name))
+                diag_error(n->children[0]->line, n->children[0]->col,
+                           "redeclaration of '%s' in the same block", n->children[0]->name);
             // 15 saved registers plus the alignment push: error code is at [rbp+128].
             int off = symtab_add(cg->symtab, n->children[0]->name, 1);
             if (n->children[0]->value && cg->symtab->count > 0)
@@ -4294,6 +4333,7 @@ void gen_func(Codegen* cg, AstNode* n) {
     AstNode* body = n->children[param_count];
     for (int i = 0; i < body->child_count; i++)
         gen_stmt(cg, body->children[i]);
+    symtab_leave(cg->symtab);
 
     if (is_int) {
         static const char* saved[] = {

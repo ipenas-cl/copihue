@@ -1,0 +1,4 @@
+tests/errors/let_redeclare.lap:3:9: error: redeclaration of 'b' in the same block
+      3 |     let b = 2;
+        |         ^
+1 error, compilation failed
