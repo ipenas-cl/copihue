@@ -14,7 +14,7 @@
 
 // ==== NAMING (single place to change when the language is renamed) ====
 #define LANG_NAME     "Copihue"
-#define LANG_VERSION  "0.24.1"
+#define LANG_VERSION  "0.24.2"
 #define COMPILER_BIN  "copihue"
 #define SRC_EXT       ".lap"   /* Lapageria rosea, the copihue */
 #define OLD_SRC_EXT   ".cph"   /* v0.18.x extension, still accepted with a warning */
@@ -174,6 +174,7 @@ typedef struct {
     int array_len;        // Declared element count when is_array (0 if unknown)
     int reg;              // -1 stack slot; 0..3 = r12..r15 at hosted -O2
     int as_int;           // Pointer value that may also be used as an integer
+    char* mem;            // Naked local: label of its slot. NULL means [rbp+offset]
 } Symbol;
 
 #define MAX_BLOCK_SCOPE 64
@@ -257,8 +258,21 @@ static int g_fn_flags = 0;
 static int g_fn_bits = 0;   // 0 or 64: rax. 16 or 32: eax (legacy mode)
 static char g_fn_name[128];
 static AstNode* g_cur_fn = NULL;   // Function whose body is being generated
+// A naked local is a labeled slot in the image. A stack frame at the first
+// instruction would use the BIOS stack, and `ss = 0` would then point bp at
+// the wrong segment. Arrays and structs stay rejected.
+#define MAX_NAKED_SLOTS 64
+static char* g_naked_slots[MAX_NAKED_SLOTS];
+static int g_naked_slot_n = 0;
+static int g_naked_slot_seq = 0;
+static int g_naked_slot_bytes = 0;
 
 static int legacy_bits(void) { return g_fn_bits == 16 || g_fn_bits == 32; }
+
+static int seg_reg_name(const char* n) {
+    return n && (!strcmp(n, "ds") || !strcmp(n, "es") || !strcmp(n, "ss")
+                 || !strcmp(n, "fs") || !strcmp(n, "gs"));
+}
 
 // ==== MEMORY HELPERS ====
 void* safe_realloc(void* ptr, size_t size) {
@@ -417,6 +431,7 @@ int symtab_add(SymbolTable* st, char* name, int size) {
     st->symbols[st->count - 1].volatile_pointee = 0;
     st->symbols[st->count - 1].array_len = 0;
     st->symbols[st->count - 1].as_int = 0;
+    st->symbols[st->count - 1].mem = NULL;
     symbol_assign_reg(&st->symbols[st->count - 1]);
     return -st->stack_size;
 }
@@ -435,6 +450,7 @@ int symtab_add_struct(SymbolTable* st, char* name, char* type_name, int size_byt
     st->symbols[st->count - 1].volatile_pointee = 0;
     st->symbols[st->count - 1].array_len = 0;
     st->symbols[st->count - 1].as_int = 0;
+    st->symbols[st->count - 1].mem = NULL;
     symbol_assign_reg(&st->symbols[st->count - 1]);
     return -st->stack_size;
 }
@@ -453,6 +469,7 @@ int symtab_add_pointer(SymbolTable* st, char* name) {
     st->symbols[st->count - 1].volatile_pointee = 0;
     st->symbols[st->count - 1].array_len = 0;
     st->symbols[st->count - 1].as_int = 0;
+    st->symbols[st->count - 1].mem = NULL;
     symbol_assign_reg(&st->symbols[st->count - 1]);
     return -st->stack_size;
 }
@@ -2568,14 +2585,16 @@ static void check_builtin_args(Codegen* cg, AstNode* n) {
 
 static void emit_width_trunc(Codegen* cg, int bits, int sg) {
     if (bits >= 64) return;
+    // bits 16/32 already hold the value in eax. movsxd/mov rax are rejected there.
+    const char* d = legacy_bits() ? "eax" : "rax";
     if (sg) {
-        if (bits <= 8) emit(cg, "    movsx rax, al\n");
-        else if (bits <= 16) emit(cg, "    movsx rax, ax\n");
-        else emit(cg, "    movsxd rax, eax\n");
+        if (bits <= 8) emit(cg, "    movsx %s, al\n", d);
+        else if (bits <= 16) emit(cg, "    movsx %s, ax\n", d);
+        else if (!legacy_bits()) emit(cg, "    movsxd rax, eax\n");
     } else {
-        if (bits <= 8) emit(cg, "    movzx rax, al\n");
-        else if (bits <= 16) emit(cg, "    movzx rax, ax\n");
-        else emit(cg, "    mov eax, eax\n");
+        if (bits <= 8) emit(cg, "    movzx %s, al\n", d);
+        else if (bits <= 16) emit(cg, "    movzx %s, ax\n", d);
+        else if (!legacy_bits()) emit(cg, "    mov eax, eax\n");
     }
 }
 
@@ -3200,7 +3219,13 @@ void gen_addr_of(Codegen* cg, AstNode* n) {
             Symbol* sym = symtab_lookup_symbol(cg->symtab, var->name);
             if (sym && sym->is_pointer) {
                 // Variable is already a pointer - just load it
-                emit(cg, "    mov rax, [rbp%d]\n", off);
+                if (sym->mem && legacy_bits()) emit(cg, "    mov eax, [%s]\n", sym->mem);
+                else if (sym->mem) emit(cg, "    mov rax, [%s]\n", sym->mem);
+                else emit(cg, "    mov rax, [rbp%d]\n", off);
+            } else if (sym && sym->mem && legacy_bits()) {
+                emit(cg, "    mov eax, %s\n", sym->mem);
+            } else if (sym && sym->mem) {
+                emit(cg, "    lea rax, [%s]\n", sym->mem);
             } else {
                 // Regular variable - take its address
                 emit(cg, "    lea rax, [rbp%d]\n", off);
@@ -4102,6 +4127,10 @@ void gen_expr(Codegen* cg, AstNode* n) {
                 emit(cg, "    lea rax, [rbp%d]\n", off);
             } else if (local_reg(sym)) {
                 emit(cg, "    mov rax, %s\n", local_reg(sym));
+            } else if (sym && sym->mem && legacy_bits()) {
+                emit(cg, "    mov eax, [%s]\n", sym->mem);
+            } else if (sym && sym->mem) {
+                emit(cg, "    mov rax, [%s]\n", sym->mem);
             } else {
                 // Regular variable or pointer - load value
                 emit(cg, "    mov rax, [rbp%d]\n", off);
@@ -4167,6 +4196,15 @@ void gen_expr(Codegen* cg, AstNode* n) {
             if (int_name(n->value, &bits, &sg)) emit_width_trunc(cg, bits, sg);
         }
     } else if (n->type == AST_ASSIGN) {
+        // `ds = 0` is a segment load (`mov ds, ax`), not a variable.
+        // A real local or global of that name still wins.
+        if (n->name && seg_reg_name(n->name) &&
+            !symtab_lookup_symbol(cg->symtab, n->name) &&
+            !global_symtab_lookup(cg->global_symtab, n->name)) {
+            if (n->child_count > 0) gen_expr(cg, n->children[0]);
+            emit(cg, "    mov %s, ax\n", n->name);
+            return;
+        }
         if (n->name) {
             AstNode dst;
             memset(&dst, 0, sizeof(dst));
@@ -4193,6 +4231,8 @@ void gen_expr(Codegen* cg, AstNode* n) {
             if (sym && !sym->is_pointer && !sym->is_array)
                 emit_store_trunc(cg, sym->type_name, n->children[0]);
             if (sym && local_reg(sym)) emit(cg, "    mov %s, rax\n", local_reg(sym));
+            else if (sym && sym->mem && legacy_bits()) emit(cg, "    mov [%s], eax\n", sym->mem);
+            else if (sym && sym->mem) emit(cg, "    mov [%s], rax\n", sym->mem);
             else emit(cg, "    mov [rbp%d], rax\n", off);
         } else {
             // Try global variable
@@ -5033,6 +5073,21 @@ static void emit_hosted_epilogue(Codegen* cg) {
     emit(cg, "    leave\n    ret\n");
 }
 
+// A naked scalar or pointer lives at a label, not in a frame. `bytes` is what
+// symtab_add just added; an array or struct is left on the stack and rejected.
+static void naked_take_slot(Symbol* sym, int bytes, int line, int col) {
+    char buf[160];
+    if (!(g_fn_flags & AF_NAKED) || !sym || sym->is_array) return;
+    if (g_naked_slot_n >= MAX_NAKED_SLOTS) {
+        diag_error(line, col, "too many locals in a naked function (maximum %d)", MAX_NAKED_SLOTS);
+        return;
+    }
+    snprintf(buf, sizeof buf, "__loc_%s_%d", g_fn_name, g_naked_slot_seq++);
+    sym->mem = strdup(buf);
+    g_naked_slots[g_naked_slot_n++] = sym->mem;
+    g_naked_slot_bytes += bytes;
+}
+
 void gen_stmt(Codegen* cg, AstNode* n);
 
 void gen_stmt(Codegen* cg, AstNode* n) {
@@ -5155,7 +5210,10 @@ void gen_stmt(Codegen* cg, AstNode* n) {
 
         // Check if pointer type
         if (n->is_pointer) {
+            int before = cg->symtab->stack_size;
             int off = symtab_add_pointer(cg->symtab, n->name);
+            naked_take_slot(&cg->symtab->symbols[cg->symtab->count - 1],
+                            cg->symtab->stack_size - before, n->line, n->col);
 
             // Store type name for element size calculation
             if (n->value && cg->symtab && cg->symtab->count > 0) {
@@ -5173,14 +5231,22 @@ void gen_stmt(Codegen* cg, AstNode* n) {
                 VTy dst_ty = ty_decl(cg, 0, n->is_pointer, n->value);
                 check_types(n->children[0], "", dst_ty, expr_ty(cg, n->children[0]));
                 gen_expr(cg, n->children[0]);
-                emit(cg, "    mov [rbp%d], rax\n", off);
+                if (cg->symtab->symbols[cg->symtab->count - 1].mem && legacy_bits())
+                    emit(cg, "    mov [%s], eax\n", cg->symtab->symbols[cg->symtab->count - 1].mem);
+                else if (cg->symtab->symbols[cg->symtab->count - 1].mem)
+                    emit(cg, "    mov [%s], rax\n", cg->symtab->symbols[cg->symtab->count - 1].mem);
+                else emit(cg, "    mov [rbp%d], rax\n", off);
             }
             return;
         }
 
+        int before = cg->symtab->stack_size;
         int off = symtab_add(cg->symtab, n->name, size);
         if (n->child_count > 0 && n->children[0]->type == AST_ARRAY_LITERAL)
             cg->symtab->symbols[cg->symtab->count - 1].is_array = 1;
+        else
+            naked_take_slot(&cg->symtab->symbols[cg->symtab->count - 1],
+                            cg->symtab->stack_size - before, n->line, n->col);
         if (n->value && cg->symtab && cg->symtab->count > 0)
             cg->symtab->symbols[cg->symtab->count - 1].type_name = strdup(n->value);
         if (n->child_count > 0) {
@@ -5200,6 +5266,8 @@ void gen_stmt(Codegen* cg, AstNode* n) {
                 if (!sym->is_pointer && !sym->is_array)
                     emit_store_trunc(cg, sym->type_name, n->children[0]);
                 if (local_reg(sym)) emit(cg, "    mov %s, rax\n", local_reg(sym));
+                else if (sym->mem && legacy_bits()) emit(cg, "    mov [%s], eax\n", sym->mem);
+                else if (sym->mem) emit(cg, "    mov [%s], rax\n", sym->mem);
                 else emit(cg, "    mov [rbp%d], rax\n", off);
             }
         }
@@ -5365,6 +5433,9 @@ void gen_func(Codegen* cg, AstNode* n) {
     g_fn_flags = n->flags;
     g_fn_bits = bits;
     g_cur_fn = n;
+    g_naked_slot_n = 0;
+    g_naked_slot_seq = 0;
+    g_naked_slot_bytes = 0;
     snprintf(g_fn_name, sizeof(g_fn_name), "%s", n->name);
 
     if (bits) emit(cg, "\nbits %d\n%s:\n", bits, n->name);
@@ -5474,7 +5545,9 @@ void gen_func(Codegen* cg, AstNode* n) {
         emit(cg, "    pop rsp\n");
         emit(cg, "    o64 sysret\n");
     } else if (naked) {
-        if (cg->symtab->stack_size > 0)
+        // Scalars and pointers are labeled slots. Anything still on the stack
+        // is an array or a struct, which this mode does not lay out.
+        if (cg->symtab->stack_size != g_naked_slot_bytes)
             diag_error(n->line, n->col, "a naked function cannot have local variables");
         emit(cg, "    ret\n");
     } else {
@@ -5489,6 +5562,14 @@ void gen_func(Codegen* cg, AstNode* n) {
         stack_size = ((stack_size + 15) / 16) * 16;   // keep rsp 16-byte aligned
         emit(cg, "__frame_%s equ %d\n", n->name, stack_size);
     }
+    for (int i = 0; i < g_naked_slot_n; i++) {
+        if (legacy_bits()) emit(cg, "%s: dd 0\n", g_naked_slots[i]);
+        else emit(cg, "%s: dq 0\n", g_naked_slots[i]);
+        free(g_naked_slots[i]);
+        g_naked_slots[i] = NULL;
+    }
+    g_naked_slot_n = 0;
+
     if (bits && bits != 64) emit(cg, "bits 64\n");
 
     g_fn_flags = 0;

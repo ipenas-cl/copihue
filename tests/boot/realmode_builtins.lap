@@ -1,6 +1,6 @@
 // Sector that enters protected mode without asm() for lgdt, CR0, or
-// the COM1 writes. QEMU must show COPIHUE. Segment loads stay asm():
-// assigning ds is not in the language yet.
+// the COM1 writes. QEMU must show COPIHUE. The segment loads here stay
+// asm(); `ds = 0` is tests/boot/seg_local.lap.
 
 data gdt {
     dq 0;
