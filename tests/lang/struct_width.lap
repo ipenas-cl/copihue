@@ -1,0 +1,89 @@
+// Real field widths. Packed FsEnt is the AtomicOS directory entry: an array
+// field is N * sizeof(T), and the compiler must not report a 13-byte record.
+// Pad is the ordinary-struct rule: each field is aligned to its own width,
+// and the struct size is rounded up to the strictest alignment. Arithmetic
+// on a narrow field is still 64-bit; the store keeps only that field's bits.
+
+packed struct FsEnt {
+    name: [u8; 16],
+    size: u32,
+    nblocks: u32,
+    blocks: [u32; 8]
+}
+
+struct FsEntOpen {
+    name: [u8; 16],
+    size: u32,
+    nblocks: u32,
+    blocks: [u32; 8]
+}
+
+struct Pad {
+    a: u8,
+    b: u32,
+    c: u16,
+    d: u64
+}
+
+fn main() -> i64 {
+    print_int(sizeof(u8)); println("");
+    print_int(sizeof(u16)); println("");
+    print_int(sizeof(u32)); println("");
+    print_int(sizeof(i32)); println("");
+
+    print_int(sizeof(FsEnt)); println("");
+    print_int(offsetof(FsEnt, name)); println("");
+    print_int(offsetof(FsEnt, size)); println("");
+    print_int(offsetof(FsEnt, nblocks)); println("");
+    print_int(offsetof(FsEnt, blocks)); println("");
+    print_int(sizeof(FsEntOpen)); println("");
+    print_int(offsetof(FsEntOpen, size)); println("");
+    print_int(offsetof(FsEntOpen, blocks)); println("");
+
+    print_int(sizeof(Pad)); println("");
+    print_int(offsetof(Pad, a)); println("");
+    print_int(offsetof(Pad, b)); println("");
+    print_int(offsetof(Pad, c)); println("");
+    print_int(offsetof(Pad, d)); println("");
+
+    let e: FsEnt;
+    e.size = 2;
+    e.nblocks = 1;
+    e.blocks[0] = 4;
+    e.blocks[1] = 9;
+    e.name[0] = 65;
+    e.name[1] = 66;
+    e.name[15] = 90;
+    print_int(e.size); println("");
+    print_int(e.nblocks); println("");
+    print_int(e.blocks[0]); println("");
+    print_int(e.blocks[1]); println("");
+    print_int(e.name[0]); println("");
+    print_int(e.name[1]); println("");
+    print_int(e.name[15]); println("");
+    print_int(e.size); println("");
+
+    e.name[2] = 200;
+    e.name[2] = e.name[2] + 100;
+    print_int(e.name[2]); println("");
+    print_int(e.size); println("");
+
+    let u: FsEntOpen;
+    u.size = 7;
+    u.name[0] = 65;
+    u.blocks[7] = 3;
+    print_int(u.size); println("");
+    print_int(u.name[0]); println("");
+    print_int(u.blocks[7]); println("");
+
+    let p: Pad;
+    p.a = 1;
+    p.b = 2;
+    p.c = 3;
+    p.d = 4;
+    print_int(p.a); println("");
+    print_int(p.b); println("");
+    print_int(p.c); println("");
+    print_int(p.d); println("");
+    return 0;
+}

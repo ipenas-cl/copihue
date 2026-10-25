@@ -1,0 +1,4 @@
+tests/errors/struct_layout.lap:2:22: error: cannot lay out field 'name' of type '[Missing; 4]'
+      2 |     name: [Missing; 4],
+        |                      ^
+1 error, compilation failed
