@@ -1,0 +1,4 @@
+tests/errors/section_bits.lap:6:12: error: section '.high' does not fit in bits 16
+      6 |     return section_start(".high");
+        |            ^
+1 error, compilation failed

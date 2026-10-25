@@ -1,0 +1,7 @@
+// flags: --freestanding
+section ".high" @ 0x10000 {
+    fn place() -> i64 { return 0; }
+}
+bits 16 naked fn f() -> i64 {
+    return section_start(".high");
+}

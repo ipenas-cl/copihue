@@ -1,0 +1,110 @@
+section .data
+__data_start:
+section .bss
+__bss_start:
+zeroed: resq 1
+__bss_end:
+section .text
+__text_start:
+section .extra vstart=0x8000 align=1
+__sec__extra_start:
+val: dq 65
+blob:
+    db 1
+    db 2
+piece:
+    push rbp
+    mov rbp, rsp
+    sub rsp, __frame_piece
+    mov rax, [val]
+    leave
+    ret
+    xor rax, rax
+    leave
+    ret
+__frame_piece equ 64
+more:
+    push rbp
+    mov rbp, rsp
+    sub rsp, __frame_more
+    mov rax, [val]
+    leave
+    ret
+    xor rax, rax
+    leave
+    ret
+__frame_more equ 64
+section .text
+bounds:
+    push rbp
+    mov rbp, rsp
+    sub rsp, __frame_bounds
+    mov rax, __sec__extra_start
+    mov [rbp-8], rax
+    mov rax, __sec__extra_end
+    mov [rbp-16], rax
+    mov rax, __text_start
+    mov [rbp-24], rax
+    mov rax, __text_end
+    mov [rbp-32], rax
+    mov rax, __data_start
+    mov [rbp-40], rax
+    mov rax, __data_end
+    mov [rbp-48], rax
+    mov rax, __bss_start
+    mov [rbp-56], rax
+    mov rax, __bss_end
+    mov [rbp-64], rax
+    mov rax, [rbp-8]
+    push rax
+    mov rax, [rbp-16]
+    mov rbx, rax
+    pop rax
+    add rax, rbx
+    push rax
+    mov rax, [rbp-24]
+    mov rbx, rax
+    pop rax
+    add rax, rbx
+    push rax
+    mov rax, [rbp-32]
+    mov rbx, rax
+    pop rax
+    add rax, rbx
+    push rax
+    mov rax, [rbp-40]
+    mov rbx, rax
+    pop rax
+    add rax, rbx
+    push rax
+    mov rax, [rbp-48]
+    mov rbx, rax
+    pop rax
+    add rax, rbx
+    push rax
+    mov rax, [rbp-56]
+    mov rbx, rax
+    pop rax
+    add rax, rbx
+    push rax
+    mov rax, [rbp-64]
+    mov rbx, rax
+    pop rax
+    add rax, rbx
+    push rax
+    call piece
+    mov rbx, rax
+    pop rax
+    add rax, rbx
+    leave
+    ret
+    xor rax, rax
+    leave
+    ret
+__frame_bounds equ 128
+section .extra vstart=0x8000 align=1
+__sec__extra_end:
+section .text
+__text_end:
+section .data
+__data_end:

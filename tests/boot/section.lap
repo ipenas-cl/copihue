@@ -1,0 +1,18 @@
+// One section, loaded at 0x7C00. The hex of `mov ax, __sec__boot_start`
+// is `b8 00 7c` when vstart is that address. QEMU checks COPIHUE.
+// The comparison itself is not the oracle: BIOS loads the sector at
+// 0x7C00 from `org` even if vstart were wrong.
+
+section ".boot" @ 0x7C00 {
+    bits 16 naked fn _start() {
+        ax = section_start(".boot");
+        outb(0x3F8, 67);
+        outb(0x3F8, 79);
+        outb(0x3F8, 80);
+        outb(0x3F8, 73);
+        outb(0x3F8, 72);
+        outb(0x3F8, 85);
+        outb(0x3F8, 69);
+        while (1) { hlt(); }
+    }
+}
