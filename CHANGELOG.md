@@ -2,6 +2,19 @@
 
 Todos los cambios importantes del proyecto.
 
+## [0.29.2] - 2026-10-25
+
+### Fixed
+- In `bits 16` and `bits 32`, an `if` or `while` no longer leaves the other operand in `ebx`. The compare is still `cmp eax, ebx`, with `push ebx` before it and `pop ebx` after it. `pop` does not change the flags. A named `ebx` therefore survives `while (ebx != 0)`. That is the INT 15h continuation token: the old `mov ebx, eax` stored the zero of the comparison and the next `int 0x15` restarted the map. A `+`, `-`, `&`, `|`, `^`, `*`, `/`, `%`, or shift inside that condition push/pops `ebx` as well, and a shift push/pops `ecx` (`shl`/`sar` use `cl`). The same operator outside the condition still uses `ebx` as scratch. A comparison used as a value (`let x = a == b`) still writes `ebx` and does not restore it. `idiv` still overwrites `edx`. 64-bit conditions are unchanged.
+
+### Added
+- `tests/boot/ebx_keep.lap` is a 512-byte sector. `ebx` counts down through `while (ebx != 0)`, then `COPIHUE` is written from `ebx` after a false `if` and a false `while`, including `ebx & 1`. QEMU reads `COPIHUE` on COM1. `-O0` and `-O2` are the same image.
+- `tests/freestanding/ebx_cond.lap` is the instruction stream at `-O0` and `-O2` for the same `while` in `bits 16` and `bits 32`, plus `<<` restoring `ecx`. It is assembled, not booted.
+
+### Changed
+- Language version is 0.29.2, on top of 0.29.0.
+- Four boot hex dumps grew by `push ebx` / `pop ebx` (`66 53` / `66 5b` in real mode, the same opcodes without the operand-size prefix in `bits 32`) and the short jumps after them moved: `tests/expected/boot/rax_keep.hex`, `call32.hex`, `realmode_builtins.hex`, and `seg_local.hex`. Each image is still 512 bytes ending in `55 aa`, and QEMU still reads `COPIHUE`. `tests/expected/freestanding/bits32_regs.asm.txt` gained those pushes around the UART wait's `&` and its compare. Sectors and images with no `bits 16`/`bits 32` compare are the same bytes: `boot_sector`, `call16`, `jmp_sp`, `section`, `stc_carry`, the flat images, `tests/usermode`, and `tests/ctx`.
+
 ## [0.29.0] - 2026-10-25
 
 ### Added

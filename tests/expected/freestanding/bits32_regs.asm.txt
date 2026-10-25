@@ -102,6 +102,7 @@ protected:
     mov edx, eax
     xor eax, eax
     in al, dx
+    push ebx
     push eax
     push edx
     mov eax, 32
@@ -109,6 +110,8 @@ protected:
     pop edx
     pop eax
     and eax, ebx
+    pop ebx
+    push ebx
     push eax
     push edx
     mov eax, 0
@@ -116,6 +119,7 @@ protected:
     pop edx
     pop eax
     cmp eax, ebx
+    pop ebx
     jne .L6
     pause
 .L7:
