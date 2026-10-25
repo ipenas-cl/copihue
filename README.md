@@ -62,8 +62,8 @@ Old `.ch` files are still accepted, with a deprecation warning.
 The full language reference is in [docs/REFERENCE.md](docs/REFERENCE.md).
 
 - Functions, recursion, up to 16 parameters, structs passed by value (copied) or by pointer
-- `let` locals, globals, `let volatile` globals, integer types `i8 i16 i32 i64 u8 u16 u32 u64`, typed arrays, pointers, `&`, `*`, `->`
-- `struct`s, including nested structs, arrays of structs, and nested struct literals
+- `let` locals, globals, `let volatile` globals, `*volatile T` pointers, `volatile` struct fields, integer types `i8 i16 i32 i64 u8 u16 u32 u64`, typed arrays, pointers, `&`, `*`, `->`
+- `struct`s, including nested structs, arrays of structs, nested struct literals, and assignment `a = b` (exact size, packed records included)
 - `packed struct` for hardware records (an x86-64 IDT gate is 16 bytes, not eight slots of 8)
 - Function addresses (`&timer`) and indirect calls, so a table of handlers can be installed from the language
 - `interrupt fn` (full GPR save, optional CPU error code, `iretq`) and `syscall fn` (`syscall`/`sysret` entry, up to 7 arguments)
@@ -88,21 +88,21 @@ The full language reference is in [docs/REFERENCE.md](docs/REFERENCE.md).
 
 | Suite | What it checks |
 |---|---|
-| 135 test programs + 18 examples | compiled at `-O0` and `-O2`, run, and stdout + exit code compared to golden files in `tests/expected/` |
-| 15 error tests | the compiler rejects the program with the exact expected message |
-| 8 freestanding tests | `--freestanding` output has no `_start`/syscalls and assembles; the instruction stream is golden |
+| 138 test programs + 18 examples | compiled at `-O0` and `-O2`, run, and stdout + exit code compared to golden files in `tests/expected/` |
+| 17 error tests | the compiler rejects the program with the exact expected message |
+| 10 freestanding tests | `--freestanding` output has no `_start`/syscalls and assembles; the instruction stream is golden. Two of them also require the same stream at `-O2` |
 | 2 flat-binary tests | `--flat` puts `_start` at offset 0; the raw image matches a golden hexdump |
 | `make net-test` | starts `examples/simple_api_server.lap`, queries it with `curl` and with two Copihue HTTP clients, then stops it |
 
 ### Known limitations
 
-- Ordinary struct fields still occupy 8 bytes each. Only `packed struct` uses the real width of `u8`/`u16`/`u32`. There is no struct assignment `a = b`, and no padding or alignment attributes beyond packed-or-not.
+- Ordinary struct fields still occupy 8 bytes each. Only `packed struct` uses the real width of `u8`/`u16`/`u32`. There is no padding or alignment attribute beyond packed-or-not. `a = b` copies the whole struct; it does not check anything beyond the struct type name.
 - Call checking is the function name and the argument count. Argument types, assignment types, and `const` are not checked. Function pointers are integer addresses, not a typed `fn` type, and an indirect call is not arity-checked.
 - Integer arithmetic is always 64-bit and overflow wraps. Narrow types only change loads and stores. There are no bounds checks on pointer indexing.
 - A kernel is still one translation unit: there are no modules and no relocatable ELF objects. There is no 16-bit or 32-bit code generation, so a bootloader that leaves long mode stays assembly.
 - `syscall fn` switches stacks and returns with `sysret`, but it does not program `STAR`, `LSTAR`, or `EFER`. The kernel does that with `wrmsr` (or `asm`) and must call `set_syscall_stack` with a 16-byte-aligned top before any entry. There is no TSS or IST setup.
-- `volatile` is a global scalar that is reloaded and stored on every use, including inside a loop at `-O2`. It is not a memory model: the compiler has no other reordering pass, and `*volatile` does not change how a pointee load is emitted.
-- Indexing a local array emits a hosted bounds-check (`syscall` + `exit`). Freestanding code should index a global array or a pointer. `tests/flat/min_kernel.lap` does it that way.
+- `volatile` on a global scalar, a `*volatile T` pointee, or a struct field is reloaded and stored on every use, including inside a loop at `-O2`, at the access's real width. It is not a memory model: there are no atomics, and `let volatile` on a local scalar does not change codegen. `let volatile` on a struct or an array is a compile error.
+- Indexing a local array in hosted mode emits a bounds check (`syscall` + `exit`). `--freestanding` and `--flat` index the same local array without that trap. Pointer indexing is never checked.
 - The generated code is simple stack-machine style. `rbx` is scratch, so freestanding callers must not rely on it being preserved. `iretq`, `sysret`, and moves to or from CR0/CR2/CR3/CR4 are checked by assembling them, not by running them as a Linux process.
 - Linux x86-64 only. There is no way to place a page table at a chosen virtual address except by writing through a pointer.
 

@@ -1,0 +1,98 @@
+// Copy structs by value: ordinary, packed, nested fields, globals, array elements.
+struct Pair { x: i64, y: i64 }
+struct Box { p: Pair, n: i64 }
+
+packed struct Rec { a: u8, b: u8, c: u8 }
+
+let g: Pair;
+let h: Pair;
+let gt: [Rec; 2];
+
+fn main() -> i32 {
+    let a: Box;
+    a.p.x = 1;
+    a.p.y = 2;
+    a.n = 3;
+    let b: Box;
+    b = a;
+    a.n = 9;
+    a.p.x = 7;
+    print_int(b.p.x); println("");
+    print_int(b.p.y); println("");
+    print_int(b.n); println("");
+
+    let c: Pair;
+    c = a.p;
+    print_int(c.x); println("");
+    print_int(c.y); println("");
+
+    let d: Box;
+    d.p = c;
+    d.n = 5;
+    c.x = 0;
+    print_int(d.p.x); println("");
+    print_int(d.p.y); println("");
+    print_int(d.n); println("");
+
+    g.x = 10;
+    g.y = 20;
+    h = g;
+    g.x = 1;
+    print_int(h.x); println("");
+    print_int(h.y); println("");
+    let back: Pair;
+    back = h;
+    print_int(back.x); println("");
+
+    let t: [Rec; 2];
+    t[0].a = 1;
+    t[0].b = 2;
+    t[0].c = 3;
+    t[1].a = 4;
+    t[1].b = 5;
+    t[1].c = 6;
+    let s: Rec;
+    s.a = 7;
+    s.b = 8;
+    s.c = 9;
+    t[0] = s;
+    print_int(t[0].a); println("");
+    print_int(t[0].b); println("");
+    print_int(t[0].c); println("");
+    print_int(t[1].a); println("");
+    print_int(t[1].b); println("");
+    print_int(t[1].c); println("");
+
+    let ps: [Pair; 2];
+    ps[0].x = 1;
+    ps[0].y = 2;
+    ps[1].x = 3;
+    ps[1].y = 4;
+    ps[1] = ps[0];
+    print_int(ps[0].x); println("");
+    print_int(ps[0].y); println("");
+    print_int(ps[1].x); println("");
+    print_int(ps[1].y); println("");
+
+    gt[0].a = 1;
+    gt[0].b = 2;
+    gt[0].c = 3;
+    gt[1].a = 4;
+    gt[1].b = 5;
+    gt[1].c = 6;
+    gt[1] = gt[0];
+    print_int(gt[0].a); println("");
+    print_int(gt[0].c); println("");
+    print_int(gt[1].a); println("");
+    print_int(gt[1].b); println("");
+    print_int(gt[1].c); println("");
+
+    let boxes: [Box; 2];
+    boxes[0] = a;
+    boxes[1].p = c;
+    boxes[1].n = 4;
+    print_int(boxes[0].n); println("");
+    print_int(boxes[1].p.x); println("");
+    print_int(boxes[1].n); println("");
+    return 0;
+}

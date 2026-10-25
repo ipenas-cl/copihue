@@ -1,0 +1,31 @@
+// Local arrays: reads and writes of several widths. Freestanding uses the same
+// addressing and drops only the hosted bounds trap.
+fn main() -> i32 {
+    let a: [i64; 4];
+    a[0] = 1;
+    a[1] = 2;
+    a[2] = 3;
+    a[3] = 4;
+    print_int(a[0] + a[1] + a[2] + a[3]);
+    println("");
+
+    let b: [u8; 3];
+    b[0] = 9;
+    b[1] = 8;
+    b[2] = 7;
+    print_int(b[0]);
+    println("");
+    print_int(b[1]);
+    println("");
+    print_int(b[2]);
+    println("");
+
+    let w: [u32; 2];
+    w[1] = 22;
+    w[0] = 11;
+    print_int(w[0]);
+    println("");
+    print_int(w[1]);
+    println("");
+    return 0;
+}

@@ -1,0 +1,15 @@
+// also-o2
+// Local array reads and writes. The hosted bounds trap (syscall + exit) is absent.
+fn fill() -> i64 {
+    let a: [i64; 4];
+    a[0] = 1;
+    a[1] = 2;
+    a[2] = 3;
+    a[3] = 4;
+    let s = a[0] + a[1] + a[2] + a[3];
+    let b: [u8; 3];
+    b[0] = 9;
+    b[1] = 8;
+    b[2] = 7;
+    return s + b[0] + b[2];
+}
