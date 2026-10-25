@@ -14,6 +14,7 @@ Todos los cambios importantes del proyecto.
 
 ### Changed
 - Language version is 0.28.1, on top of 0.28.0.
+
 ## [0.28.0] - 2026-10-25
 
 ### Added
