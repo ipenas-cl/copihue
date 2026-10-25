@@ -1,0 +1,4 @@
+// flags: --freestanding
+bits 64 naked fn k() {
+    pop(1);
+}

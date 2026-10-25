@@ -1,0 +1,47 @@
+// also-o2
+// String and flag instructions, push/pop, a 64-bit syscall, and a load of
+// the compiler's __syscall_rsp. Assembled, not booted. `saved_ksp` is a
+// Copihue global, so its NASM label is that name.
+
+extern __syscall_rsp;
+
+let saved_ksp: i64 = 0;
+
+bits 16 naked fn strings() {
+    lodsb();
+    stosb();
+    stosd();
+    rep_stosb();
+    rep_stosw();
+    rep_stosd();
+    rep_movsb();
+    rep_movsw();
+    rep_movsd();
+    pushfd();
+    popfd();
+    push(ax);
+    push(ds);
+    push(eax);
+    push(24);
+    pop(es);
+    pop(eax);
+    stc();
+    clc();
+    ud2();
+}
+
+bits 64 naked fn ring3() {
+    rax = 1;
+    rdi = 65;
+    rsi = 1;
+    rdx = 1;
+    syscall();
+    push(rax);
+    push(0x33);
+    pop(rbx);
+    pushfd();
+    popfd();
+    rep_stosq();
+    rep_movsq();
+    rax = __syscall_rsp;
+}

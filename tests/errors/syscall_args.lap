@@ -1,0 +1,5 @@
+// flags: --freestanding
+fn k() -> i64 {
+    syscall(1);
+    return 0;
+}

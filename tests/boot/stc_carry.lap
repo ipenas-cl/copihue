@@ -1,0 +1,16 @@
+// stc sets CF. The serial write is the carry arm, so a missing stc prints
+// nothing. QEMU checks COPIHUE. -O0 and -O2 are the same image.
+
+bits 16 naked fn _start() {
+    stc();
+    if carry {
+        outb(0x3F8, 67);
+        outb(0x3F8, 79);
+        outb(0x3F8, 80);
+        outb(0x3F8, 73);
+        outb(0x3F8, 72);
+        outb(0x3F8, 85);
+        outb(0x3F8, 69);
+    }
+    while (1) { hlt(); }
+}

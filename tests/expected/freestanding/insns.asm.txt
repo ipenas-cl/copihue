@@ -1,0 +1,45 @@
+section .data
+__syscall_rsp: dq 0
+__syscall_user_rsp: dq 0
+saved_ksp: dq 0
+section .text
+bits 16
+strings:
+    lodsb
+    stosb
+    stosd
+    rep stosb
+    rep stosw
+    rep stosd
+    rep movsb
+    rep movsw
+    rep movsd
+    pushfd
+    popfd
+    push ax
+    push ds
+    push eax
+    push 24
+    pop es
+    pop eax
+    stc
+    clc
+    ud2
+    ret
+bits 64
+bits 64
+ring3:
+    mov rax, 1
+    mov rdi, 65
+    mov rsi, 1
+    mov rdx, 1
+    syscall
+    push rax
+    push 51
+    pop rbx
+    pushfq
+    popfq
+    rep stosq
+    rep movsq
+    mov rax, [__syscall_rsp]
+    ret
