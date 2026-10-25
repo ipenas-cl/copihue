@@ -16,7 +16,7 @@
 
 // ==== NAMING (single place to change when the language is renamed) ====
 #define LANG_NAME     "Copihue"
-#define LANG_VERSION  "0.27.5"
+#define LANG_VERSION  "0.28.1"
 #define COMPILER_BIN  "copihue"
 #define SRC_EXT       ".lap"   /* Lapageria rosea, the copihue */
 #define OLD_SRC_EXT   ".cph"   /* v0.18.x extension, still accepted with a warning */
@@ -85,7 +85,7 @@ typedef enum {
     T_EOF, T_IDENT, T_NUM, T_STR,
     T_FN, T_LET, T_IF, T_ELSE, T_WHILE, T_FOR, T_RET, T_STRUCT, T_MUT,
     T_LPAREN, T_RPAREN, T_LBRACE, T_RBRACE, T_LBRACKET, T_RBRACKET,
-    T_SEMI, T_COLON, T_COMMA, T_DOT, T_AMP,
+    T_SEMI, T_COLON, T_COMMA, T_DOT, T_AT, T_AMP,
     T_PLUS, T_MINUS, T_STAR, T_SLASH, T_MOD,
     T_EQ, T_EQEQ, T_NEQ, T_LT, T_GT, T_LTE, T_GTE, T_ARROW,
     T_AND_AND, T_OR_OR, T_BANG,
@@ -176,6 +176,7 @@ typedef struct AstNode {
     int bits;             // 0 = default 64 (no directive); else 16, 32, or 64
     int line, col;        // Source position (for diagnostics)
     const char* file;     // Source file (several files share one program)
+    char* section;        // Named section this item is placed in. NULL is the default
 } AstNode;
 
 #define AF_PACKED     1
@@ -237,6 +238,7 @@ typedef struct {
     int is_extern;      // Declared with extern. No dq/resq is emitted for it
     int volatile_pointee; // *volatile T: the pointee access is volatile, not the pointer slot
     char* pointee_type; // Type being pointed to
+    char* section;      // Placed in this section, not the default .data or .bss
 } GlobalVar;
 
 typedef struct {
@@ -888,6 +890,7 @@ void global_symtab_add_full(GlobalSymbolTable* gst, char* name, char* type_name,
     gv->is_volatile = 0;
     gv->is_extern = 0;
     gv->volatile_pointee = 0;
+    gv->section = NULL;
     gv->pointee_type = is_pointer ? strdup(type_name) : NULL;
 
     // Calculate size
@@ -1008,6 +1011,7 @@ Tok lex_tok(Lex* l) {
     if (c == ':') return (Tok){T_COLON, st, 1, tok_line, tok_col};
     if (c == ',') return (Tok){T_COMMA, st, 1, tok_line, tok_col};
     if (c == '.') return (Tok){T_DOT, st, 1, tok_line, tok_col};
+    if (c == '@') return (Tok){T_AT, st, 1, tok_line, tok_col};
     if (c == '&' && peek(l) == '&') { adv(l); return (Tok){T_AND_AND, st, 2, tok_line, tok_col}; }
     if (c == '&') return (Tok){T_AMP, st, 1, tok_line, tok_col};
     if (c == '|' && peek(l) == '|') { adv(l); return (Tok){T_OR_OR, st, 2, tok_line, tok_col}; }
@@ -1108,6 +1112,7 @@ const char* tok_name(TokType t) {
         case T_SEMI: return "';'";
         case T_COLON: return "':'";
         case T_COMMA: return "','";
+        case T_AT: return "'@'";
         case T_ARROW: return "'->'";
         default: return "token";
     }
@@ -2389,6 +2394,126 @@ static void note_top(AstNode* n) {
 
 // A qword whose storage Copihue does not allocate. `data name` in this file,
 // or a symbol the compiler emits (`__syscall_rsp`), is the definition.
+static char* g_cur_section;
+static int g_in_section;
+
+#define MAX_NAMED_SECTIONS 32
+typedef struct {
+    char* name;
+    int has_addr;
+    unsigned long long addr;
+    int explicit_sec;   // The source wrote `section "name"`
+    int need_start;
+    int need_end;
+    int started;
+    int ended;
+    char sym[80];
+} NamedSection;
+static NamedSection g_named_secs[MAX_NAMED_SECTIONS];
+static int g_nnamed;
+static const char* g_emit_section;
+static int g_bss_tail; // Code emitted into .bss after the file's .bss block
+
+static void sections_reset(void) {
+    g_nnamed = 0;
+    g_cur_section = NULL;
+    g_in_section = 0;
+    g_emit_section = NULL;
+    g_bss_tail = 0;
+}
+
+static int section_name_ok(const char* s) {
+    if (!s || !s[0]) return 0;
+    if (!(isalpha((unsigned char)s[0]) || s[0] == '_' || s[0] == '.')) return 0;
+    for (const char* p = s + 1; *p; p++)
+        if (!(isalnum((unsigned char)*p) || *p == '_' || *p == '.')) return 0;
+    return 1;
+}
+
+static void section_sym_base(const char* name, char* out, int n) {
+    if (!strcmp(name, ".bss")) { snprintf(out, n, "__bss"); return; }
+    if (!strcmp(name, ".text")) { snprintf(out, n, "__text"); return; }
+    if (!strcmp(name, ".data")) { snprintf(out, n, "__data"); return; }
+    char buf[64];
+    int k = 0;
+    for (const char* p = name; *p && k < 60; p++) buf[k++] = (*p == '.') ? '_' : *p;
+    buf[k] = 0;
+    snprintf(out, n, "__sec_%s", buf);
+}
+
+static NamedSection* section_find(const char* name) {
+    if (!name) return NULL;
+    for (int i = 0; i < g_nnamed; i++)
+        if (!strcmp(g_named_secs[i].name, name)) return &g_named_secs[i];
+    return NULL;
+}
+
+// The first `@` fixes the load address. Reopening the name appends to it.
+static NamedSection* section_note(const char* name, int has_addr, unsigned long long addr, int line, int col) {
+    NamedSection* s = section_find(name);
+    if (s) {
+        if (has_addr && s->has_addr && s->addr != addr)
+            diag_error(line, col, "section '%s' already has load address 0x%llx", name, s->addr);
+        else if (has_addr && !s->has_addr) { s->has_addr = 1; s->addr = addr; }
+        s->explicit_sec = 1;
+        s->need_start = 1;
+        s->need_end = 1;
+        return s;
+    }
+    if (g_nnamed >= MAX_NAMED_SECTIONS) {
+        diag_error(line, col, "too many sections");
+        return NULL;
+    }
+    s = &g_named_secs[g_nnamed++];
+    memset(s, 0, sizeof *s);
+    s->name = strdup(name);
+    s->has_addr = has_addr;
+    s->addr = addr;
+    s->explicit_sec = 1;
+    s->need_start = 1;
+    s->need_end = 1;
+    section_sym_base(name, s->sym, sizeof s->sym);
+    for (int i = 0; i < g_nnamed - 1; i++) {
+        if (!strcmp(g_named_secs[i].sym, s->sym))
+            diag_error(line, col, "section '%s' uses the same bounds symbol as '%s'", name, g_named_secs[i].name);
+    }
+    return s;
+}
+
+static NamedSection* section_ensure(const char* name) {
+    NamedSection* s = section_find(name);
+    if (s) return s;
+    if (g_nnamed >= MAX_NAMED_SECTIONS) return NULL;
+    s = &g_named_secs[g_nnamed++];
+    memset(s, 0, sizeof *s);
+    s->name = strdup(name);
+    section_sym_base(name, s->sym, sizeof s->sym);
+    return s;
+}
+
+static int tok_u64(Tok t, unsigned long long* out) {
+    if (t.t != T_NUM || t.s[0] == '\'' || t.len <= 0) return 0;
+    char digits[80];
+    int k = 0;
+    for (int i = 0; i < t.len && k < 79; i++) if (t.s[i] != '_') digits[k++] = t.s[i];
+    digits[k] = 0;
+    if (!k) return 0;
+    errno = 0;
+    char* end = NULL;
+    unsigned long long v = (k > 2 && digits[0] == '0' && (digits[1] == 'b' || digits[1] == 'B'))
+        ? strtoull(digits + 2, &end, 2) : strtoull(digits, &end, 0);
+    if (errno || !end || *end) return 0;
+    *out = v;
+    return 1;
+}
+
+static void add_top(AstNode* prog, AstNode* n) {
+    if (!n) return;
+    if (g_cur_section) n->section = g_cur_section;
+    note_top(n);
+    ast_add(prog, n);
+}
+
 static void parse_extern(Parser* p, AstNode* prog) {
     advance_tok(p);
     Tok name = advance_tok(p);
@@ -2401,8 +2526,7 @@ static void parse_extern(Parser* p, AstNode* prog) {
     g->value = strdup("i64");
     g->flags |= AF_EXTERN;
     expect(p, T_SEMI);
-    note_top(g);
-    ast_add(prog, g);
+    add_top(prog, g);
 }
 
 static void parse_into(Parser* p, AstNode* prog);
@@ -2500,53 +2624,101 @@ static void parse_import(Parser* p, AstNode* prog) {
     free(full);
 }
 
-static void parse_into(Parser* p, AstNode* prog) {
-    while (!check_tok(p, T_EOF)) {
-        // Contextual words, so `syscall(...)` and a variable named `packed` still parse.
-        if (peek_word(p, "import") && peek_tok_at(p, 1, T_STR)) {
-            parse_import(p, prog);
-        } else if (peek_word(p, "packed") && peek_tok_at(p, 1, T_STRUCT)) {
-            advance_tok(p);
-            AstNode* sd = parse_struct_def(p);
-            sd->flags |= AF_PACKED;
-            note_top(sd);
-            ast_add(prog, sd);
-        } else if (peek_word(p, "interrupt") && peek_tok_at(p, 1, T_FN)) {
-            advance_tok(p);
-            AstNode* fn = parse_func(p);
-            fn->flags |= AF_INTERRUPT;
-            note_top(fn);
-            ast_add(prog, fn);
-        } else if (peek_word(p, "syscall") && peek_tok_at(p, 1, T_FN)) {
-            advance_tok(p);
-            AstNode* fn = parse_func(p);
-            fn->flags |= AF_SYSCALL;
-            note_top(fn);
-            ast_add(prog, fn);
-        } else         if (peek_word(p, "data") && peek_tok_at(p, 1, T_IDENT)) {
-            AstNode* d = parse_data(p);
-            note_top(d);
-            ast_add(prog, d);
-        } else if (peek_word(p, "extern") && peek_tok_at(p, 1, T_IDENT)) {
-            parse_extern(p, prog);
-        } else if (peek_word(p, "bits") || peek_word(p, "naked")) {
-            AstNode* fn = parse_bits_naked_fn(p);
-            note_top(fn);
-            ast_add(prog, fn);
-        } else if (check_tok(p, T_STRUCT)) {
-            AstNode* sd = parse_struct_def(p);
-            note_top(sd);
-            ast_add(prog, sd);
-        } else if (check_tok(p, T_LET)) {
-            AstNode* g = parse_global_var(p);
-            note_top(g);
-            ast_add(prog, g);
-        } else {
-            AstNode* fn = parse_func(p);
-            note_top(fn);
-            ast_add(prog, fn);
-        }
+static void parse_top_item(Parser* p, AstNode* prog);
+
+// `section "name" { ... }` and `section "name" @ addr { ... }`.
+// `@` is NASM `vstart`: labels in the section resolve to that load address.
+// The bytes stay packed in the image. A hole (`start=`) is not emitted,
+// because an address like 0x100000 would otherwise write a megabyte of zeros.
+static void parse_section(Parser* p, AstNode* prog) {
+    Tok kw = advance_tok(p);
+    if (!g_freestanding)
+        diag_error(kw.line, kw.col, "section is only available with --freestanding, --flat, or --boot");
+    if (g_in_section)
+        diag_error(kw.line, kw.col, "a section cannot contain another section");
+    if (!check_tok(p, T_STR)) {
+        diag_error(kw.line, kw.col, "section takes a string name");
+        return;
     }
+    Tok str = advance_tok(p);
+    char* name = decode_string_literal(str.s + 1, str.len - 2);
+    if (!section_name_ok(name))
+        diag_error(str.line, str.col, "section name '%s' is not a NASM section name", name ? name : "");
+    int has_addr = 0;
+    unsigned long long addr = 0;
+    if (match_tok(p, T_AT)) {
+        Tok num = peek_tok(p);
+        if (!tok_u64(num, &addr))
+            diag_error(num.line, num.col, "section load address must be a non-negative integer");
+        else
+            advance_tok(p);
+        has_addr = 1;
+    }
+    NamedSection* sec = name && section_name_ok(name) ? section_note(name, has_addr, addr, kw.line, kw.col) : NULL;
+    if (!check_tok(p, T_LBRACE)) {
+        diag_error(peek_tok(p).line, peek_tok(p).col, "section body must be a block");
+        free(name);
+        return;
+    }
+    expect(p, T_LBRACE);
+    char* saved = g_cur_section;
+    int saved_in = g_in_section;
+    g_cur_section = sec ? sec->name : saved;
+    g_in_section = 1;
+    while (!check_tok(p, T_RBRACE) && !check_tok(p, T_EOF)) {
+        if (peek_word(p, "import") && peek_tok_at(p, 1, T_STR)) {
+            diag_error(peek_tok(p).line, peek_tok(p).col, "import is not allowed inside a section");
+            advance_tok(p);
+            advance_tok(p);
+            if (check_tok(p, T_SEMI)) advance_tok(p);
+            continue;
+        }
+        parse_top_item(p, prog);
+    }
+    expect(p, T_RBRACE);
+    g_cur_section = saved;
+    g_in_section = saved_in;
+    free(name);
+}
+
+static void parse_top_item(Parser* p, AstNode* prog) {
+    // Contextual words, so `syscall(...)` and a variable named `packed` still parse.
+    if (peek_word(p, "section") && peek_tok_at(p, 1, T_STR)) {
+        parse_section(p, prog);
+    } else if (peek_word(p, "import") && peek_tok_at(p, 1, T_STR)) {
+        parse_import(p, prog);
+    } else if (peek_word(p, "packed") && peek_tok_at(p, 1, T_STRUCT)) {
+        advance_tok(p);
+        AstNode* sd = parse_struct_def(p);
+        sd->flags |= AF_PACKED;
+        add_top(prog, sd);
+    } else if (peek_word(p, "interrupt") && peek_tok_at(p, 1, T_FN)) {
+        advance_tok(p);
+        AstNode* fn = parse_func(p);
+        fn->flags |= AF_INTERRUPT;
+        add_top(prog, fn);
+    } else if (peek_word(p, "syscall") && peek_tok_at(p, 1, T_FN)) {
+        advance_tok(p);
+        AstNode* fn = parse_func(p);
+        fn->flags |= AF_SYSCALL;
+        add_top(prog, fn);
+    } else if (peek_word(p, "data") && peek_tok_at(p, 1, T_IDENT)) {
+        add_top(prog, parse_data(p));
+    } else if (peek_word(p, "extern") && peek_tok_at(p, 1, T_IDENT)) {
+        parse_extern(p, prog);
+    } else if (peek_word(p, "bits") || peek_word(p, "naked")) {
+        add_top(prog, parse_bits_naked_fn(p));
+    } else if (check_tok(p, T_STRUCT)) {
+        add_top(prog, parse_struct_def(p));
+    } else if (check_tok(p, T_LET)) {
+        add_top(prog, parse_global_var(p));
+    } else {
+        add_top(prog, parse_func(p));
+    }
+}
+
+static void parse_into(Parser* p, AstNode* prog) {
+    while (!check_tok(p, T_EOF)) parse_top_item(p, prog);
 }
 
 // ==== CODEGEN ====
@@ -2978,7 +3150,8 @@ static int builtin_ret_ty(const char* f, VTy* out) {
         !strcmp(f, "sizeof") || !strcmp(f, "offsetof") ||
         !strcmp(f, "rep_stosb") || !strcmp(f, "rep_stosw") || !strcmp(f, "rep_stosd") || !strcmp(f, "rep_stosq") ||
         !strcmp(f, "rep_movsb") || !strcmp(f, "rep_movsw") || !strcmp(f, "rep_movsd") || !strcmp(f, "rep_movsq") ||
-        !strcmp(f, "save_context") || !strcmp(f, "restore_context") || !strcmp(f, "label_addr")) {
+        !strcmp(f, "save_context") || !strcmp(f, "restore_context") || !strcmp(f, "label_addr") ||
+        !strcmp(f, "section_start") || !strcmp(f, "section_end")) {
         *out = ty_i64();
         return 1;
     }
@@ -3903,6 +4076,40 @@ static int gen_core_builtin(Codegen* cg, AstNode* n) {
         if (!g_flat_org) { diag_error(n->line, n->col, "%s() is only available with --flat", f); return 1; }
         if (n->child_count != 0) { diag_error(n->line, n->col, "%s() takes no arguments", f); return 1; }
         emit(cg, "    mov rax, __%s\n", f);
+        return 1;
+    }
+    if (!strcmp(f, "section_start") || !strcmp(f, "section_end")) {
+        int is_end = !strcmp(f, "section_end");
+        if (!g_freestanding) {
+            diag_error(n->line, n->col, "%s() is only available with --freestanding, --flat, or --boot", f);
+            return 1;
+        }
+        if (n->child_count != 1 || !n->children[0] || n->children[0]->type != AST_STRING) {
+            diag_error(n->line, n->col, "%s() takes a section name", f);
+            return 1;
+        }
+        const char* sn = n->children[0]->value;
+        int standard = sn && (!strcmp(sn, ".text") || !strcmp(sn, ".data") || !strcmp(sn, ".bss"));
+        NamedSection* sec = sn ? section_find(sn) : NULL;
+        if (!sn || (!sec && !standard)) {
+            diag_error(n->line, n->col, "unknown section '%s'", sn ? sn : "");
+            return 1;
+        }
+        if (!sec) sec = section_ensure(sn);
+        if (sec) {
+            sec->need_start = 1;
+            sec->need_end = 1;
+        }
+        if (g_fn_bits == 16 && sec && sec->has_addr && sec->addr > 0xFFFFULL) {
+            diag_error(n->line, n->col, "section '%s' does not fit in bits 16", sn);
+            return 1;
+        }
+        if (sec) {
+            const char* which = is_end ? "end" : "start";
+            if (g_fn_bits == 16) emit(cg, "    mov ax, %s_%s\n", sec->sym, which);
+            else if (g_fn_bits == 32) emit(cg, "    mov eax, %s_%s\n", sec->sym, which);
+            else emit(cg, "    mov rax, %s_%s\n", sec->sym, which);
+        }
         return 1;
     }
     if (!strcmp(f, "ljmp")) {
@@ -9524,6 +9731,133 @@ void build_type_table(TypeTable* tt, AstNode* ast) {
     }
 }
 
+// A call to section_start/section_end is compiled inside gen_func, which is
+// too late to put __text_start before the first byte. Mark the bounds now.
+static void note_section_calls(AstNode* n) {
+    if (!n) return;
+    if (n->type == AST_CALL && n->name &&
+        (!strcmp(n->name, "section_start") || !strcmp(n->name, "section_end")) &&
+        n->child_count == 1 && n->children[0] && n->children[0]->type == AST_STRING) {
+        const char* sn = n->children[0]->value;
+        int standard = sn && (!strcmp(sn, ".text") || !strcmp(sn, ".data") || !strcmp(sn, ".bss"));
+        if (sn && (section_find(sn) || standard)) {
+            NamedSection* sec = section_ensure(sn);
+            if (sec) { sec->need_start = 1; sec->need_end = 1; }
+        }
+    }
+    for (int i = 0; i < n->child_count; i++) note_section_calls(n->children[i]);
+}
+
+static void put_out(Codegen* cg, FILE* out, const char* s) {
+    if (out) fputs(s, out);
+    else emit(cg, "%s", s);
+}
+
+static void put_outf(Codegen* cg, FILE* out, const char* fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    va_list copy;
+    va_copy(copy, ap);
+    int n = vsnprintf(NULL, 0, fmt, copy);
+    va_end(copy);
+    if (n < 0) { va_end(ap); return; }
+    char small[512];
+    char* buf = small;
+    if (n >= (int)sizeof small) buf = malloc((size_t)n + 1);
+    vsnprintf(buf, (size_t)n + 1, fmt, ap);
+    va_end(ap);
+    put_out(cg, out, buf);
+    if (buf != small) free(buf);
+}
+
+// Same bytes the .data/.bss file pass has always written. `out` NULL appends
+// to the code buffer, which is where a named section other than .data/.bss
+// (and every section of a boot image) has to live.
+static void write_global_def(Codegen* cg, FILE* out, GlobalVar* gv) {
+    if (!gv || gv->is_extern) return;
+    if (gv->is_initialized) {
+        if (gv->is_array && gv->array_init_values && gv->array_init_count > 0) {
+            const char* directive = type_asm_directive(gv->elem_type);
+            put_outf(cg, out, "%s: %s ", gv->name, directive);
+            int total = (gv->array_count > gv->array_init_count) ? gv->array_count : gv->array_init_count;
+            for (int j = 0; j < total; j++) {
+                if (j < gv->array_init_count) put_out(cg, out, gv->array_init_values[j]);
+                else put_out(cg, out, "0");
+                if (j < total - 1) put_out(cg, out, ", ");
+            }
+            put_out(cg, out, "\n");
+        } else if (gv->init_value) {
+            put_outf(cg, out, "%s: dq %s\n", gv->name, gv->init_value);
+        }
+        return;
+    }
+    if (gv->is_array) {
+        int elem_size = type_size(gv->elem_type);
+        StructType* gst = gv->elem_type ? typetab_lookup(cg->types, gv->elem_type) : NULL;
+        if (gst && gst->size > 0) {
+            put_outf(cg, out, "%s: resb %d\n", gv->name, gv->array_count * gst->size);
+            return;
+        }
+        const char* directive = "resq";
+        if (elem_size == 1) directive = "resb";
+        else if (elem_size == 2) directive = "resw";
+        else if (elem_size == 4) directive = "resd";
+        put_outf(cg, out, "%s: %s %d\n", gv->name, directive, gv->array_count);
+        return;
+    }
+    StructType* gst = (gv->type_name && !gv->is_pointer)
+        ? typetab_lookup(cg->types, gv->type_name) : NULL;
+    if (gst && gst->size > 0) {
+        put_outf(cg, out, "%s: resb %d\n", gv->name, gst->size);
+        return;
+    }
+    put_outf(cg, out, "%s: resq 1\n", gv->name);
+}
+
+// .data and .bss of a non-boot image are written in the file trailer, so their
+// start labels belong there (before the bytes). Everything else gets its
+// start label at the first switch. align=1 keeps a named section packed;
+// the default .text/.data/.bss lines stay exactly as they were.
+static void emit_section_switch(Codegen* cg, const char* name) {
+    const char* want = (name && name[0]) ? name : ".text";
+    if (g_emit_section && !strcmp(g_emit_section, want)) return;
+    NamedSection* sec = section_find(want);
+    if (!strcmp(want, ".bss")) g_bss_tail = 1;
+    int standard = !strcmp(want, ".text") || !strcmp(want, ".data") || !strcmp(want, ".bss");
+    if (sec && sec->has_addr)
+        emit(cg, "\nsection %s vstart=0x%llx align=1\n", want, sec->addr);
+    else if (!standard)
+        emit(cg, "\nsection %s align=1\n", want);
+    else
+        emit(cg, "\nsection %s\n", want);
+    g_emit_section = (sec && sec->name) ? sec->name : want;
+    if (sec && sec->need_start && !sec->started && (!standard || g_boot)) {
+        emit(cg, "%s_start:\n", sec->sym);
+        sec->started = 1;
+    }
+}
+
+static int global_in_code(GlobalVar* gv) {
+    if (!gv->section || gv->is_extern) return 0;
+    if (g_boot) return 1;
+    if (!strcmp(gv->section, ".data") && gv->is_initialized) return 0;
+    if (!strcmp(gv->section, ".bss") && !gv->is_initialized) return 0;
+    return 1;
+}
+
+static void emit_bound_ends(Codegen* cg) {
+    for (int i = 0; i < g_nnamed; i++) {
+        NamedSection* s = &g_named_secs[i];
+        if (!s->need_end || s->ended) continue;
+        // The file trailer owns .bss when no later code appends to it.
+        // Boot has no trailer: the whole image is the code buffer.
+        if (!g_boot && !strcmp(s->name, ".bss") && !g_bss_tail) continue;
+        emit_section_switch(cg, s->name);
+        emit(cg, "%s_end:\n", s->sym);
+        s->ended = 1;
+    }
+}
+
 void codegen(AstNode* ast, const char* file, StringTable* strtab, TypeTable* types) {
     Codegen cg;
     cg.out = NULL;
@@ -9591,6 +9925,7 @@ void codegen(AstNode* ast, const char* file, StringTable* strtab, TypeTable* typ
                 }
                 if (added && (gvar->is_pointer & 4))
                     added->volatile_pointee = 1;
+                if (added) added->section = gvar->section;
             }
 
             // If array initialization, extract values
@@ -9630,18 +9965,34 @@ void codegen(AstNode* ast, const char* file, StringTable* strtab, TypeTable* typ
         }
     }
 
+    if (g_freestanding) note_section_calls(ast);
+    NamedSection* text_sec = section_find(".text");
     if (g_freestanding) {
         // No entry point and no runtime: the embedding code (e.g. a kernel's
         // asm entry) calls our functions with the System V calling convention.
-        emit(&cg, "\nsection .text\n\n");
+        // `@` on ".text" is NASM vstart (the labels' load address). It is not
+        // `start=`: that would insert a hole and, at 0x100000, a megabyte of zeros.
+        if (text_sec && text_sec->has_addr)
+            emit(&cg, "\nsection .text vstart=0x%llx align=1\n", text_sec->addr);
+        else
+            emit(&cg, "\nsection .text\n");
+        if (text_sec && text_sec->need_start && !text_sec->started) {
+            emit(&cg, "%s_start:\n", text_sec->sym);
+            text_sec->started = 1;
+        }
+        emit(&cg, "\n");
     } else {
         emit(&cg, "\nsection .text\n    global _start\n\n");
         emit(&cg, "_start:\n    call main\n    mov rdi, rax\n");
         emit(&cg, "    mov rax, 60\n    syscall\n");
         gen_helpers(&cg);
     }
+    g_emit_section = ".text";
 
     // --flat: the image starts executing at its first byte, so _start goes first.
+    // A named section around _start is opened before it, so the entry is still
+    // byte 0 of that section. A let or data block written before _start is
+    // still emitted after it.
     AstNode* flat_entry = NULL;
     if (g_flat_org) {
         for (int i = 0; i < ast->child_count; i++)
@@ -9653,16 +10004,22 @@ void codegen(AstNode* ast, const char* file, StringTable* strtab, TypeTable* typ
         else if (g_boot && (flat_entry->bits != 16 || !(flat_entry->flags & AF_NAKED)))
             diag_error(flat_entry->line, flat_entry->col,
                        "--boot _start must be 'bits 16 naked fn' (real mode, no 64-bit frame)");
-        else gen_func(&cg, flat_entry);
+        else {
+            if (flat_entry->section) emit_section_switch(&cg, flat_entry->section);
+            gen_func(&cg, flat_entry);
+        }
     }
     for (int i = 0; i < ast->child_count; i++) {
-        if (ast->children[i]->type == AST_FUNCTION) {
+        AstNode* item = ast->children[i];
+        if (item->type == AST_FUNCTION) {
             // Skip forward declarations, only generate code for full definitions
-            if (!ast->children[i]->is_forward_decl && ast->children[i] != flat_entry) {
-                gen_func(&cg, ast->children[i]);
+            if (!item->is_forward_decl && item != flat_entry) {
+                emit_section_switch(&cg, item->section);
+                gen_func(&cg, item);
             }
-        } else if (ast->children[i]->type == AST_DATA) {
-            AstNode* d = ast->children[i];
+        } else if (item->type == AST_DATA) {
+            AstNode* d = item;
+            emit_section_switch(&cg, d->section);
             emit(&cg, "\n%s:\n", d->name);
             for (int j = 0; j < d->child_count; j++) {
                 AstNode* it = d->children[j];
@@ -9672,9 +10029,26 @@ void codegen(AstNode* ast, const char* file, StringTable* strtab, TypeTable* typ
                 else if (!strcmp(it->name, "times")) emit(&cg, "times %s\n", it->value);
                 else emit(&cg, "    %s %s\n", it->name, it->value ? it->value : "0");
             }
+        } else if (item->type == AST_GLOBAL_VAR && item->section) {
+            GlobalVar* gv = global_symtab_lookup(&global_symtab, item->name);
+            if (gv && global_in_code(gv)) {
+                emit_section_switch(&cg, gv->section);
+                write_global_def(&cg, NULL, gv);
+            }
         }
     }
-    if (g_boot) emit(&cg, "\ntimes 510-($-$$) db 0\ndw 0xAA55\n");
+    emit_bound_ends(&cg);
+    // The pad is in the section that holds _start, after that section's end
+    // label, so the measured span excludes the signature. A boot image that
+    // switches sections after _start pads whichever section is current at
+    // the end only if _start itself has no section; with a section, the pad
+    // returns to _start's section. Bytes in any other section still count
+    // toward the file, so a multi-section sector can grow past 512.
+    if (g_boot) {
+        if (flat_entry && flat_entry->section)
+            emit_section_switch(&cg, flat_entry->section);
+        emit(&cg, "\ntimes 510-($-$$) db 0\ndw 0xAA55\n");
+    }
 
     cg.out = fopen(file, "w");
     fprintf(cg.out, "; Generated by " LANG_NAME " " LANG_VERSION "%s\n\n",
@@ -9690,7 +10064,15 @@ void codegen(AstNode* ast, const char* file, StringTable* strtab, TypeTable* typ
         return;
     }
     if (g_flat_org) fprintf(cg.out, "bits 64\norg %s\n\n", g_flat_org);
-    fprintf(cg.out, "section .data\n");
+    NamedSection* data_sec = section_find(".data");
+    if (data_sec && data_sec->has_addr)
+        fprintf(cg.out, "section .data vstart=0x%llx align=1\n", data_sec->addr);
+    else
+        fprintf(cg.out, "section .data\n");
+    if (data_sec && data_sec->need_start && !data_sec->started) {
+        fprintf(cg.out, "%s_start:\n", data_sec->sym);
+        data_sec->started = 1;
+    }
     if (cg.need_syscall_data) {
         fprintf(cg.out, "__syscall_rsp: dq 0\n__syscall_user_rsp: dq 0\n");
     }
@@ -9705,84 +10087,66 @@ void codegen(AstNode* ast, const char* file, StringTable* strtab, TypeTable* typ
         fprintf(cg.out, "0\n");  // Null terminator
     }
 
-    // Emit initialized global variables
+    // Emit initialized global variables. A let placed in another section is
+    // in the code buffer; only the default .data (and an explicit ".data")
+    // stays in this block, in front of __data_end.
     for (int i = 0; i < global_symtab.count; i++) {
         GlobalVar* gv = &global_symtab.vars[i];
-        if (gv->is_extern) continue;
-        if (gv->is_initialized) {
-            // Array with initialization values
-            if (gv->is_array && gv->array_init_values && gv->array_init_count > 0) {
-                const char* directive = type_asm_directive(gv->elem_type);
-                fprintf(cg.out, "%s: %s ", gv->name, directive);
-
-                // FIX Bug #11: Use declared array_count, not just array_init_count
-                // This allows: let buf: [i8; 1000] = "hello"; to allocate full 1000 bytes
-                int total_count = (gv->array_count > gv->array_init_count) ? gv->array_count : gv->array_init_count;
-
-                for (int j = 0; j < total_count; j++) {
-                    if (j < gv->array_init_count) {
-                        // Emit initialized value
-                        fprintf(cg.out, "%s", gv->array_init_values[j]);
-                    } else {
-                        // Pad remaining elements with zeros
-                        fprintf(cg.out, "0");
-                    }
-                    if (j < total_count - 1) {
-                        fprintf(cg.out, ", ");
-                    }
-                }
-                fprintf(cg.out, "\n");
-            }
-            // Scalar or single value
-            else if (gv->init_value) {
-                fprintf(cg.out, "%s: dq %s\n", gv->name, gv->init_value);
-            }
-        }
+        if (gv->is_extern || !gv->is_initialized) continue;
+        if (gv->section && strcmp(gv->section, ".data")) continue;
+        write_global_def(&cg, cg.out, gv);
     }
 
-    // Emit uninitialized global variables (.bss section)
+    // Emit uninitialized global variables (.bss section). Flat mode always
+    // publishes __bss_start/__bss_end, which bss_start()/bss_end() load.
+    // section_start(".bss") reuses those names. Only the section named .bss
+    // is nobits: nasm omits it from a flat binary. resq in any other section
+    // is progbits and occupies zeros.
     int has_bss = 0;
-    if (g_flat_org) { fprintf(cg.out, "\nsection .bss\n__bss_start:\n"); has_bss = 1; }
+    NamedSection* bss_sec = section_find(".bss");
+    if (g_flat_org) {
+        if (bss_sec && bss_sec->has_addr)
+            fprintf(cg.out, "\nsection .bss vstart=0x%llx align=1\n__bss_start:\n", bss_sec->addr);
+        else
+            fprintf(cg.out, "\nsection .bss\n__bss_start:\n");
+        has_bss = 1;
+        if (bss_sec) bss_sec->started = 1;
+    } else if (bss_sec && bss_sec->need_start && !bss_sec->started) {
+        if (bss_sec->has_addr)
+            fprintf(cg.out, "\nsection .bss vstart=0x%llx align=1\n", bss_sec->addr);
+        else
+            fprintf(cg.out, "\nsection .bss\n");
+        fprintf(cg.out, "%s_start:\n", bss_sec->sym);
+        bss_sec->started = 1;
+        has_bss = 1;
+    }
     for (int i = 0; i < global_symtab.count; i++) {
         GlobalVar* gv = &global_symtab.vars[i];
-        if (gv->is_extern) continue;
-        if (!gv->is_initialized) {
-            if (!has_bss) {
-                fprintf(cg.out, "\nsection .bss\n");
-                has_bss = 1;
-            }
-
-            // Calculate appropriate directive
-            const char* directive;
-            int count;
-            if (gv->is_array) {
-                // Array: reserve N elements of appropriate size
-                int elem_size = type_size(gv->elem_type);
-                StructType* gst = gv->elem_type ? typetab_lookup(cg.types, gv->elem_type) : NULL;
-                if (gst && gst->size > 0) { directive = "resb"; count = gv->array_count * gst->size;
-                    fprintf(cg.out, "%s: %s %d\n", gv->name, directive, count); continue; }
-                if (elem_size == 1) directive = "resb";
-                else if (elem_size == 2) directive = "resw";
-                else if (elem_size == 4) directive = "resd";
-                else directive = "resq";
-                count = gv->array_count;
-            } else {
-                // A struct global occupies its real size (packed IDT entries included).
-                // Scalars stay 8 bytes: every scalar load/store is 64-bit.
-                StructType* gst = (gv->type_name && !gv->is_pointer)
-                    ? typetab_lookup(cg.types, gv->type_name) : NULL;
-                if (gst && gst->size > 0) {
-                    fprintf(cg.out, "%s: resb %d\n", gv->name, gst->size);
-                    continue;
-                }
-                directive = "resq"; count = 1;
-            }
-
-            fprintf(cg.out, "%s: %s %d\n", gv->name, directive, count);
+        if (gv->is_extern || gv->is_initialized) continue;
+        if (gv->section && strcmp(gv->section, ".bss")) continue;
+        if (!has_bss) {
+            fprintf(cg.out, "\nsection .bss\n");
+            has_bss = 1;
         }
+        write_global_def(&cg, cg.out, gv);
     }
 
-    if (g_flat_org) fprintf(cg.out, "\nsection .bss\n__bss_end:\n");
+    if (g_flat_org && !g_bss_tail) {
+        if (bss_sec && bss_sec->has_addr)
+            fprintf(cg.out, "\nsection .bss vstart=0x%llx align=1\n%s_end:\n", bss_sec->addr, bss_sec->sym);
+        else
+            fprintf(cg.out, "\nsection .bss\n__bss_end:\n");
+        if (bss_sec) bss_sec->ended = 1;
+    } else if (!g_bss_tail && bss_sec && bss_sec->need_end && !bss_sec->ended) {
+        if (!has_bss) {
+            if (bss_sec->has_addr)
+                fprintf(cg.out, "\nsection .bss vstart=0x%llx align=1\n", bss_sec->addr);
+            else
+                fprintf(cg.out, "\nsection .bss\n");
+        }
+        fprintf(cg.out, "%s_end:\n", bss_sec->sym);
+        bss_sec->ended = 1;
+    }
     fprintf(cg.out, "%s", cg.code_buf);
 
     fclose(cg.out);
@@ -9872,6 +10236,7 @@ int main(int argc, char** argv) {
     }
 
     AstNode* ast = ast_new(AST_PROGRAM);
+    sections_reset();
     for (int i = 0; i < ninputs; i++) {
         if (!parse_file_into(ast, inputs[i], 0, 1, 1)) {
             if (g_error_count > 0)

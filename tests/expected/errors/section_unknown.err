@@ -1,0 +1,4 @@
+tests/errors/section_unknown.lap:3:12: error: unknown section '.nope'
+      3 |     return section_start(".nope");
+        |            ^
+1 error, compilation failed

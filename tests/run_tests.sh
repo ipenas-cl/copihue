@@ -77,7 +77,8 @@ for src in tests/freestanding/*.lap; do
   # A lone `syscall` is the freestanding instruction. The hosted runtime
   # is still rejected: it is a compile error, and a stray syscall from a
   # source that never calls syscall() fails this check.
-  if grep -q '_start' "$WORK/fs.asm" || \
+  # `__text_start` is a bounds label, not the hosted entry point.
+  if grep -qE '(^|[^A-Za-z0-9_])_start([^A-Za-z0-9_]|$)' "$WORK/fs.asm" || \
      { grep -qE '^\s*syscall' "$WORK/fs.asm" && ! grep -q 'syscall(' "$src"; } || \
      ! nasm -f elf64 "$WORK/fs.asm" -o "$WORK/fs.o"; then
     fail=$((fail+1)); failed+=("$src"); echo "FAIL $src: not freestanding or does not assemble"; continue
@@ -90,7 +91,7 @@ for src in tests/freestanding/*.lap; do
     if ! ( cd "$WORK" && "$CC" -O2 --freestanding -o fs2.asm "$ROOT/$src" 2>err.txt ); then
       fail=$((fail+1)); failed+=("$src -O2"); echo "FAIL $src -O2:"; cat "$WORK/err.txt"; continue
     fi
-    if grep -q '_start' "$WORK/fs2.asm" || \
+    if grep -qE '(^|[^A-Za-z0-9_])_start([^A-Za-z0-9_]|$)' "$WORK/fs2.asm" || \
        { grep -qE '^\s*syscall' "$WORK/fs2.asm" && ! grep -q 'syscall(' "$src"; } || \
        ! nasm -f elf64 "$WORK/fs2.asm" -o "$WORK/fs2.o"; then
       fail=$((fail+1)); failed+=("$src -O2"); echo "FAIL $src -O2: not freestanding or does not assemble"; continue
