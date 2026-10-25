@@ -1,0 +1,29 @@
+// An integer literal converts to a pointer. These are the addresses AtomicOS
+// stores that way: VGA text, the E820 count, the flat kernel, high memory,
+// and the ring-3 mapping. The value printed is the address itself.
+fn take_u16(p: *u16) -> i64 {
+    return p as i64;
+}
+
+fn take_u8(p: *u8) -> i64 {
+    return p as i64;
+}
+
+fn main() -> i64 {
+    let vga: *u16 = 0xB8000;
+    let e820: *u16 = 0x8000;
+    let kern: *u8 = 0x10000;
+    let high: *u8 = 0x200000;
+    let user: *u8 = 0x400000;
+    print_int(take_u16(vga));
+    println("");
+    print_int(take_u16(e820));
+    println("");
+    print_int(take_u8(kern));
+    println("");
+    print_int(take_u8(high));
+    println("");
+    print_int(take_u8(user));
+    println("");
+    return 0;
+}

@@ -1,0 +1,392 @@
+// Hosted -O2. A byte copy from index 0 is rep movsb. (a[i] + i + r) & 255
+// over a multiple of 16 is paddb. A power-of-two struct stride is shl.
+// v * 10 stays imul: on parse it did not separate from the previous range.
+// -O0 prints the same lines. A length that is not a multiple of 16, a copy
+// that does not start at 0, and a struct whose size is not a power of two
+// stay on the old path.
+
+struct Node { val: i64, next: i64 }
+struct Wide { a: i64, b: i64, c: i64, d: i64 }
+struct Odd { a: i64, b: i64, c: i64 }
+
+let src: [u8; 32];
+let dst: [u8; 32];
+let buf: [u8; 256];
+let nodes: [Node; 8];
+let wide: [Wide; 4];
+let odds: [Odd; 4];
+
+fn fill_src() -> i64 {
+    let i = 0;
+    while (i < 32) {
+        src[i] = (i + 1) as u8;
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn zero_dst() -> i64 {
+    let i = 0;
+    while (i < 32) {
+        dst[i] = 0;
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn sum_dst(n: i64) -> i64 {
+    let i = 0;
+    let s = 0;
+    while (i < n) {
+        s = s + dst[i];
+        i = i + 1;
+    }
+    return s;
+}
+
+fn copy_lit(n: i64) -> i64 {
+    let i = 0;
+    fill_src();
+    zero_dst();
+    i = 0;
+    while (i < n) {
+        dst[i] = src[i];
+        i = i + 1;
+    }
+    return sum_dst(n);
+}
+
+fn copy0() -> i64 {
+    let n = 0;
+    let i = 0;
+    fill_src();
+    zero_dst();
+    i = 0;
+    while (i < n) {
+        dst[i] = src[i];
+        i = i + 1;
+    }
+    return sum_dst(32);
+}
+
+fn copy1() -> i64 {
+    let n = 1;
+    let i = 0;
+    let s = 0;
+    fill_src();
+    zero_dst();
+    i = 0;
+    while (i < n) {
+        dst[i] = src[i];
+        i = i + 1;
+    }
+    i = 0;
+    while (i < n) {
+        s = s + dst[i];
+        i = i + 1;
+    }
+    return s;
+}
+
+fn copy9() -> i64 {
+    let n = 9;
+    let i = 0;
+    let s = 0;
+    fill_src();
+    zero_dst();
+    i = 0;
+    while (i < n) {
+        dst[i] = src[i];
+        i = i + 1;
+    }
+    i = 0;
+    while (i < n) {
+        s = s + dst[i];
+        i = i + 1;
+    }
+    return s;
+}
+
+fn copy16() -> i64 {
+    let n = 16;
+    let i = 0;
+    let s = 0;
+    fill_src();
+    zero_dst();
+    i = 0;
+    while (i < n) {
+        dst[i] = src[i];
+        i = i + 1;
+    }
+    i = 0;
+    while (i < n) {
+        s = s + dst[i];
+        i = i + 1;
+    }
+    return s;
+}
+
+fn copy17() -> i64 {
+    let n = 17;
+    let i = 0;
+    let s = 0;
+    fill_src();
+    zero_dst();
+    i = 0;
+    while (i < n) {
+        dst[i] = src[i];
+        i = i + 1;
+    }
+    i = 0;
+    while (i < n) {
+        s = s + dst[i];
+        i = i + 1;
+    }
+    return s;
+}
+
+fn copy7() -> i64 {
+    let n = 7;
+    let i = 0;
+    let s = 0;
+    fill_src();
+    zero_dst();
+    i = 0;
+    while (i < n) {
+        dst[i] = src[i];
+        i = i + 1;
+    }
+    i = 0;
+    while (i < n) {
+        s = s + dst[i];
+        i = i + 1;
+    }
+    return s;
+}
+
+fn copy_local() -> i64 {
+    let a: [u8; 8];
+    let b: [u8; 8];
+    let i = 0;
+    let s = 0;
+    while (i < 8) {
+        a[i] = (i + 3) as u8;
+        i = i + 1;
+    }
+    i = 0;
+    while (i < 8) {
+        b[i] = a[i];
+        i = i + 1;
+    }
+    i = 0;
+    while (i < 8) {
+        s = s + b[i];
+        i = i + 1;
+    }
+    return s;
+}
+
+fn copy_mid() -> i64 {
+    let i = 0;
+    let s = 0;
+    fill_src();
+    zero_dst();
+    i = 1;
+    while (i < 5) {
+        dst[i] = src[i];
+        i = i + 1;
+    }
+    i = 0;
+    while (i < 32) {
+        s = s + dst[i];
+        i = i + 1;
+    }
+    return s;
+}
+
+fn zero_buf(n: i64) -> i64 {
+    let i = 0;
+    while (i < n) {
+        buf[i] = 0;
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn bump16(r: i64) -> i64 {
+    let n = 16;
+    let i = 0;
+    let s = 0;
+    zero_buf(n);
+    i = 0;
+    while (i < n) {
+        buf[i] = ((buf[i] + i + r) & 255) as u8;
+        i = i + 1;
+    }
+    i = 0;
+    while (i < n) {
+        s = s + buf[i];
+        i = i + 1;
+    }
+    return s;
+}
+
+fn bump256() -> i64 {
+    let n = 256;
+    let i = 0;
+    let s = 0;
+    let r = 0;
+    zero_buf(n);
+    i = 0;
+    while (i < n) {
+        buf[i] = ((buf[i] + i + r) & 255) as u8;
+        i = i + 1;
+    }
+    i = 0;
+    while (i < n) {
+        s = s + buf[i];
+        i = i + 1;
+    }
+    return s;
+}
+
+fn bump15() -> i64 {
+    let n = 15;
+    let i = 0;
+    let s = 0;
+    let r = 1;
+    zero_buf(n);
+    i = 0;
+    while (i < n) {
+        buf[i] = ((buf[i] + i + r) & 255) as u8;
+        i = i + 1;
+    }
+    i = 0;
+    while (i < n) {
+        s = s + buf[i];
+        i = i + 1;
+    }
+    return s;
+}
+
+fn chain_sum() -> i64 {
+    let i = 0;
+    let last = 7;
+    let sum = 0;
+    while (i < last) {
+        nodes[i].val = i * 3 + 1;
+        nodes[i].next = i + 1;
+        i = i + 1;
+    }
+    nodes[last].val = last * 3 + 1;
+    nodes[last].next = 0 - 1;
+    i = 0;
+    while (i >= 0) {
+        sum = sum + nodes[i].val;
+        i = nodes[i].next;
+    }
+    return sum;
+}
+
+fn wide_sum() -> i64 {
+    let i = 0;
+    let sum = 0;
+    while (i < 3) {
+        wide[i].a = i + 1;
+        wide[i].b = i + 1;
+        wide[i].c = 0;
+        wide[i].d = 0;
+        i = i + 1;
+    }
+    wide[3].a = 4;
+    wide[3].b = 0 - 1;
+    wide[3].c = 0;
+    wide[3].d = 0;
+    i = 0;
+    while (i >= 0) {
+        sum = sum + wide[i].a;
+        i = wide[i].b;
+    }
+    return sum;
+}
+
+fn odd_sum() -> i64 {
+    let i = 0;
+    let sum = 0;
+    while (i < 3) {
+        odds[i].a = i + 1;
+        odds[i].b = i + 1;
+        odds[i].c = 0;
+        i = i + 1;
+    }
+    odds[3].a = 4;
+    odds[3].b = 0 - 1;
+    odds[3].c = 0;
+    i = 0;
+    while (i >= 0) {
+        sum = sum + odds[i].a;
+        i = odds[i].b;
+    }
+    return sum;
+}
+
+fn mul10s() -> i64 {
+    let v = 1234567;
+    let c = 53;
+    let w = 0 - 1234567;
+    let s = 0;
+    let big = 2000000000000000000;
+    v = v * 10;
+    s = s + v;
+    v = 12;
+    v = v * 10 + (c - 48);
+    s = s + v;
+    w = w * 10;
+    s = s + w;
+    v = 8;
+    v = 10 * v;
+    s = s + v;
+    big = big * 10;
+    s = s + (big % 1000003);
+    return s;
+}
+
+fn main() -> i32 {
+    print_int(copy0());
+    println("");
+    print_int(copy1());
+    println("");
+    print_int(copy7());
+    println("");
+    print_int(copy9());
+    println("");
+    print_int(copy16());
+    println("");
+    print_int(copy17());
+    println("");
+    print_int(copy_lit(4));
+    println("");
+    print_int(copy_local());
+    println("");
+    print_int(copy_mid());
+    println("");
+    print_int(bump16(10));
+    println("");
+    print_int(bump16(300));
+    println("");
+    print_int(bump16(0 - 1));
+    println("");
+    print_int(bump256());
+    println("");
+    print_int(bump15());
+    println("");
+    print_int(chain_sum());
+    println("");
+    print_int(wide_sum());
+    println("");
+    print_int(odd_sum());
+    println("");
+    print_int(mul10s());
+    println("");
+    return 0;
+}

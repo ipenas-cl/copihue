@@ -634,7 +634,8 @@ static int o2_hosted(void) {
     return optimization_level >= 2 && !g_freestanding && !legacy_bits();
 }
 
-// x86 scale is only 1, 2, 4 or 8. Other element sizes stay on the imul path.
+// x86 scale is only 1, 2, 4 or 8. A larger power of two is shl at hosted
+// -O2 (emit_scale_reg). Anything else stays imul.
 static int scale_ok(int elem) {
     return elem == 1 || elem == 2 || elem == 4 || elem == 8;
 }
@@ -1221,6 +1222,21 @@ int get_log2(long n) {
         log++;
     }
     return log;
+}
+
+// Scale an index that is already in reg. Hosted -O2 uses shl for a power of
+// two (sal is the same opcode). -O0, freestanding, and bits 16/32 keep imul.
+static void emit_scale_reg(Codegen* cg, const char* reg, int stride) {
+    int sh;
+    if (stride <= 1 || !reg) return;
+    if (o2_hosted() && is_power_of_2((long)stride)) {
+        sh = get_log2((long)stride);
+        if (sh > 0 && sh <= 63) {
+            emit(cg, "    shl %s, %d\n", reg, sh);
+            return;
+        }
+    }
+    emit(cg, "    imul %s, %d\n", reg, stride);
 }
 
 AstNode* parse_expr(Parser* p);
@@ -4772,7 +4788,7 @@ void gen_addr_of(Codegen* cg, AstNode* n) {
                     }
                 }
                 gen_expr(cg, var->children[1]);  // Index expression
-                if (elem_size > 1) emit(cg, "    imul rax, %d\n", elem_size);
+                if (elem_size > 1) emit_scale_reg(cg, "rax", elem_size);
                 emit(cg, "    lea rbx, [%s]\n", gvar->name);
                 emit(cg, "    add rax, rbx\n");
             }
@@ -4820,7 +4836,7 @@ void gen_addr_of(Codegen* cg, AstNode* n) {
                 StructType* est = typetab_lookup(cg->types, sym->type_name);
                 if (est && est->size > 0) stride = est->size;
             }
-            emit(cg, "    imul rax, %d\n", stride);
+            emit_scale_reg(cg, "rax", stride);
             emit(cg, "    lea rbx, [rbp%d]\n", sym->offset);
             emit(cg, "    add rax, rbx\n");
         }
@@ -4909,7 +4925,7 @@ void gen_array_index(Codegen* cg, AstNode* n) {
 
                 // Scale index by element size
                 if (elem_size > 1) {
-                    emit(cg, "    imul rax, %d\n", elem_size);
+                    emit_scale_reg(cg, "rax", elem_size);
                 }
 
                 emit(cg, "    push rax\n");     // Save scaled index
@@ -5046,7 +5062,7 @@ void gen_array_index(Codegen* cg, AstNode* n) {
 
             // Scale index by element size
             if (elem_size > 1) {
-                emit(cg, "    imul rax, %d\n", elem_size);
+                emit_scale_reg(cg, "rax", elem_size);
             }
 
             emit(cg, "    add rbx, rax\n");  // Add scaled index
@@ -5142,9 +5158,12 @@ void gen_array_index(Codegen* cg, AstNode* n) {
             snprintf(mem, sizeof mem, "rbp%d+%s*%d", sym->offset, breg, elem_size);
             emit_scaled_load(cg, mem, elem_size, is_struct, want ? want : "rax");
             if (want) g_index_hit = 1;
+        } else if (o2_hosted() && is_struct) {
+            emit_scale_reg(cg, "rax", elem_size);
+            emit(cg, "    lea rax, [rbp%d+rax]\n", sym->offset);
         } else {
             if (elem_size > 1) {
-                emit(cg, "    imul rax, %d\n", elem_size);
+                emit_scale_reg(cg, "rax", elem_size);
             }
             emit(cg, "    mov rbx, rax\n");
             if (is_struct) {
@@ -5189,9 +5208,12 @@ void gen_array_index(Codegen* cg, AstNode* n) {
                 snprintf(mem, sizeof mem, "%s+%s*%d", gvar->name, idxreg ? idxreg : "rax", elem_size);
                 emit_scaled_load(cg, mem, elem_size, is_struct_elem, want ? want : "rax");
                 if (want) g_index_hit = 1;
+            } else if (o2_hosted() && is_struct_elem) {
+                emit_scale_reg(cg, "rax", elem_size);
+                emit(cg, "    lea rax, [%s+rax]\n", gvar->name);
             } else {
                 if (elem_size > 1) {
-                    emit(cg, "    imul rax, %d\n", elem_size);
+                    emit_scale_reg(cg, "rax", elem_size);
                 }
                 emit(cg, "    lea rbx, [%s]\n", gvar->name);
                 emit(cg, "    add rbx, rax\n");
@@ -5224,7 +5246,7 @@ void gen_array_index(Codegen* cg, AstNode* n) {
                 }
             }
             emit(cg, "    mov rbx, [%s]\n", gvar->name);
-            if (elem_size > 1) emit(cg, "    imul rax, %d\n", elem_size);
+            if (elem_size > 1) emit_scale_reg(cg, "rax", elem_size);
             emit(cg, "    add rbx, rax\n");
             if (is_struct_elem) {
                 emit(cg, "    mov rax, rbx\n");
@@ -5557,7 +5579,7 @@ static int gen_embedded_array(Codegen* cg, AstNode* field, AstNode* index, AstNo
     }
     if (index) gen_expr(cg, index);
     else emit(cg, "    xor rax, rax\n");
-    if (elem > 1) emit(cg, "    imul rax, %d\n", elem);
+    emit_scale_reg(cg, "rax", elem);
     emit(cg, "    push rax\n");
     if (!field->children || !gen_field_addr(cg, field->children[0], field->name)) {
         emit(cg, "    pop rax\n");
@@ -6652,7 +6674,8 @@ void gen_expr(Codegen* cg, AstNode* n) {
                 return;
             }
         }
-        if (!assign_dest_narrow(cg, n) && (assign_direct(cg, n) || assign_index(cg, n))) {
+        if (!assign_dest_narrow(cg, n) &&
+            (assign_direct(cg, n) || assign_index(cg, n))) {
             Symbol* sym = n->name ? symtab_lookup_symbol(cg->symtab, n->name) : NULL;
             const char* rr = local_reg(sym);
             if (rr && strcmp(rr, "rax") != 0) emit(cg, "    mov rax, %s\n", rr);
@@ -7251,7 +7274,7 @@ void gen_expr(Codegen* cg, AstNode* n) {
 
                 // Scale index by element size
                 if (elem_size > 1) {
-                    emit(cg, "    imul rax, %d\n", elem_size);
+                    emit_scale_reg(cg, "rax", elem_size);
                 }
 
                 // Load pointer and add offset
@@ -7290,7 +7313,7 @@ void gen_expr(Codegen* cg, AstNode* n) {
                     emit_scaled_store(cg, mem, elem_size, "rbx");
                 } else {
                     if (elem_size > 1) {
-                        emit(cg, "    imul rax, %d\n", elem_size);
+                        emit_scale_reg(cg, "rax", elem_size);
                     }
                     emit(cg, "    mov rbx, rax\n");
                     emit(cg, "    pop rax\n");  // Restore value
@@ -7324,7 +7347,7 @@ void gen_expr(Codegen* cg, AstNode* n) {
                     emit_scaled_store(cg, mem, elem_size, "rbx");
                 } else {
                     if (elem_size > 1) {
-                        emit(cg, "    imul rax, %d\n", elem_size);
+                        emit_scale_reg(cg, "rax", elem_size);
                     }
                     emit(cg, "    lea rbx, [%s]\n", gvar->name);
                     emit(cg, "    add rbx, rax\n");
@@ -7352,7 +7375,7 @@ void gen_expr(Codegen* cg, AstNode* n) {
                         if (est && est->size > 0) elem_size = est->size;
                     }
                 }
-                if (elem_size > 1) emit(cg, "    imul rax, %d\n", elem_size);
+                if (elem_size > 1) emit_scale_reg(cg, "rax", elem_size);
                 emit(cg, "    mov rbx, [%s]\n", gvar->name);
                 emit(cg, "    add rbx, rax\n");
                 emit(cg, "    pop rax\n");
@@ -7448,7 +7471,7 @@ void gen_expr(Codegen* cg, AstNode* n) {
 
                     // Calculate array element address
                     if (elem_size > 1) {
-                        emit(cg, "    imul rbx, %d\n", elem_size);
+                        emit_scale_reg(cg, "rbx", elem_size);
                     }
                     emit(cg, "    lea rcx, [rbp%d+rbx]\n", sym->offset);  // rcx = address of array element
 
@@ -7476,7 +7499,7 @@ void gen_expr(Codegen* cg, AstNode* n) {
                     int field_off = typetab_field_offset(cg->types, gv->elem_type, field_name);
                     if (field_off >= 0) {
                         emit(cg, "    pop rbx\n");
-                        if (st->size > 1) emit(cg, "    imul rbx, %d\n", st->size);
+                        emit_scale_reg(cg, "rbx", st->size);
                         emit(cg, "    lea rcx, [%s]\n", gv->name);
                         emit(cg, "    add rcx, rbx\n");
                         if (field_off > 0) emit(cg, "    add rcx, %d\n", field_off);
@@ -9172,8 +9195,411 @@ static int try_insert_shift(Codegen* cg, AstNode* block, int start) {
     return 2;
 }
 
+static int byte_elem_name(const char* t) {
+    return t && (!strcmp(t, "u8") || !strcmp(t, "i8"));
+}
+
+// Local or global [u8; N] / [i8; N]. *len is the element count. A local u8[N]
+// occupies the first N bytes of its frame slot.
+static int lookup_byte_arr(Codegen* cg, const char* name, int* is_global, const char** gname,
+                           int* off, long long* len) {
+    Symbol* s;
+    GlobalVar* g;
+    if (!name) return 0;
+    s = symtab_lookup_symbol(cg->symtab, (char*)name);
+    if (s) {
+        if (!s->is_array || s->is_pointer || s->is_volatile || !byte_elem_name(s->type_name)) return 0;
+        if (s->array_len <= 0) return 0;
+        *is_global = 0;
+        *gname = NULL;
+        *off = s->offset;
+        *len = s->array_len;
+        return 1;
+    }
+    g = global_symtab_lookup(cg->global_symtab, (char*)name);
+    if (!g || !g->is_array || g->is_pointer || g->is_volatile || !byte_elem_name(g->elem_type)) return 0;
+    if (g->array_count <= 0) return 0;
+    *is_global = 1;
+    *gname = g->name;
+    *off = 0;
+    *len = g->array_count;
+    return 1;
+}
+
+static void emit_arr_lea(Codegen* cg, const char* reg, int is_global, const char* gname, int off) {
+    if (is_global) emit(cg, "    lea %s, [%s]\n", reg, gname);
+    else emit(cg, "    lea %s, [rbp%d]\n", reg, off);
+}
+
+// Limit is a literal or the one constant definition of an ident. A parameter
+// stays on the scalar loop: its value is not known here.
+static int known_loop_lim(AstNode* rhs, const char* iname, long long* lim) {
+    if (rhs && rhs->type == AST_NUMBER) return parse_i64(rhs->value, lim);
+    if (rhs && rhs->type == AST_IDENT && rhs->name && iname && strcmp(rhs->name, iname)) {
+        if (name_addr_taken(g_cur_fn, rhs->name)) return 0;
+        return sole_i64(rhs->name, lim);
+    }
+    return 0;
+}
+
+// `i = 0; while (i < lim) { dst[i] = src[i]; i = i + 1; }`. lim is a proved
+// in-range constant, so rep movsb copies the same bytes the scalar loop would.
+// The same array on both sides is left alone (overlap). rsi/rdi are not locals.
+static void emit_rep_copy(Codegen* cg, int dst_g, const char* dst_n, int dst_off,
+                          int src_g, const char* src_n, int src_off, long long lim) {
+    emit(cg, "    push rsi\n    push rdi\n    pushfq\n    cld\n");
+    emit_arr_lea(cg, "rdi", dst_g, dst_n, dst_off);
+    emit_arr_lea(cg, "rsi", src_g, src_n, src_off);
+    emit(cg, "    mov rcx, %lld\n", lim);
+    emit(cg, "    rep movsb\n");
+    emit(cg, "    popfq\n    pop rdi\n    pop rsi\n");
+}
+
+static int try_byte_copy(Codegen* cg, AstNode* wh) {
+    AstNode* cond;
+    AstNode* body;
+    AstNode* st;
+    AstNode* dst;
+    AstNode* src;
+    AstNode* ix;
+    AstNode* val;
+    Symbol* si;
+    const char* iname;
+    long long iz = 0, lim = 0, dlen = 0, slen = 0;
+    int dst_g = 0, src_g = 0, dst_off = 0, src_off = 0;
+    const char* dst_n = NULL;
+    const char* src_n = NULL;
+    if (g_strength_busy || !o2_hosted() || !wh || wh->type != AST_WHILE || wh->child_count != 2)
+        return 0;
+    if (calls_asm(g_cur_fn)) return 0;
+    cond = wh->children[0];
+    body = wh->children[1];
+    if (!cond || cond->type != AST_COMPARE || !cond->op || strcmp(cond->op, "<") || cond->child_count != 2)
+        return 0;
+    if (!cond->children[0] || cond->children[0]->type != AST_IDENT || !cond->children[0]->name)
+        return 0;
+    iname = cond->children[0]->name;
+    if (!const_init_val(g_prev_stmt, iname, &iz) || iz != 0) return 0;
+    if (!known_loop_lim(cond->children[1], iname, &lim) || lim < 0) return 0;
+    if (!body || body->type != AST_BLOCK || body->child_count != 2) return 0;
+    if (!is_plus_one(body->children[1], iname)) return 0;
+    st = body->children[0];
+    if (!st || st->type != AST_ARRAY_ASSIGN || st->child_count < 3) return 0;
+    dst = st->children[0];
+    ix = st->children[1];
+    val = st->children[2];
+    if (!dst || dst->type != AST_IDENT || !dst->name) return 0;
+    if (!ix || ix->type != AST_IDENT || !ix->name || strcmp(ix->name, iname)) return 0;
+    if (!val || val->type != AST_INDEX || val->child_count < 2) return 0;
+    src = val->children[0];
+    if (!src || src->type != AST_IDENT || !src->name || !strcmp(src->name, dst->name)) return 0;
+    if (!val->children[1] || val->children[1]->type != AST_IDENT || !val->children[1]->name ||
+        strcmp(val->children[1]->name, iname))
+        return 0;
+    if (!lookup_byte_arr(cg, dst->name, &dst_g, &dst_n, &dst_off, &dlen)) return 0;
+    if (!lookup_byte_arr(cg, src->name, &src_g, &src_n, &src_off, &slen)) return 0;
+    if (lim > dlen || lim > slen) return 0;
+    if (name_addr_taken(g_cur_fn, dst->name) || name_addr_taken(g_cur_fn, src->name) ||
+        name_addr_taken(g_cur_fn, iname))
+        return 0;
+    si = symtab_lookup_symbol(cg->symtab, (char*)iname);
+    if (!si || si->is_array || si->is_pointer || si->is_volatile || sym_narrow_int(si)) return 0;
+    check_elem_store(cg, st);
+    emit_rep_copy(cg, dst_g, dst_n, dst_off, src_g, src_n, src_off, lim);
+    emit_set_i64(cg, si, lim, NULL);
+    return 1;
+}
+
+// Low byte of v, repeated across xmm. SSE2 only: movd / punpck / pshufd.
+static void emit_broadcast_byte(Codegen* cg, const char* xmm, int from_reg, const char* reg,
+                                int off, long long imm, int is_imm) {
+    if (is_imm) emit(cg, "    mov eax, %lld\n", imm & 255);
+    else if (from_reg) emit(cg, "    movzx eax, %s\n", reg_low(reg));
+    else emit(cg, "    movzx eax, byte [rbp%d]\n", off);
+    emit(cg, "    movd %s, eax\n", xmm);
+    emit(cg, "    punpcklbw %s, %s\n", xmm, xmm);
+    emit(cg, "    punpcklwd %s, %s\n", xmm, xmm);
+    emit(cg, "    pshufd %s, %s, 0\n", xmm, xmm);
+}
+
+// `i = 0; while (i < lim) { buf[i] = (buf[i] + i + r) & 255; i = i + 1; }`
+// lim is a positive multiple of 16 and in range. The low 8 bits of that sum
+// are paddb of the byte, of (i mod 256), and of r's low byte. The index
+// vector starts at 0..15 and adds 16 each step, which wraps the same way.
+static int try_byte_bump(Codegen* cg, AstNode* wh) {
+    AstNode* cond;
+    AstNode* body;
+    AstNode* st;
+    AstNode* arr;
+    AstNode* ix;
+    AstNode* val;
+    AstNode* mask;
+    AstNode* add;
+    AstNode* terms[8];
+    AstNode* extra = NULL;
+    Symbol* si;
+    Symbol* sr = NULL;
+    const char* iname;
+    const char* gname = NULL;
+    long long iz = 0, lim = 0, alen = 0, imm = 0;
+    int nt = 0, i, nbuf = 0, ni = 0, is_g = 0, off = 0, is_imm = 0;
+    int lab_idx, lab_step, lab_code, lab_loop;
+    if (g_strength_busy || !o2_hosted() || !wh || wh->type != AST_WHILE || wh->child_count != 2)
+        return 0;
+    if (calls_asm(g_cur_fn)) return 0;
+    cond = wh->children[0];
+    body = wh->children[1];
+    if (!cond || cond->type != AST_COMPARE || !cond->op || strcmp(cond->op, "<") || cond->child_count != 2)
+        return 0;
+    if (!cond->children[0] || cond->children[0]->type != AST_IDENT || !cond->children[0]->name)
+        return 0;
+    iname = cond->children[0]->name;
+    if (!const_init_val(g_prev_stmt, iname, &iz) || iz != 0) return 0;
+    if (!known_loop_lim(cond->children[1], iname, &lim) || lim < 0 || (lim % 16) != 0) return 0;
+    if (!body || body->type != AST_BLOCK || body->child_count != 2) return 0;
+    if (!is_plus_one(body->children[1], iname)) return 0;
+    st = body->children[0];
+    if (!st || st->type != AST_ARRAY_ASSIGN || st->child_count < 3) return 0;
+    arr = st->children[0];
+    ix = st->children[1];
+    val = st->children[2];
+    if (!arr || arr->type != AST_IDENT || !arr->name) return 0;
+    if (!ix || ix->type != AST_IDENT || !ix->name || strcmp(ix->name, iname)) return 0;
+    // `(e) as u8` is the explicit narrow store. The rewrite keeps the low byte.
+    if (val && val->type == AST_CAST && !(val->is_pointer & 1) && val->child_count >= 1 &&
+        val->value) {
+        int sb = 64, ss = 1;
+        if (int_name(val->value, &sb, &ss) && sb == 8) val = val->children[0];
+    }
+    if (!val || val->type != AST_BINOP || !val->op || val->op[0] != '&' || val->op[1] || val->child_count != 2)
+        return 0;
+    if (val->children[1] && val->children[1]->type == AST_NUMBER && num_eq(val->children[1], 255)) {
+        mask = val->children[1];
+        add = val->children[0];
+    } else if (val->children[0] && num_eq(val->children[0], 255)) {
+        mask = val->children[0];
+        add = val->children[1];
+    } else return 0;
+    (void)mask;
+    if (!collect_add(add, terms, &nt) || nt != 3) return 0;
+    for (i = 0; i < nt; i++) {
+        AstNode* e = terms[i];
+        if (e && e->type == AST_INDEX && e->child_count >= 2 &&
+            e->children[0] && e->children[0]->type == AST_IDENT && e->children[0]->name &&
+            !strcmp(e->children[0]->name, arr->name) &&
+            e->children[1] && e->children[1]->type == AST_IDENT && e->children[1]->name &&
+            !strcmp(e->children[1]->name, iname)) {
+            nbuf++;
+            continue;
+        }
+        if (e && e->type == AST_IDENT && e->name && !strcmp(e->name, iname)) {
+            ni++;
+            continue;
+        }
+        if (extra) return 0;
+        extra = e;
+    }
+    if (nbuf != 1 || ni != 1 || !extra) return 0;
+    if (extra->type == AST_NUMBER) {
+        if (!parse_i64(extra->value, &imm)) return 0;
+        is_imm = 1;
+    } else if (extra->type == AST_IDENT && extra->name && strcmp(extra->name, iname) &&
+               strcmp(extra->name, arr->name)) {
+        sr = symtab_lookup_symbol(cg->symtab, extra->name);
+        if (!sr || sr->is_array || sr->is_pointer || sr->is_volatile || sym_narrow_int(sr)) return 0;
+        if (name_addr_taken(g_cur_fn, extra->name)) return 0;
+    } else return 0;
+    if (!lookup_byte_arr(cg, arr->name, &is_g, &gname, &off, &alen)) return 0;
+    if (lim > alen) return 0;
+    if (name_addr_taken(g_cur_fn, arr->name) || name_addr_taken(g_cur_fn, iname)) return 0;
+    si = symtab_lookup_symbol(cg->symtab, (char*)iname);
+    if (!si || si->is_array || si->is_pointer || si->is_volatile || sym_narrow_int(si)) return 0;
+    check_elem_store(cg, st);
+    if (lim == 0) {
+        emit_set_i64(cg, si, 0, NULL);
+        return 1;
+    }
+    lab_idx = new_label(cg);
+    lab_step = new_label(cg);
+    lab_code = new_label(cg);
+    lab_loop = new_label(cg);
+    emit(cg, "    jmp .L%d\n", lab_code);
+    emit(cg, "    align 16\n");
+    emit(cg, ".L%d:\n", lab_idx);
+    emit(cg, "    db 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15\n");
+    emit(cg, ".L%d:\n", lab_step);
+    emit(cg, "    db 16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16\n");
+    emit(cg, ".L%d:\n", lab_code);
+    emit_broadcast_byte(cg, "xmm1", sr && local_reg(sr), sr ? local_reg(sr) : NULL,
+                        sr ? sr->offset : 0, imm, is_imm);
+    emit(cg, "    movdqu xmm2, [rel .L%d]\n", lab_idx);
+    emit(cg, "    movdqu xmm3, [rel .L%d]\n", lab_step);
+    emit_arr_lea(cg, "rax", is_g, gname, off);
+    emit(cg, "    mov rcx, %lld\n", lim / 16);
+    emit(cg, ".L%d:\n", lab_loop);
+    emit(cg, "    movdqu xmm0, [rax]\n");
+    emit(cg, "    paddb xmm0, xmm2\n");
+    emit(cg, "    paddb xmm0, xmm1\n");
+    emit(cg, "    movdqu [rax], xmm0\n");
+    emit(cg, "    paddb xmm2, xmm3\n");
+    emit(cg, "    add rax, 16\n");
+    emit(cg, "    sub rcx, 1\n");
+    emit(cg, "    jnz .L%d\n", lab_loop);
+    emit_set_i64(cg, si, lim, NULL);
+    return 1;
+}
+
+static int field_of_arr(AstNode* e, const char** arr, const char** idx, const char** field) {
+    AstNode* ix;
+    AstNode* a;
+    AstNode* i;
+    if (!e || e->type != AST_FIELD_ACCESS || !e->name || e->child_count < 1) return 0;
+    ix = e->children[0];
+    if (!ix || ix->type != AST_INDEX || ix->child_count < 2) return 0;
+    a = ix->children[0];
+    i = ix->children[1];
+    if (!a || a->type != AST_IDENT || !a->name) return 0;
+    if (!i || i->type != AST_IDENT || !i->name) return 0;
+    *arr = a->name;
+    *idx = i->name;
+    *field = e->name;
+    return 1;
+}
+
+static int walk_nonneg(AstNode* cond, const char** iname) {
+    AstNode* L;
+    AstNode* R;
+    if (!cond || cond->type != AST_COMPARE || !cond->op || cond->child_count != 2) return 0;
+    L = cond->children[0];
+    R = cond->children[1];
+    if (!L || L->type != AST_IDENT || !L->name) return 0;
+    if (!strcmp(cond->op, ">=") && num_eq(R, 0)) { *iname = L->name; return 1; }
+    if (!strcmp(cond->op, ">") && num_eq(R, -1)) { *iname = L->name; return 1; }
+    return 0;
+}
+
+static void fmt_rax_disp(char* buf, int n, int disp) {
+    if (disp == 0) snprintf(buf, n, "rax");
+    else snprintf(buf, n, "rax%+d", disp);
+}
+
+// `while (i >= 0) { sum = sum + arr[i].f; i = arr[i].g; }` on a global array
+// of structs whose size is a power of two. Locals stay bounds-checked, so
+// this form is globals only. One shl (sal is the same opcode) and one lea
+// feed both loads. A size that is not a power of two keeps imul.
+static int try_link_walk(Codegen* cg, AstNode* wh) {
+    AstNode* body;
+    AstNode* st;
+    AstNode* nxt;
+    AstNode* rhs;
+    AstNode* fld;
+    Symbol* si;
+    Symbol* ss;
+    Symbol* local_arr;
+    GlobalVar* gv;
+    StructType* styp;
+    StructField* ff;
+    StructField* fg;
+    const char* iname = NULL;
+    const char* aname = NULL;
+    const char* iname2 = NULL;
+    const char* fname = NULL;
+    const char* ireg;
+    const char* sreg;
+    char vmem[32], nmem[32];
+    int voff = 0, vsz = 0, vsg = 0, vvol = 0;
+    int noff = 0, nsz = 0, nsg = 0, nvol = 0;
+    int sh, top, done;
+    if (g_strength_busy || !o2_hosted() || !wh || wh->type != AST_WHILE || wh->child_count != 2)
+        return 0;
+    if (calls_asm(g_cur_fn)) return 0;
+    if (!walk_nonneg(wh->children[0], &iname)) return 0;
+    body = wh->children[1];
+    if (!body || body->type != AST_BLOCK || body->child_count != 2) return 0;
+    st = body->children[0];
+    nxt = body->children[1];
+    if (!st || st->type != AST_ASSIGN || !st->name || st->child_count != 1 || !st->children[0]) return 0;
+    if (!strcmp(st->name, iname)) return 0;
+    rhs = st->children[0];
+    if (!is_add_op(rhs)) return 0;
+    if (rhs->children[0] && rhs->children[0]->type == AST_IDENT && rhs->children[0]->name &&
+        !strcmp(rhs->children[0]->name, st->name))
+        fld = rhs->children[1];
+    else if (rhs->children[1] && rhs->children[1]->type == AST_IDENT && rhs->children[1]->name &&
+             !strcmp(rhs->children[1]->name, st->name))
+        fld = rhs->children[0];
+    else return 0;
+    if (!field_of_arr(fld, &aname, &iname2, &fname) || strcmp(iname2, iname)) return 0;
+    if (!nxt || nxt->type != AST_ASSIGN || !nxt->name || strcmp(nxt->name, iname) ||
+        nxt->child_count != 1)
+        return 0;
+    {
+        const char* next_field = NULL;
+        const char* arr2 = NULL;
+        const char* idx2 = NULL;
+        if (!field_of_arr(nxt->children[0], &arr2, &idx2, &next_field)) return 0;
+        if (strcmp(arr2, aname) || strcmp(idx2, iname)) return 0;
+        local_arr = symtab_lookup_symbol(cg->symtab, (char*)aname);
+        if (local_arr) return 0;
+        gv = global_symtab_lookup(cg->global_symtab, (char*)aname);
+        if (!gv || !gv->is_array || gv->is_pointer || gv->is_volatile || !gv->elem_type) return 0;
+        if (gv->array_count <= 0) return 0;
+        styp = typetab_lookup(cg->types, gv->elem_type);
+        if (!styp || styp->size <= 1 || !is_power_of_2((long)styp->size)) return 0;
+        sh = get_log2((long)styp->size);
+        if (sh <= 0 || sh > 63) return 0;
+        ff = typetab_field(cg->types, gv->elem_type, (char*)fname);
+        fg = typetab_field(cg->types, gv->elem_type, (char*)next_field);
+        if (!ff || !fg || ff->is_pointer || fg->is_pointer || ff->array_len || fg->array_len) return 0;
+        if (!field_mem_info(cg, gv->elem_type, fname, &voff, &vsz, &vsg, &vvol)) return 0;
+        if (!field_mem_info(cg, gv->elem_type, next_field, &noff, &nsz, &nsg, &nvol)) return 0;
+        if (vsz != 8 || nsz != 8 || vvol || nvol) return 0;
+        (void)vsg;
+        (void)nsg;
+        if (name_addr_taken(g_cur_fn, iname) || name_addr_taken(g_cur_fn, st->name) ||
+            name_addr_taken(g_cur_fn, aname))
+            return 0;
+        si = symtab_lookup_symbol(cg->symtab, (char*)iname);
+        ss = symtab_lookup_symbol(cg->symtab, st->name);
+        if (!si || !ss || si->is_array || ss->is_array || si->is_pointer || ss->is_pointer) return 0;
+        if (si->is_volatile || ss->is_volatile || sym_narrow_int(si) || sym_narrow_int(ss)) return 0;
+        check_assign_types(cg, st);
+        check_assign_types(cg, nxt);
+        ireg = local_reg(si);
+        sreg = local_reg(ss);
+        fmt_rax_disp(vmem, (int)sizeof vmem, voff);
+        fmt_rax_disp(nmem, (int)sizeof nmem, noff);
+        top = new_label(cg);
+        done = new_label(cg);
+        if (ireg) emit(cg, "    cmp %s, 0\n    jl .L%d\n", ireg, done);
+        else emit(cg, "    cmp qword [rbp%d], 0\n    jl .L%d\n", si->offset, done);
+        emit(cg, ".L%d:\n", top);
+        if (!ireg) emit(cg, "    mov rax, [rbp%d]\n", si->offset);
+        else if (strcmp(ireg, "rax")) emit(cg, "    mov rax, %s\n", ireg);
+        emit(cg, "    shl rax, %d\n", sh);
+        emit(cg, "    lea rax, [%s+rax]\n", gv->name);
+        if (sreg) emit(cg, "    add %s, [%s]\n", sreg, vmem);
+        else {
+            emit(cg, "    mov rbx, [%s]\n", vmem);
+            emit(cg, "    add qword [rbp%d], rbx\n", ss->offset);
+        }
+        if (ireg) emit(cg, "    mov %s, [%s]\n", ireg, nmem);
+        else {
+            emit(cg, "    mov rax, [%s]\n", nmem);
+            emit(cg, "    mov [rbp%d], rax\n", si->offset);
+        }
+        if (ireg) emit(cg, "    cmp %s, 0\n    jge .L%d\n", ireg, top);
+        else emit(cg, "    cmp qword [rbp%d], 0\n    jge .L%d\n", si->offset, top);
+        emit(cg, ".L%d:\n", done);
+        return 1;
+    }
+}
+
 static int try_hosted_rewrite(Codegen* cg, AstNode* n) {
     if (!o2_hosted()) return 0;
+    if (try_link_walk(cg, n)) return 1;
+    if (try_byte_copy(cg, n)) return 1;
+    if (try_byte_bump(cg, n)) return 1;
     if (try_strength_dot(cg, n)) return 1;
     if (try_byte_fill(cg, n)) return 1;
     if (try_linear_sum(cg, n)) return 1;
