@@ -9,7 +9,7 @@ struct Lexer {
 
 fn lexer_init(lex: *Lexer, source: *i8) -> i64 {
     print("  In lexer_init: source addr = ");
-    print_int(source);
+    print_int(source as i64);
     println("");
     print("  In lexer_init: source[0] = ");
     print_int(source[0]);
@@ -21,7 +21,7 @@ fn lexer_init(lex: *Lexer, source: *i8) -> i64 {
     lex.col = 1;
 
     print("  After assignment: lex.source = ");
-    print_int(lex.source);
+    print_int(lex.source as i64);
     println("");
     print("  After assignment: lex.source[0] = ");
     print_int(lex.source[0]);
@@ -46,7 +46,7 @@ fn main() -> i64 {
     lexer_init(&lex, source);
 
     print("After init: lex.source = ");
-    print_int(lex.source);
+    print_int(lex.source as i64);
     println("");
     print("After init: lex.source[0] = ");
     print_int(lex.source[0]);

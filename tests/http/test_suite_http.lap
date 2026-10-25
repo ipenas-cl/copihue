@@ -43,7 +43,7 @@ fn setup_sockaddr(port: i32) -> i32 {
 }
 
 // Test a GET endpoint
-fn test_get(name: i32, path: i32, expected: i32) -> i32 {
+fn test_get(name: *u8, path: *u8, expected: *u8) -> i32 {
     tests_total = tests_total + 1;
 
     print("Test #");
@@ -133,7 +133,7 @@ fn test_get(name: i32, path: i32, expected: i32) -> i32 {
 }
 
 // Test a POST endpoint
-fn test_post(name: i32, path: i32, body: i32, expected: i32) -> i32 {
+fn test_post(name: *u8, path: *u8, body: *u8, expected: *u8) -> i32 {
     tests_total = tests_total + 1;
 
     print("Test #");

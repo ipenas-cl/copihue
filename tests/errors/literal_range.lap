@@ -1,0 +1,11 @@
+struct Slot { b: u8 }
+
+fn main() -> i32 {
+    let a: u8 = 300;
+    let b: i8 = 200;
+    let c: u16 = 65536;
+    let d: i32 = 3000000000;
+    let s: Slot;
+    s.b = 300;
+    return 0;
+}

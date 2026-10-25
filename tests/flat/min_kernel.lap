@@ -97,10 +97,10 @@ fn _start() -> i64 {
     set_gate(32, &timer);
     let idtr: DescPtr;
     idtr.limit = 32 * 16 - 1;
-    idtr.base = idt;
+    idtr.base = idt as u64;
     lidt(&idtr);
     let buf = alloc(8);
-    let p: *u8 = buf;
+    let p: *u8 = buf as *u8;
     p[0] = 'A';
     serial_putc(p[0]);
     while (1) { hlt(); }

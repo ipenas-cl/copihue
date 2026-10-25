@@ -26,7 +26,7 @@ fn set_rsp0(p: *Tss, sp: i64) -> i64 {
 
 fn main() -> i32 {
     let t: Tss;
-    let b: *u8 = &t;
+    let b: *u8 = &t as *u8;
     t.reserved0 = 0x11;
     t.rsp0 = 0x22;
     t.ist1 = 0x33;

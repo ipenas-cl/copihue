@@ -1,0 +1,7 @@
+fn name_of(vec: i64) -> *u8 {
+    return vec;
+}
+
+fn main() -> i32 {
+    return 0;
+}

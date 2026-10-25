@@ -1,0 +1,4 @@
+tests/errors/int_as_ptr.lap:3:18: error: expected *u8, found i64
+      3 |     let p: *u8 = n;
+        |                  ^
+1 error, compilation failed

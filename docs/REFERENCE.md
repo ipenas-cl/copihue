@@ -54,11 +54,11 @@ fn add(a: i64, b: i64) -> i64 { return a + b; }
 ```
 
 - Functions take up to 16 parameters. The first six are passed in `rdi, rsi, rdx, rcx, r8, r9`. The seventh is at `[rbp+16]`, then one 8-byte slot each. The return value comes back in `rax`.
-- The type after `->` may be any type: a name (`i64`, `Point`), a pointer (`*u8`, `*mut u8`, `*volatile mut u8`, `**u8`), or an array (`[u8; 4]`, `[*u8; 2]`). `volatile` and `mut` may appear in either order after `*`. A missing piece is `expected a type, found '...'`. The return type is not checked against `return`, and it does not change the calling convention. The same form compiles in hosted, `--freestanding`, and `--flat` code.
+- The type after `->` may be any type: a name (`i64`, `Point`), a pointer (`*u8`, `*mut u8`, `*volatile mut u8`, `**u8`), or an array (`[u8; 4]`, `[*u8; 2]`). `volatile` and `mut` may appear in either order after `*`. A missing piece is `expected a type, found '...'`. An integer or pointer `return` is checked against that type (see Type checking). An array or struct return type is parsed and is not checked. The value still comes back in `rax`. The same form compiles in hosted, `--freestanding`, and `--flat` code.
 - A name is visible from its `let` to the end of the block that contains it. `{ ... }` is a block, and so is the body of `if`, `while`, and `for`. A nested block may declare the same name again (the inner one hides the outer one until the inner block ends). Declaring it twice in the same block is `redeclaration of 'name' in the same block`. Parameters belong to the function body, so `fn f(b: i64) { let b = 1; ... }` is that error. `for (let i = 0; ...)` scopes `i` to the loop. Using a name after its block, with no outer declaration, is `use of undeclared variable 'name'`.
 - A struct parameter (`r: Rect`) is passed by value: the callee gets its own copy. A pointer parameter (`r: *Rect`) refers to the caller's struct; use `r->field`.
 - Using an undeclared variable, or assigning to one, is a compile error.
-- A direct call of an unknown function is a compile error, and the argument count must match the declaration. A call through a local or a global is indirect and is not checked (see Function pointers).
+- A direct call of an unknown function is a compile error, and the argument count must match the declaration (`function 'f' takes N argument(s), not M`). When the count matches, each argument is checked against the parameter type. A call through a local or a global is indirect and is not checked (see Function pointers).
 - Indexing (`x[i]`) requires `x` to be an array or a pointer. Indexing a scalar is a compile error.
 
 ### Packed structs
@@ -178,6 +178,7 @@ In a `for` loop, `step` can be any simple statement (`i++`, `i += 2`, `i = i * 2
 |---|---|
 | `x[i]` `s.f` `p->f` `f(...)` | postfix |
 | `-x` `!x` `~x` `*p` `&x` | unary |
+| `e as T` | cast. Looser than unary and postfix, tighter than `*` `/` `+`. `as` is not a keyword |
 | `*` `/` `%` | signed; `/` and `%` truncate toward zero |
 | `+` `-` | |
 | `<<` `>>` | `>>` is arithmetic (sign-propagating) |
@@ -188,7 +189,31 @@ In a `for` loop, `step` can be any simple statement (`i++`, `i += 2`, `i = i * 2
 | `&&` | short-circuit |
 | `\|\|` | short-circuit |
 
-As in Rust, bitwise operators bind tighter than comparisons: `x & 2 == 2` means `(x & 2) == 2`.
+As in Rust, bitwise operators bind tighter than comparisons: `x & 2 == 2` means `(x & 2) == 2`. `1 + 2 as u8` is `1 + (2 as u8)`, and `&e as *u8` is `(&e) as *u8`.
+
+## Type checking
+
+A direct assignment (`let`, `x = e`, `a[i] = e`, `s.f = e`, `p->f = e`), a direct call, and `return` check integer and pointer types. A mismatch is `file:line:col: error: expected T, found U`, with the source line and a caret. A call says `argument N of 'f': expected T, found U` (N starts at 1). A return says `return value: expected T, found U`. The compiler keeps going and ends with `1 error, compilation failed` or `N errors, compilation failed`.
+
+`as` converts on purpose. It is allowed between any two types. A cast to a pointer or to `i64` / `u64` emits no instruction. A cast to `i8` / `u8` / `i16` / `u16` / `i32` / `u32` keeps the low bits: unsigned zero-extends (`300 as u8` is 44), signed sign-extends (`200 as i8` is -56). That explicit cast is not a range error.
+
+These implicit conversions stay legal, because kernels and the existing programs rely on them:
+
+- An integer literal, including `0` and `0xB8000`, converts to any pointer. `let vga: *u16 = 0xB8000` needs no `as`. A variable that is an integer does not: `let n = 1; let p: *u8 = n` is an error, and `let p: *u8 = n as *u8` is the fix.
+- `*i8` and `*u8` are the same byte pointer. `*u8` and `*Point` are not, and neither are `*u8` and `**u8`, or `*i32` and `*i64`.
+- `mut` and `volatile` are not part of the comparison. `*mut u8`, `*volatile u8`, and `*u8` match.
+- A narrower integer promotes to a wider one (`u8` passed to `putc(c: i64)`, `return` of a `u8` from `-> i64`).
+- A pointer plus or minus an integer has that pointer's type and may also be used as `i64`. An array decays to a pointer to its element and may not be used as `i64` without `as`. `&function` is `i64`, not a pointer. `&struct` is `*Struct` and does not become `*u8` without `as`.
+- A string literal is `*u8`. `malloc` returns an address that converts to any pointer and to an integer. `bss_start()` and `bss_end()` are `*u8`; `bss_end() - bss_start()` is `i64`.
+- `read` / `write` buffers, `free`, `lidt`, `lgdt`, and `invlpg` accept an integer or any pointer. `syscall` and `syscall6` arguments are raw register values, so a pointer or an integer is accepted.
+
+A literal that does not fit the destination is an error: `expected u8, found integer literal 300`. The ranges are `u8` 0..255, `i8` -128..127, `u16` 0..65535, `i16` -32768..32767, `u32` 0..4294967295, `i32` -2147483648..2147483647. `-1` does not fit an unsigned type. `0xFF` fits `u8` and does not fit `i8`. `i64` accepts any integer literal; a negative literal does not fit `u64`.
+
+Storing a non-literal into an 8, 16, or 32-bit variable or field truncates. Unsigned keeps the low bits (zero-extend). Signed sign-extends. `let wide = 300; let z: u8 = wide` stores 44. A narrow parameter is truncated the same way when it is received. A literal that fits is stored as it is, with no extra instruction. Arithmetic operators are still 64-bit; the truncation happens at the store, at a narrow parameter, and at an explicit `as` to a narrow integer. At `-O1` and `-O2`, constant folding turns `1 + 2` into a literal, so a folded sum that does not fit is an error at those levels and a truncating store at `-O0`.
+
+Scalar locals, globals, and ordinary struct fields still occupy 8-byte slots when they live in memory. Hosted `-O2` may keep a scalar local in `r12`–`r15`; the mask or sign-extend is applied before the value is written to that register or to the slot. A `packed` field, a `volatile` field, and a store through a pointer or an array element already write only the real width, which is the truncation.
+
+Not checked: indirect calls, comparisons, bitwise mixes, `mut` used as a permission, `volatile` as a type error, and array or struct return types. An untyped `let x = e` infers `i64` from an integer, including a narrow load, the pointer type from a pointer, and an address from `malloc`. It does not infer a struct onto that slot: write `let p: Point = ...` or a struct literal. An expression the compiler cannot type is accepted.
 
 ## Built-ins (hosted mode)
 
@@ -312,8 +337,8 @@ The regression suite compares the hexdump at `-O0` and `-O2`. When `qemu-system-
 
 ## Known limitations
 
-- Integer arithmetic is 64-bit two's complement and wraps. Narrow types only affect memory accesses.
-- Direct calls check the function name and the argument count. Assignments, argument types, return types, and indirect calls are not type-checked. There is no bounds checking on pointer indexing.
+- Integer arithmetic is 64-bit two's complement and wraps. Storing into an 8, 16, or 32-bit variable or field truncates as described under Type checking. Operators themselves are not 8-bit or 32-bit. There is no bounds checking on pointer indexing.
+- Direct calls check the function name, the argument count, and argument types. Assignments and integer or pointer returns are checked. Indirect calls are not. `*i8` and `*u8` match. An integer literal converts to any pointer; a variable does not, without `as`.
 - Ordinary struct fields still occupy 8 bytes each. Only `packed struct` uses the real width of `u8`/`u16`/`u32`. There is no padding or alignment attribute beyond packed-or-not. Struct assignment copies the whole value; it does not assign field by field in the source. Nested fields (`r.b.x`) use the real offset.
 - Indexing a local array in hosted mode inserts a bounds check that exits the process. `--freestanding` and `--flat` omit that check. Pointer indexing is never checked.
 - There are no modules or imports and no relocatable objects. A program is a single file. `bits 16` and `bits 32` exist only as naked functions: there is no 16-bit or 32-bit frame, so `let` is rejected and segment registers cannot be assigned. Integer expressions there use `eax`. Calls to other Copihue functions still use the 64-bit sequence. The hosted suite assembles `iretq`, `sysret`, `ltr`, and the 64-bit control-register moves and does not execute them; it does execute `cpuid` and `int_carry`. The boot-sector tests execute real mode and protected mode under QEMU, including `lgdt(&gdtr)`, `write_cr0`, `if carry`, and `outb` on `tests/boot/realmode_builtins.lap`. `tests/freestanding/bits32_regs.lap` assembles `write_cr4`, `rdmsr` / `wrmsr`, and `cpuid` in `bits 32` and is not booted. `tests/usermode` executes long mode, `ltr`, the syscall MSRs, `iretq` to ring 3, `syscall`/`sysret`, and `iretq` from an interrupt, also under QEMU.
