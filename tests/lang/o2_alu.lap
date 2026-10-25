@@ -1,0 +1,162 @@
+// Hosted -O2: arithmetic directly in the local's register, a fifth and sixth
+// scalar in a caller-saved register when no call falls inside the live range,
+// and array loads/stores as base+index*scale. -O0 must print the same lines.
+// A name used after a call stays correct even when more than four do.
+
+fn add2(x: i64) -> i64 {
+    return x + 2;
+}
+
+fn rec(n: i64) -> i64 {
+    if (n < 2) {
+        return n;
+    }
+    return rec(n - 1) + n;
+}
+
+fn pick(a: i64, b: i64) -> i64 {
+    if (a >= b) {
+        return a;
+    }
+    return b;
+}
+
+fn pos(n: i64) -> i64 {
+    if (0 < n) {
+        return n;
+    }
+    return 0 - n;
+}
+
+fn bump(n: i64) -> i64 {
+    if (n < 2) {
+        return n + 1;
+    }
+    return n;
+}
+
+fn same(n: i64) -> i64 {
+    if (n == 4) {
+        return n;
+    }
+    return n + 1;
+}
+
+fn five(a: i64, b: i64, c: i64, d: i64, e: i64) -> i64 {
+    let r = add2(a);
+    return a + b + c + d + e + r;
+}
+
+let garr: [i64; 4] = [3, 1, 4, 1];
+
+fn main() -> i32 {
+    let a = 1;
+    let b = 2;
+    let c = 3;
+    let d = 4;
+    let e = 5;
+    let f = 6;
+    let i = 0;
+    let n = 40;
+    while (i < n) {
+        a = (a + b) & 2147483647;
+        b = (b + c) & 2147483647;
+        c = (c + d) & 2147483647;
+        d = (d + e) & 2147483647;
+        e = (e + f) & 2147483647;
+        f = (f + i) & 2147483647;
+        i = i + 1;
+    }
+    print_int(a + b + c + d + e + f);
+    println("");
+
+    print_int(five(10, 20, 30, 40, 50));
+    println("");
+
+    let live = 40;
+    let z = add2(live);
+    print_int(live + z);
+    println("");
+
+    let arr: [i64; 8];
+    let j = 0;
+    while (j < 8) {
+        arr[j] = j * 3 + 1;
+        j = j + 1;
+    }
+    j = 6;
+    while (j >= 1) {
+        arr[j] = arr[j - 1] + arr[j];
+        j = j - 1;
+    }
+    j = 3;
+    let key = arr[j];
+    arr[j + 1] = arr[j];
+    arr[j + 1] = key + 1;
+    let sum = 0;
+    j = 0;
+    while (j < 8) {
+        sum = sum + arr[j];
+        j = j + 1;
+    }
+    print_int(sum);
+    println("");
+
+    let k = 3;
+    let hits = 0;
+    while (k >= 0 && arr[k] > 0) {
+        hits = hits + arr[k];
+        k = k - 1;
+    }
+    print_int(hits);
+    println("");
+    print_int(k);
+    println("");
+
+    a = b + a;
+    a = a - b;
+    a = b - a;
+    print_int(a);
+    println("");
+
+    let s = 6;
+    s = (s << 2) + (40 >> 2);
+    s = s * 8;
+    print_int(s);
+    println("");
+
+    let u = 7;
+    let v = 4;
+    u = u + u;
+    v = v - v;
+    print_int(u + v);
+    println("");
+
+    garr[1] = garr[0] + garr[2];
+    print_int(garr[1]);
+    println("");
+
+    let volatile w = 5;
+    w = w + 1;
+    print_int(w);
+    println("");
+
+    print_int(20 / 3);
+    println("");
+    print_int(20 % 3);
+    println("");
+    print_int(!0 + !5);
+    println("");
+
+    print_int(rec(5));
+    println("");
+    print_int(pick(3, 9) + pick(8, 2));
+    println("");
+    print_int(pos(4) + pos(0) + pos(0 - 3));
+    println("");
+    print_int(bump(1) + bump(2) + bump(5));
+    println("");
+    print_int(same(4) + same(1));
+    println("");
+    return 0;
+}
