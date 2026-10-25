@@ -1,0 +1,13 @@
+// also-o2
+// `-> *u8` must compile in a --flat image as well.
+
+fn exc_name(vec: i64) -> *u8 {
+    return vec;
+}
+
+fn _start() -> i64 {
+    let cell: [u8; 2];
+    cell[0] = 65;
+    let p: *u8 = exc_name(cell);
+    return p[0];
+}

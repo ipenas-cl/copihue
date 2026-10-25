@@ -2,6 +2,17 @@
 
 Todos los cambios importantes del proyecto.
 
+## [0.22.2] - 2026-10-25
+
+### Fixed
+- `let` is scoped to its block. A name is visible from its declaration to the end of that block, a nested block may shadow it, and declaring the same name twice in one block is `redeclaration of 'name' in the same block`. Two `let b` in sibling blocks no longer share a lookup: the use reads the `b` that is in scope, not an earlier one from another branch. `{ ... }` is a statement. `for (let i = ...)` scopes `i` to the loop. Parameters share the function body's scope.
+
+### Added
+- Freestanding and flat tests that `fn f() -> *u8` compiles. The form has been accepted since 0.22.1.
+
+### Changed
+- Language version is 0.22.2.
+
 ## [0.22.1] - 2026-10-25
 
 ### Added

@@ -1,0 +1,4 @@
+tests/errors/let_after_block.lap:5:12: error: use of undeclared variable 'b'
+      5 |     return b;
+        |            ^
+1 error, compilation failed
