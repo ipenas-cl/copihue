@@ -16,6 +16,7 @@ Todos los cambios importantes del proyecto.
 ### Changed
 - Language version is 0.30.0, on top of 0.29.4.
 - `tests/lang/o2_reduce.lap` `holes_neg` prints 2. Both elements are `i8`, so `-1 + 3` is an `i8` sum, not the old zero-extended `255 + 3` (258). `-O0` and `-O2` agree. `holes` stays 258: the accumulator is an untyped `i64`.
+- A `u8` subtraction such as `line[i] - '0'` emits `movzx rax, al` after `sub`. On the AtomicOS kernel (`kernel.lap`, `console.lap`, `keyboard.lap`, `shell.lap`, `--flat 0x10000`) that is the only new instruction, in `parse_int`. The image grows from 6004 to 6008 bytes. A digit in `'0'..'9'` has the same value. Jump displacements that cross the instruction move. `tests/flat/min_kernel.hex` is unchanged.
 - `tests/lang/ptr_return.lap` drops `*volatile mut u8` with `as *u8`. The cast emits no instruction. Adding volatile in `as_vol` stays legal. `tests/flat/min_kernel.hex` is unchanged: `let p: *volatile u32 = regs` adds volatile.
 
 ## [0.29.4] - 2026-10-25
