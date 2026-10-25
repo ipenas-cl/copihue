@@ -1,4 +1,4 @@
-# Copihue Language Reference (v0.21.0)
+# Copihue Language Reference (v0.22.0)
 
 This document describes the language that `copihue` accepts today. Anything not listed here is not supported.
 Planned features are in the README roadmap.
@@ -8,7 +8,7 @@ Planned features are in the README roadmap.
 - Source files use the `.lap` extension (from *Lapageria rosea*, the copihue). `.cph` (v0.18.x) and `.ch` (the pre-rename Chronos extension) are still accepted with a deprecation warning.
 - A program is a list of `struct` definitions, global `let` declarations, and functions. Hosted programs start at `fn main() -> i32`, whose return value becomes the process exit code (modulo 256).
 - `copihue file.lap [-o out]` writes `output.asm` (NASM), assembles it with `nasm -f elf64`, and links it with `ld` into a static ELF64 executable (default `a.out`). There is no libc.
-- `-S` writes assembly only. `--freestanding` writes assembly for bare metal (see below). `-O0`/`-O1`/`-O2` select the optimization level. `--flat ADDR` builds a raw bare-metal binary that starts at `fn _start` (see below).
+- `-S` writes assembly only. `--freestanding` writes assembly for bare metal (see below). `-O0`/`-O1`/`-O2` select the optimization level. `--flat ADDR` builds a raw bare-metal binary that starts at `fn _start` (see below). `--boot` builds a 512-byte sector at `0x7C00` (see below). `--flat` and `--boot` cannot be combined.
 - On error the compiler prints `file:line:col: error: message`, followed by the source line and a caret, and exits with status 1.
 
 ## Lexical structure
@@ -16,7 +16,7 @@ Planned features are in the README roadmap.
 - Comments: `// to end of line`.
 - Identifiers: `[A-Za-z_][A-Za-z0-9_]*`.
 - Keywords: `fn let mut if else while for return struct`. `break` and `continue` are statements.
-- `packed`, `interrupt`, `syscall`, and `volatile` are contextual words, not keywords. `packed struct`, `interrupt fn`, `syscall fn`, `let volatile`, and `*volatile` use them. A function or variable may still be named `syscall` or `volatile`.
+- `packed`, `interrupt`, `syscall`, `volatile`, `bits`, `naked`, and `data` are contextual words, not keywords. `packed struct`, `interrupt fn`, `syscall fn`, `let volatile`, `*volatile`, `bits 16 naked fn`, and `data name { ... }` use them. A function or variable may still be named `syscall`, `volatile`, or `data`.
 - Integer literals: decimal `42`, hex `0xFF`, binary `0b1010`, with optional `_` separators (`1_000_000`).
 - Character literals: `'A'`, and escapes `'\n' '\t' '\r' '\0' '\\' '\''`. Their value is an integer.
 - String literals: `"..."` with the escapes `\n \t \r \0 \\ \" \'`. A string literal's value is a pointer to NUL-terminated bytes in the data section.
@@ -116,6 +116,50 @@ syscall fn sys_write(nr: i64, a1: i64, a2: i64, a3: i64, a4: i64, a5: i64) -> i6
 
 `syscall fn` is a `syscall` entry. Arguments arrive in the Linux convention and are presented to the body as ordinary parameters: `nr` from `rax`, then `rdi`, `rsi`, `rdx`, `r10`, `r8`, `r9`. At most seven parameters. The prologue switches to the stack last stored by `set_syscall_stack(top)` (the top must be 16-byte aligned; the kernel sets this before any entry) and the epilogue returns with `sysret`. The value in `rax` is the return value. The compiler does not write `STAR`, `LSTAR`, or `EFER`; do that with `wrmsr`.
 
+### Naked functions and `bits`
+
+```copihue
+bits 16 naked fn real_mode() { asm("xor ax, ax"); }
+naked bits 32 fn protected() { hlt(); }
+naked fn stub64() { cli(); }
+```
+
+`bits` and `naked` stand in either order immediately before `fn`. The default, a function with neither word, is 64-bit and emits no `bits` directive, so existing assembly stays the same.
+
+`naked` emits no prologue and no `leave`. `return`, and falling off the end, are a single `ret` (no `xor rax, rax`). A naked function takes no parameters and cannot contain `let`. It cannot also be `interrupt` or `syscall`. Those two stay 64-bit.
+
+`bits 16` and `bits 32` require `naked`. The ordinary frame uses `rbp` and `rax`, which nasm rejects in 16-bit mode (`instruction not supported in 16-bit mode`). After a 16-bit or 32-bit function the compiler emits `bits 64`, so the next function is 64-bit again. `bits 64` emits that one directive before the function and no extra restore after it.
+
+### Raw data
+
+```copihue
+data gdt {
+    dq 0;
+    code32:
+    dw 0xFFFF;
+    dw 0;
+    db 0;
+    db 0x9A;
+    db 0xCF;
+    db 0;
+    align 8;
+    times 2 dd 0;
+}
+
+data banner { db "Copihue", 13, 10, 0; }
+```
+
+`data name { ... }` emits the label and the directives in the text stream. Functions and data blocks stay in source order. In `--flat` and `--boot`, `fn _start` is moved to the front and the rest follows source order, so a `data` block written above `_start` lands between `_start` and the next function. Directives end with `;`.
+
+| Directive | Emitted |
+|---|---|
+| `db`, `dw`, `dd`, `dq` | that NASM directive. A string expands to decimal bytes, so a `;` inside the text is data. Escapes are `\n \t \r \0 \\ \" \'`. An integer literal is copied as written (`0xFFFF` stays hex). A name is a label (`dd gdt`) |
+| `times N db\|dw\|dd\|dq value` | `times N dir value` |
+| `align N` | `align N, db 0`. The fill is zero, including inside a code section, so a GDT is not padded with `NOP` |
+| `label:` | a NASM label |
+
+`asm("...")` still splits on `;`. It cannot express `db "text"`. Use a `data` block for a GDT, a disk address packet, or a message.
+
 ## Statements
 
 `let`, assignment (`x = e`, `a[i] = e`, `s.f = e`, `p->f = e`), compound assignment (`+= -= *= /= %=`), `x++`, `x--`,
@@ -171,9 +215,13 @@ Hosted built-ins are a compile error. These built-ins are available:
 | `wrmsr(msr, value)` | writes a 64-bit MSR |
 | `set_syscall_stack(top)` | stack pointer `syscall fn` switches to. Call it with a 16-byte-aligned top before any syscall entry |
 | `asm("instr; instr")` | inline NASM. `;` separates instructions; the string must be a literal |
+| `ljmp(selector, label)` | `jmp sel:name`. `selector` is an integer literal and `label` is a name, not `&label`. `ljmp(0x08, pm)` emits `jmp 8:pm` |
+| `int(n)` | `int N`, one integer literal. `int(0x10)` emits `int 16`, which encodes `CD 10` |
 | `bss_start()`, `bss_end()` | address of the first / one past the last zero-initialized global (`--flat` only) |
 
-`read_cr*` and `write_cr*` are a compile error without `--freestanding` or `--flat`. The regression suite assembles them with `nasm` and does not execute them: those instructions fault in Linux user mode, the same way `iretq` and `sysret` do.
+`read_cr*` and `write_cr*` are a compile error without `--freestanding` or `--flat`. `ljmp` and `int` are a compile error without `--freestanding`, `--flat`, or `--boot`. A non-literal `int(n)` is `int(n) takes one integer literal`. The regression suite assembles the control-register moves with `nasm` and does not execute them: those instructions fault in Linux user mode, the same way `iretq` and `sysret` do.
+
+`read_cr*` and `write_cr*` emit `mov rax, crN` and `mov crN, rax`. That form is 64-bit. In `bits 16` or `bits 32`, use `asm`, for example `asm("mov eax, cr0")` and `asm("mov cr0, eax")`.
 
 Memory-mapped I/O uses typed pointers. A device register should be `*volatile`, so the access is not removed:
 
@@ -189,11 +237,30 @@ while (dev[1] == 0) { pause(); }
 
 `tests/flat/min_kernel.lap` is one such image, loaded at `0x10000`. Its IDT gates use code selector `0x18`, the 64-bit code segment of the AtomicOS bootloader GDT. Selector `0x08` on that loader is a 32-bit code segment; a gate that names it leaves long mode and the image hangs. The binary assumes that GDT is already loaded. It is not a generic bootable kernel. The image also indexes a local array, copies a packed struct, writes a `*volatile u32`, and reads CR2. Indexing a local array in `--freestanding` or `--flat` does not insert the hosted bounds trap.
 
+## Boot sectors
+
+`copihue --boot -o boot.bin file.lap` implies `--freestanding` and `org 0x7C00`. The output file is the sector image (`nasm -f bin`), not assembly and not an ELF. `-S` writes the assembly instead.
+
+The file starts with `org 0x7C00` and the body. There is no leading `bits 64` and no `.data` or `.bss` section in front of the code: either one would move the entry off the first byte or assemble the prologue in the wrong mode. `_start` is emitted first and must be `bits 16 naked fn`. A missing `_start` is `--boot needs a function named _start (the entry point)`. A `_start` that is not `bits 16 naked fn` is `--boot _start must be 'bits 16 naked fn' (real mode, no 64-bit frame)`.
+
+`data` blocks stay in source order after `_start`, still in the text stream, so labels such as `dd gdt` resolve. The compiler then appends:
+
+```
+times 510-($-$$) db 0
+dw 0xAA55
+```
+
+Those two lines are emitted after `bits 64`. `dw` does not depend on the bit mode. Leaving them under `bits 16`, next to a 64-bit prologue, is what makes nasm report `instruction not supported in 16-bit mode`. The code and the data must fit in 510 bytes; the image is then exactly 512 bytes and the last two are `55 aa`. An uninitialized `let` global is not copied into the sector. Put constants in `data`.
+
+`tests/boot/boot_sector.lap` prints `Copihue` with BIOS teletype (`int(0x10)`, AH=`0x0E`) and far-jumps to a 32-bit stub that writes `COPIHUE` to port `0x3F8`. The sector installs its own GDT: selector `0x08` is 32-bit code and `0x10` is data, both base 0. That is not the AtomicOS loader GDT (`0x18` is 64-bit code there). The far jump is the 16-bit form `EA ip16 sel`; with `org 0x7C00` the IP is the label's low 16 bits, and the protected-mode segment has base 0, so execution continues at that linear address. The example does not enter long mode. A page table is larger than the free space in the sector; it has to be written at some other physical address. `bits 64 naked fn` is the form of the long-mode stub.
+
+The regression suite compares the hexdump at `-O0` and `-O2`. When `qemu-system-x86_64` is on `PATH`, it boots the image (`-display none -boot a`, floppy, raw) and requires `COPIHUE` on COM1. That check is skipped, not failed, when QEMU is absent. CI installs the `qemu-system-x86` package.
+
 ## Known limitations
 
 - Integer arithmetic is 64-bit two's complement and wraps. Narrow types only affect memory accesses.
 - Direct calls check the function name and the argument count. Assignments, argument types, and indirect calls are not type-checked. There is no bounds checking on pointer indexing.
 - Ordinary struct fields still occupy 8 bytes each. Only `packed struct` uses the real width of `u8`/`u16`/`u32`. There is no padding or alignment attribute beyond packed-or-not. Struct assignment copies the whole value; it does not assign field by field in the source. Nested fields (`r.b.x`) use the real offset.
 - Indexing a local array in hosted mode inserts a bounds check that exits the process. `--freestanding` and `--flat` omit that check. Pointer indexing is never checked.
-- There are no modules or imports, no relocatable objects, and no 16-bit or 32-bit codegen. A program is a single file. `interrupt fn`, `syscall fn`, and the `read_cr*` / `write_cr*` builtins can be assembled; running `iretq`, `sysret`, or a move to or from a control register requires a CPU already in ring 0, which the hosted test suite does not do.
+- There are no modules or imports and no relocatable objects. A program is a single file. `bits 16` and `bits 32` exist only as naked functions: there is no 16-bit or 32-bit frame, and `read_cr*` / `write_cr*` are not valid in those modes. `interrupt fn`, `syscall fn`, and the control-register builtins can be assembled; running `iretq`, `sysret`, or a move to or from a control register requires a CPU already in ring 0, which the hosted test suite does not do. The boot-sector test does execute real mode and protected mode under QEMU when QEMU is installed.
 - `syscall fn` does not program the syscall MSRs or a TSS. `volatile` is per access, as described above. It is not a memory model, and `let volatile` on a local scalar does not change codegen.

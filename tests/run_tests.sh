@@ -41,7 +41,7 @@ check() {  # $1 = name, $2 = golden file, $3 = actual file
   else fail=$((fail+1)); failed+=("$1"); echo "FAIL $1"; [ -f "$2" ] && diff "$2" "$3" | head -10; fi
 }
 
-for src in $(ls tests/*.lap tests/*/*.lap examples/*.lap | grep -v -e '^tests/errors/' -e '^tests/freestanding/' -e "^tests/flat/"); do
+for src in $(ls tests/*.lap tests/*/*.lap examples/*.lap | grep -v -e '^tests/errors/' -e '^tests/freestanding/' -e "^tests/flat/" -e "^tests/boot/"); do
   case "$SKIP" in *" $src "*) continue ;; esac
   golden=tests/expected/${src%.lap}.out
   run_program "$src" -O0 > "$WORK/o0"
@@ -100,6 +100,34 @@ for src in tests/flat/*.lap; do
   fi
   od -An -tx1 -v "$WORK/flat.bin" > "$WORK/flat.hex"
   check "$src" "tests/expected/flat/$name.hex" "$WORK/flat.hex"
+done
+
+# 5. Boot sectors: tests/boot/*.lap build with --boot into a 512-byte image
+#    (org 0x7C00, signature 0xAA55). -O0 and -O2 must match. When QEMU is
+#    installed, the image is booted from the floppy and COM1 must show COPIHUE.
+for src in tests/boot/*.lap; do
+  name=$(basename "$src" .lap)
+  if ! ( cd "$WORK" && "$CC" --boot -o boot.bin "$ROOT/$src" 2>err.txt && "$CC" -O2 --boot -o boot2.bin "$ROOT/$src" 2>>err.txt ); then
+    fail=$((fail+1)); failed+=("$src"); echo "FAIL $src:"; cat "$WORK/err.txt"; continue
+  fi
+  if ! cmp -s "$WORK/boot.bin" "$WORK/boot2.bin"; then
+    fail=$((fail+1)); failed+=("$src (-O0 vs -O2)"); echo "FAIL $src: -O0 and -O2 images differ"; continue
+  fi
+  if [ "$(wc -c < "$WORK/boot.bin")" -ne 512 ] || [ "$(tail -c 2 "$WORK/boot.bin" | od -An -tx1 | tr -d ' \n')" != "55aa" ]; then
+    fail=$((fail+1)); failed+=("$src"); echo "FAIL $src: not a 512-byte sector with signature 55 aa"; continue
+  fi
+  od -An -tx1 -v "$WORK/boot.bin" > "$WORK/boot.hex"
+  check "$src" "tests/expected/boot/$name.hex" "$WORK/boot.hex"
+  if command -v qemu-system-x86_64 >/dev/null 2>&1; then
+    rm -f "$WORK/serial.txt"
+    timeout 8 qemu-system-x86_64 -display none -boot a \
+      -drive file="$WORK/boot.bin",format=raw,if=floppy,index=0 \
+      -serial file:"$WORK/serial.txt" </dev/null >/dev/null 2>&1 || true
+    if ! grep -q COPIHUE "$WORK/serial.txt"; then
+      fail=$((fail+1)); failed+=("$src qemu"); echo "FAIL $src: QEMU serial did not contain COPIHUE"; od -An -tx1c "$WORK/serial.txt" | head; continue
+    fi
+    pass=$((pass+1))
+  fi
 done
 
 rm -f "$CC"

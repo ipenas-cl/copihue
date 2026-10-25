@@ -1,0 +1,23 @@
+section .data
+section .text
+msg:
+    db 104, 105, 0
+align 4, db 0
+times 2 dw 0
+mark:
+    dd msg
+bits 16
+bios_putc:
+    mov ah, 0x0E
+    int 16
+    jmp 8:prot
+    ret
+bits 64
+bits 32
+prot:
+    hlt
+    ret
+bits 64
+stub64:
+    cli
+    ret

@@ -1,0 +1,4 @@
+tests/errors/boot_start.lap:2:4: error: --boot _start must be 'bits 16 naked fn' (real mode, no 64-bit frame)
+      2 | fn _start() -> i64 {
+        |    ^
+1 error, compilation failed

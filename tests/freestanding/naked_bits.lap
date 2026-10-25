@@ -1,0 +1,25 @@
+// also-o2
+// naked drops the 64-bit frame. bits 16/32 wrap the body in `bits N` / `bits 64`.
+// int takes a literal. ljmp takes a selector literal and a label.
+
+data msg {
+    db "hi", 0;
+    align 4;
+    times 2 dw 0;
+    mark:
+    dd msg;
+}
+
+bits 16 naked fn bios_putc() {
+    asm("mov ah, 0x0E");
+    int(0x10);
+    ljmp(0x08, prot);
+}
+
+bits 32 naked fn prot() {
+    hlt();
+}
+
+naked fn stub64() {
+    cli();
+}

@@ -1,0 +1,4 @@
+tests/errors/ljmp_hosted.lap:2:5: error: ljmp() is only available with --freestanding, --flat, or --boot
+      2 |     ljmp(0x08, main);
+        |     ^
+1 error, compilation failed

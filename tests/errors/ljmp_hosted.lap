@@ -1,0 +1,4 @@
+fn main() -> i32 {
+    ljmp(0x08, main);
+    return 0;
+}
