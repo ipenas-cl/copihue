@@ -12,7 +12,7 @@ fn main() -> i64 {
     }
 
     print("✅ Allocated at: ");
-    print_int(ptr);
+    print_int(ptr as i64);
     println("");
 
     // Write values

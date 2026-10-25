@@ -83,9 +83,10 @@ The full language reference is in [docs/REFERENCE.md](docs/REFERENCE.md).
   `lidt`/`lgdt`/`invlpg` (any address expression, including a variable), `rdmsr`/`wrmsr`, `ltr`, `iretq`, `sysretq`,
   `read_cr0`/`read_cr2`/`read_cr3`/`read_cr4`, `write_cr0`/`write_cr3`/`write_cr4`,
   `set_syscall_stack`, `ljmp`, `int`, and inline `asm("...")`. The control-register builtins, `ljmp`, and `int` are a compile error in hosted mode. `read_cr*` / `write_cr*` are 64-bit forms; 16-bit code uses `asm("mov eax, cr0")`
+- `as` converts on purpose (`p as *u8`, `n as i64`, `300 as u8`). It is not a keyword. A pointer or 64-bit cast emits no instruction; a cast to 8, 16, or 32 bits truncates
 - Diagnostics in the form `file:line:col: error: ...`, with the source line and a caret. They cover syntax errors,
   undeclared variables, indexing a non-array, unknown struct fields, unknown functions, a call with the wrong
-  number of arguments, an interrupt function with the wrong shape, bad escapes, and hosted-only calls in freestanding code
+  number or type of arguments, a pointer where an integer is required (and the reverse) without `as`, two different pointer types, a `return` that does not match `->`, an integer literal that does not fit, an interrupt function with the wrong shape, bad escapes, and hosted-only calls in freestanding code
 - Optimizations: `-O1` constant folding; `-O2` adds strength reduction and, in hosted code, keeps up to four scalar locals in registers and evaluates a simple right-hand side without `push`/`pop`. `-O0`, `--freestanding`, `--flat`, and `--boot` keep the stack-machine code. Every test must give identical output at `-O0` and `-O2`
 
 ### Tested
@@ -94,8 +95,8 @@ The full language reference is in [docs/REFERENCE.md](docs/REFERENCE.md).
 
 | Suite | What it checks |
 |---|---|
-| 142 test programs + 18 examples | compiled at `-O0` and `-O2`, run, and stdout + exit code compared to golden files in `tests/expected/` |
-| 26 error tests | the compiler rejects the program with the exact expected message |
+| 143 test programs + 18 examples | compiled at `-O0` and `-O2`, run, and stdout + exit code compared to golden files in `tests/expected/` |
+| 33 error tests | the compiler rejects the program with the exact expected message |
 | 14 freestanding tests | `--freestanding` output has no `_start`/syscalls and assembles; the instruction stream is golden. Six of them also require the same stream at `-O2` |
 | 4 flat-binary tests | `--flat` puts `_start` at offset 0; the raw image matches a golden hexdump. Two of them also require the same image at `-O2` |
 | 1 boot sector | `--boot` at `-O0` and `-O2` is the same 512-byte image ending in `55 aa`, compared to a golden hexdump. If `qemu-system-x86_64` is installed, the image is booted and COM1 must contain `COPIHUE`. CI installs QEMU; without it the hexdump test still runs |
@@ -104,10 +105,10 @@ The full language reference is in [docs/REFERENCE.md](docs/REFERENCE.md).
 
 ### Known limitations
 
-- Ordinary struct fields still occupy 8 bytes each. Only `packed struct` uses the real width of `u8`/`u16`/`u32`. There is no padding or alignment attribute beyond packed-or-not. `a = b` copies the whole struct; it does not check anything beyond the struct type name.
-- Call checking is the function name and the argument count. Argument types, return types, assignment types, and `const` are not checked. A return type of `*u8` or `[u8; 4]` parses in hosted, freestanding, and flat code; the bits still come back in `rax`. Function pointers are integer addresses, not a typed `fn` type, and an indirect call is not arity-checked.
+- Ordinary struct fields still occupy 8 bytes each. Only `packed struct` uses the real width of `u8`/`u16`/`u32`. There is no padding or alignment attribute beyond packed-or-not. `a = b` copies the whole struct; it does not check anything beyond the struct type name. A store into a narrow field truncates the value first.
+- Direct calls check the name, the argument count, and the argument types. An assignment and an integer or pointer `return` are checked against the declared type. `as` is the explicit conversion. An integer literal may initialize a pointer (`0xB8000`); an integer variable may not, without `as`. `*i8` and `*u8` match. Indirect calls, comparisons, array and struct returns, and `const` are not checked. The bits still come back in `rax`. Function pointers are integer addresses, not a typed `fn` type.
 - Locals are block-scoped. Two `let`s of the same name in sibling blocks are different slots, so a use reads the one that is in scope. The stack slot is not reused after the block ends.
-- Integer arithmetic is always 64-bit and overflow wraps. Narrow types only change loads and stores. There are no bounds checks on pointer indexing.
+- Integer arithmetic is always 64-bit and overflow wraps. Storing into an `i8`/`u8`/`i16`/`u16`/`i32`/`u32` variable or field truncates: unsigned keeps the low bits, signed sign-extends. A literal that does not fit is a compile error. There are no bounds checks on pointer indexing.
 - A kernel is still one translation unit: there are no modules and no relocatable ELF objects. `bits 16` and `bits 32` are naked functions only: there is no 16-bit frame, and the `read_cr*` / `write_cr*` builtins are the 64-bit `mov rax, crN` form. `tests/boot/boot_sector.lap` reaches protected mode. It does not enter long mode; a page table does not fit as static data in 512 bytes.
 - `syscall fn` switches stacks with `set_syscall_stack` and returns with `o64 sysret` (sysretq). It does not program `STAR`, `LSTAR`, `SFMASK`, or `EFER`, and it does not emit `swapgs`. `TSS.rsp0` is a packed-struct store the kernel performs; the compiler does not build the GDT descriptor. The `syscall` instruction does not read the TSS.
 - `volatile` on a global scalar, a `*volatile T` pointee, or a struct field is reloaded and stored on every use, including inside a loop at `-O2`, at the access's real width. It is not a memory model: there are no atomics. `let volatile` on a local scalar keeps that local in its stack slot at `-O2` (a non-volatile scalar may live in a register). At `-O0` and in freestanding code every local is on the stack, so the keyword does not change those. `let volatile` on a struct or an array is a compile error.

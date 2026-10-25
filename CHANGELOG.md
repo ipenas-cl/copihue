@@ -2,6 +2,19 @@
 
 Todos los cambios importantes del proyecto.
 
+## [0.24.0] - 2026-10-25
+
+### Added
+- Assignments, direct-call arguments, and `return` check integer and pointer types. The message is `expected T, found U`, `argument N of 'f': expected T, found U`, or `return value: expected T, found U`, with the source line and a caret. The argument count was already checked (`function 'f' takes N argument(s), not M`).
+- `as` is an explicit conversion and is not a keyword. `&e as *u8` is `(&e) as *u8`. `1 + 2 as u8` is `1 + (2 as u8)`. A cast to a pointer or to `i64`/`u64` emits no instruction. A cast to 8, 16, or 32 bits truncates (unsigned zero-extend, signed sign-extend): `300 as u8` is 44 and `200 as i8` is -56.
+- A literal that does not fit an 8, 16, or 32-bit destination is `expected u8, found integer literal 300` (and the same form for the other widths). A non-literal store into that width truncates. A narrow parameter is truncated when it is received.
+
+### Changed
+- An integer literal still converts to any pointer, so `let vga: *u16 = 0xB8000` keeps compiling. An integer variable does not. `*i8` and `*u8` match; `*u8` and `*Point` do not. `mut` and `volatile` are ignored when comparing pointers. `malloc`, string literals, and `bss_start()` / `bss_end()` keep the types existing kernels use. `syscall` / `syscall6` arguments stay raw register values.
+- Arithmetic operators are still 64-bit. The truncation is at the store, at a narrow parameter, and at `as`. Scalar slots are still 8 bytes; the value is masked or sign-extended before the qword store, or before it is written to `r12`–`r15` when hosted `-O2` keeps that local in a register. Packed, volatile, pointer, and array stores already write the real width.
+- Indirect calls, comparisons, and array or struct return types are not checked.
+- Language version is 0.24.0.
+
 ## [0.23.1] - 2026-10-25
 
 ### Added

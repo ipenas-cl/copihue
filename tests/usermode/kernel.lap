@@ -149,8 +149,8 @@ naked fn user_code() {
 }
 
 fn kmain() -> i64 {
-    zero_bytes(&tss, 104);
-    zero_bytes(&idt, 2064);
+    zero_bytes(&tss as *u8, 104);
+    zero_bytes(&idt as *u8, 2064);
     which = 0;
     tss.rsp0 = 0x7000;
     tss.ist1 = 0x6000;
@@ -174,7 +174,7 @@ fn kmain() -> i64 {
     set_gate(128, &user_int);
     let idtr: DescPtr;
     idtr.limit = 2063;
-    idtr.base = idt;
+    idtr.base = idt as u64;
     lidt(&idtr);
     asm("push 0x1B");
     asm("push 0x5000");
