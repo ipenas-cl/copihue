@@ -16,7 +16,7 @@
 
 // ==== NAMING (single place to change when the language is renamed) ====
 #define LANG_NAME     "Copihue"
-#define LANG_VERSION  "0.28.0"
+#define LANG_VERSION  "0.28.1"
 #define COMPILER_BIN  "copihue"
 #define SRC_EXT       ".lap"   /* Lapageria rosea, the copihue */
 #define OLD_SRC_EXT   ".cph"   /* v0.18.x extension, still accepted with a warning */
@@ -6083,6 +6083,8 @@ static int mem_operand(AstNode* addr, char* buf, int n) {
     return 0;
 }
 
+static int emit_imm_store(Codegen* cg, AstNode* value, const char* mem, int el);
+
 static void emit_acc_store(Codegen* cg, const char* mem, int size, int line, int col) {
     if (size >= 8 && legacy_bits()) {
         diag_error(line, col, "an 8-byte store is not available in bits %d", g_fn_bits);
@@ -6125,8 +6127,12 @@ static void gen_mem_store(Codegen* cg, AstNode* n) {
     }
     char mem[80];
     if (addr && mem_operand(addr, mem, sizeof mem)) {
-        if (val) gen_expr(cg, val);
-        emit_acc_store(cg, mem, sz, n->line, n->col);
+        // `*(addr) = 0` must not `mov rax, 0`. The syscall result lives in rax
+        // until the next expression that needs the accumulator.
+        if (!val || !emit_imm_store(cg, val, mem, sz)) {
+            if (val) gen_expr(cg, val);
+            emit_acc_store(cg, mem, sz, n->line, n->col);
+        }
         return;
     }
     if (addr) gen_expr(cg, addr);
@@ -6181,6 +6187,9 @@ static int imm_store_enc(int elem, long long v, long long* enc) {
 
 static int emit_imm_store(Codegen* cg, AstNode* value, const char* mem, int el) {
     long long v, enc;
+    // bits 16/32 have no 8-byte store. Leave that to emit_acc_store so the
+    // error stays `an 8-byte store is not available in bits 16`.
+    if (el >= 8 && legacy_bits()) return 0;
     if (!value || value->type != AST_NUMBER || !parse_i64(value->value, &v)) return 0;
     if (!imm_store_enc(el, v, &enc)) return 0;
     if (el == 1) emit(cg, "    mov byte [%s], %lld\n", mem, enc);
@@ -8614,6 +8623,101 @@ static int try_hosted_rewrite(Codegen* cg, AstNode* n) {
     return 0;
 }
 
+// if/while conditions jump on the flags. A comparison used as a value still
+// materializes 0/1 in the accumulator; a branch must not, or a syscall
+// result sitting in rax is gone before the next statement reads it.
+static void emit_acc_jcc(Codegen* cg, int lab, int jump_if_zero) {
+    if (legacy_bits()) emit(cg, "    test eax, eax\n");
+    else emit(cg, "    test rax, rax\n");
+    emit(cg, "    %s .L%d\n", jump_if_zero ? "jz" : "jnz", lab);
+}
+
+static void emit_cmp_acc(Codegen* cg, AstNode* n) {
+    gen_expr(cg, n->children[0]);
+    if (legacy_bits()) {
+        emit(cg, "    push eax\n    push edx\n");
+        gen_expr(cg, n->children[1]);
+        emit(cg, "    mov ebx, eax\n    pop edx\n    pop eax\n");
+        emit(cg, "    cmp eax, ebx\n");
+    } else if (optimization_level >= 2 && !g_freestanding && can_emit_rbx(cg, n->children[1])) {
+        emit_rbx(cg, n->children[1]);
+        emit(cg, "    cmp rax, rbx\n");
+    } else {
+        emit(cg, "    push rax\n");
+        gen_expr(cg, n->children[1]);
+        emit(cg, "    mov rbx, rax\n    pop rax\n");
+        emit(cg, "    cmp rax, rbx\n");
+    }
+}
+
+static int cond_is_not(AstNode* n) {
+    return n && n->type == AST_UNARY && n->op && n->op[0] == '!' && !n->op[1] &&
+        n->child_count > 0;
+}
+
+static void branch_fail(Codegen* cg, AstNode* n, int fail_lab);
+static void branch_succeed(Codegen* cg, AstNode* n, int ok_lab);
+
+static int emit_cmp_jcc(Codegen* cg, AstNode* n, int lab, int succeed) {
+    const char* jcc;
+    if (!n || n->type != AST_COMPARE || !n->op || n->child_count != 2) return 0;
+    jcc = succeed ? jcc_when_true(n->op, 0) : cmp_fail_jcc(n->op);
+    if (!jcc) return 0;
+    emit_cmp_acc(cg, n);
+    emit(cg, "    %s .L%d\n", jcc, lab);
+    return 1;
+}
+
+static void branch_fail(Codegen* cg, AstNode* n, int fail_lab) {
+    if (!n) return;
+    if (cond_is_not(n)) {
+        branch_succeed(cg, n->children[0], fail_lab);
+        return;
+    }
+    if (emit_cmp_jcc(cg, n, fail_lab, 0)) return;
+    if (n->type == AST_LOGICAL && n->op && n->child_count == 2) {
+        if (!strcmp(n->op, "&&")) {
+            branch_fail(cg, n->children[0], fail_lab);
+            branch_fail(cg, n->children[1], fail_lab);
+            return;
+        }
+        if (!strcmp(n->op, "||")) {
+            int ok = new_label(cg);
+            branch_succeed(cg, n->children[0], ok);
+            branch_fail(cg, n->children[1], fail_lab);
+            emit(cg, ".L%d:\n", ok);
+            return;
+        }
+    }
+    gen_expr(cg, n);
+    emit_acc_jcc(cg, fail_lab, 1);
+}
+
+static void branch_succeed(Codegen* cg, AstNode* n, int ok_lab) {
+    if (!n) return;
+    if (cond_is_not(n)) {
+        branch_fail(cg, n->children[0], ok_lab);
+        return;
+    }
+    if (emit_cmp_jcc(cg, n, ok_lab, 1)) return;
+    if (n->type == AST_LOGICAL && n->op && n->child_count == 2) {
+        if (!strcmp(n->op, "||")) {
+            branch_succeed(cg, n->children[0], ok_lab);
+            branch_succeed(cg, n->children[1], ok_lab);
+            return;
+        }
+        if (!strcmp(n->op, "&&")) {
+            int fail = new_label(cg);
+            branch_fail(cg, n->children[0], fail);
+            branch_succeed(cg, n->children[1], ok_lab);
+            emit(cg, ".L%d:\n", fail);
+            return;
+        }
+    }
+    gen_expr(cg, n);
+    emit_acc_jcc(cg, ok_lab, 0);
+}
+
 void gen_stmt(Codegen* cg, AstNode* n) {
     if (!n) return;  // Null safety
     int keep = g_fwd_hold;
@@ -8851,9 +8955,7 @@ void gen_stmt(Codegen* cg, AstNode* n) {
                 gen_stmt(cg, n->children[2]);
             emit(cg, ".L%d:\n", end_lab);
         } else {
-            gen_expr(cg, n->children[0]);
-            if (legacy_bits()) emit(cg, "    test eax, eax\n    jz .L%d\n", else_lab);
-            else emit(cg, "    test rax, rax\n    jz .L%d\n", else_lab);
+            branch_fail(cg, n->children[0], else_lab);
             gen_stmt(cg, n->children[1]);
             emit(cg, "    jmp .L%d\n.L%d:\n", end_lab, else_lab);
             if (n->child_count > 2)
@@ -8866,17 +8968,13 @@ void gen_stmt(Codegen* cg, AstNode* n) {
         int cont_lab = new_label(cg);
         emit(cg, ".L%d:\n", start_lab);
         int branched = 0;
-        if (legacy_bits()) {
-            gen_expr(cg, n->children[0]);
-            emit(cg, "    test eax, eax\n    jz .L%d\n", end_lab);
-        } else if (o2_hosted() && can_branch_cond(cg, n->children[0])) {
+        if (!legacy_bits() && o2_hosted() && can_branch_cond(cg, n->children[0])) {
             g_fwd_ok = 0;
             emit_cond_fail(cg, n->children[0], end_lab);
             g_nonneg_reg = NULL;
             branched = 1;
         } else {
-            gen_expr(cg, n->children[0]);
-            emit(cg, "    test rax, rax\n    jz .L%d\n", end_lab);
+            branch_fail(cg, n->children[0], end_lab);
         }
         if (g_loop_depth >= MAX_LOOP_DEPTH) { diag_error(n->line, n->col, "loops nested too deeply"); return; }
         g_loop_break[g_loop_depth] = end_lab;

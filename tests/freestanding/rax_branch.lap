@@ -1,0 +1,25 @@
+// also-o2
+// A syscall result left in rax survives the while/if that inspects it.
+// The comparison jumps on the flags (no sete / movzx into rax). A fitting
+// immediate store does not move the constant through rax. `let r = syscall`
+// writes the slot before the next statement, so a later store and if reload r.
+
+let bias: i64 = 1;
+
+naked fn probe() {
+    rax = 8;
+    syscall();
+    while (rax == 0) {
+        rax = 8;
+        syscall();
+    }
+    *(4200200 as *u8) = 0;
+    if (rax == 0 - bias) { rdi = rax; }
+}
+
+naked fn saved() -> i64 {
+    let r = syscall(8);
+    *(4200200 as *u8) = 0;
+    if (r == 0 - bias) { return 1; }
+    return r;
+}

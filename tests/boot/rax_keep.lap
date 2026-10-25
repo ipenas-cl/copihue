@@ -1,0 +1,26 @@
+// if/while must not replace ax with 0 or 1, and `*(addr) = 0` must not
+// either. The serial bytes are taken from ax after those operations.
+// QEMU checks COPIHUE. -O0 and -O2 are the same image.
+
+bits 16 naked fn _start() {
+    ax = 67;
+    if (ax == 0) { ax = 1; }
+    *(32768 as *u8) = ax;
+    outb(1016, *(32768 as *u8));
+
+    ax = 79;
+    while (ax == 0) { ax = 1; }
+    *(32768 as *u8) = ax;
+    outb(1016, *(32768 as *u8));
+
+    ax = 80;
+    *(32768 as *u8) = 0;
+    *(32769 as *u8) = ax;
+    outb(1016, *(32769 as *u8));
+
+    outb(1016, 73);
+    outb(1016, 72);
+    outb(1016, 85);
+    outb(1016, 69);
+    while (1) { hlt(); }
+}
