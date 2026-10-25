@@ -1,4 +1,4 @@
-# Copihue Language Reference (v0.26.3)
+# Copihue Language Reference (v0.27.1)
 
 This document describes the language that `copihue` accepts today. Anything not listed here is not supported.
 Planned features are in the README roadmap.
@@ -34,11 +34,12 @@ Planned features are in the README roadmap.
 | `i64`, `u64` | 8 bytes |
 | `*T` | pointer, 8 bytes |
 | `[T; N]` | fixed array of N elements of T |
-| `struct Name` | fields laid out in order, 8 bytes per scalar field, nested structs embedded |
-| `packed struct Name` | fields laid out at their real size, with no padding |
+| `struct Name` | fields at their real width, naturally aligned, nested structs embedded |
+| `packed struct Name` | fields at their real size, with no padding |
+| `[T; N]` as a field | `N * sizeof(T)` bytes, packed or not |
 
-All arithmetic is done in 64-bit registers. The element type affects loads and stores through arrays and pointers:
-loads from unsigned types zero-extend, and stores truncate. Scalar locals and globals always occupy 8 bytes.
+All arithmetic is done in 64-bit registers. The element type affects loads and stores through arrays, pointers, and struct fields:
+loads from unsigned types zero-extend, signed narrow loads sign-extend, and stores truncate to the field's width. Scalar locals and globals always occupy 8 bytes. `sizeof` reports the type's width, not that slot.
 
 ## Declarations
 
@@ -72,11 +73,28 @@ packed struct IdtEntry {
 }
 ```
 
-Scalar fields use 1, 2, 4, or 8 bytes and the next field starts immediately after. A pointer field is 8 bytes. A nested struct is embedded at its own size. An x86-64 interrupt gate written this way is 16 bytes. Ordinary `struct` layout is unchanged (8 bytes per scalar field).
+Scalar fields use 1, 2, 4, or 8 bytes and the next field starts immediately after. A pointer field is 8 bytes. A nested struct is embedded at its own size. An x86-64 interrupt gate written this way is 16 bytes. A 64-bit TSS stays packed: natural alignment would put `rsp0` at offset 8, and the CPU reads it at offset 4.
 
 A global array of structs can be indexed and its fields assigned (`idt[n].sel = 8`). Packed stores use the field's width, so a `u8` store does not overwrite the next field. Uninitialized global structs and arrays of structs are reserved with `resb` for their real size.
 
 ### Struct assignment
+
+An ordinary struct uses the same field widths and inserts padding so each field is naturally aligned: 1 for `u8`/`i8`, 2 for `u16`/`i16`, 4 for `u32`/`i32`, 8 for `u64`/`i64` and every pointer. An array field aligns as its element does. The struct's alignment is the strictest of its fields, and the size is rounded up to that alignment. `struct Pad { a: u8, b: u32, c: u16, d: u64 }` is 24 bytes, with `b` at 4, `c` at 8, and `d` at 16. Packed structs do not get this padding. The rule is the C one, because a `u32` device register should not be forced to 8 bytes, and a following `u64` should still be aligned. Hardware records opt out with `packed`.
+
+A field may be `[T; N]`. It occupies `N * sizeof(T)` in both layouts. `T` is an integer, a pointer, or a struct that is already defined. `e.blocks[i] = 4` stores one element at `offsetof(e.blocks) + i * sizeof(T)`. A packed directory entry
+
+```copihue
+packed struct FsEnt {
+    name: [u8; 16],
+    size: u32,
+    nblocks: u32,
+    blocks: [u32; 8]
+}
+```
+
+is 56 bytes: `name` at 0, `size` at 16, `nblocks` at 20, `blocks` at 24. The same fields without `packed` are also 56, because 16 is already a multiple of 4. A count that is not a positive integer, an unknown element type, a struct that is not defined yet, or a size that overflows is `cannot lay out field 'name' of type '[Missing; 4]'`. The compiler exits with status 1. It does not pick a smaller size and succeed.
+
+`sizeof(FsEnt)` and `sizeof(e)` are that size. `sizeof(u32)` is 4. `offsetof(FsEnt, size)` is 16. Both are integers known at compile time. `sizeof()` takes one argument; anything it cannot size is `sizeof() has no size for this type`. `offsetof(Struct, field)` takes a struct name and a field name. `offsetof() unknown struct 'Nope'` and `struct 'FsEnt' has no field 'nope'` are the errors. A scalar local is still an 8-byte slot; `sizeof` of its type is the type width.
 
 `a = b` copies one struct value onto another of the same type. The copy is exactly the struct's size: whole qwords, then a byte tail, so a packed record does not spill into the next field or array element. It works for locals, globals, array elements (`table[i] = other`), and nested fields (`box.point = p`). A different struct type is a compile error. Nested scalar access (`box.point.x`) addresses that field, not the first eight bytes of the parent.
 
@@ -247,7 +265,7 @@ A literal that does not fit the destination is an error: `expected u8, found int
 
 Storing a non-literal into an 8, 16, or 32-bit variable or field truncates. Unsigned keeps the low bits (zero-extend). Signed sign-extends. `let wide = 300; let z: u8 = wide` stores 44. A narrow parameter is truncated the same way when it is received. A literal that fits is stored as it is, with no extra instruction. Arithmetic operators are still 64-bit; the truncation happens at the store, at a narrow parameter, and at an explicit `as` to a narrow integer. At `-O1` and `-O2`, constant folding turns `1 + 2` into a literal, so a folded sum that does not fit is an error at those levels and a truncating store at `-O0`.
 
-Scalar locals, globals, and ordinary struct fields still occupy 8-byte slots when they live in memory. Hosted `-O2` may keep a scalar local in `r12`–`r15`, or in `r10`/`r11` when no call is in its live range; the mask or sign-extend is applied before the value is written to that register or to the slot. A `packed` field, a `volatile` field, and a store through a pointer or an array element already write only the real width, which is the truncation.
+Scalar locals and globals still occupy 8-byte slots when they live in memory. Struct fields occupy their real width. Hosted `-O2` may keep a scalar local in `r12`–`r15`, or in `r10`/`r11` when no call is in its live range; the mask or sign-extend is applied before the value is written to that register or to the slot. A struct field, a store through a pointer, and an array element write only the real width, which is the truncation. A load of a `u8`/`u16`/`u32` field zero-extends. A load of an `i8`/`i16`/`i32` field sign-extends. The arithmetic that follows is still 64-bit.
 
 Not checked: indirect calls, comparisons, bitwise mixes, `mut` used as a permission, `volatile` as a type error, and array or struct return types. An untyped `let x = e` infers `i64` from an integer, including a narrow load, the pointer type from a pointer, and an address from `malloc`. It does not infer a struct onto that slot: write `let p: Point = ...` or a struct literal. An expression the compiler cannot type is accepted.
 
@@ -296,7 +314,7 @@ Hosted built-ins are a compile error. These built-ins are available:
 
 ### TSS and user syscall
 
-A 64-bit task-state segment is 104 bytes. It has to be a `packed struct`: an ordinary struct stores every field in an 8-byte slot, so `rsp0` would not land at offset 4.
+A 64-bit task-state segment is 104 bytes. It has to be a `packed struct`: an ordinary struct aligns `u64` to 8, so `rsp0` would land at offset 8 instead of 4.
 
 ```copihue
 packed struct Tss {
@@ -375,7 +393,7 @@ The regression suite compares the hexdump at `-O0` and `-O2`. When `qemu-system-
 
 - Integer arithmetic is 64-bit two's complement and wraps. Storing into an 8, 16, or 32-bit variable or field truncates as described under Type checking. Operators themselves are not 8-bit or 32-bit. There is no bounds checking on pointer indexing.
 - Direct calls check the function name, the argument count, and argument types. Assignments and integer or pointer returns are checked. Indirect calls are not. `*i8` and `*u8` match. An integer literal converts to any pointer; a variable does not, without `as`.
-- Ordinary struct fields still occupy 8 bytes each. Only `packed struct` uses the real width of `u8`/`u16`/`u32`. There is no padding or alignment attribute beyond packed-or-not. Struct assignment copies the whole value; it does not assign field by field in the source. Nested fields (`r.b.x`) use the real offset.
+- Struct fields use their real width. Ordinary structs add natural alignment; `packed struct` does not. An array field is `N * sizeof(T)` or a compile error. `sizeof` and `offsetof` are compile-time integers. Operators are still 64-bit. Scalar locals and globals still occupy 8-byte slots. Struct assignment copies the whole value; it does not assign field by field in the source. Nested fields (`r.b.x`) use the real offset.
 - Indexing a local array in hosted mode inserts a bounds check that exits the process. `--freestanding` and `--flat` omit that check. Pointer indexing is never checked.
 - Several files are one assembly unit and one namespace. There is no per-file object, no linker of Copihue objects, and no visibility. `bits 16` and `bits 32` exist only as naked functions. A scalar or pointer `let` there is a slot in the image; an array or a struct local is rejected. Named registers are readable and writable only inside `naked`. An `interrupt fn` cannot name `rbp`. Integer expressions in `bits 16` and `bits 32` use `eax`. Calls to other Copihue functions from those modes still use the 64-bit sequence. `jmp` is direct. The hosted suite assembles `iretq`, `sysret`, `ltr`, and the 64-bit control-register moves and does not execute them; it does execute `cpuid` and `int_carry`. The multi-file tests run as a Linux process. The boot-sector tests execute real mode and protected mode under QEMU, including `lgdt(&gdtr)`, `write_cr0`, `if carry`, and `outb` on `tests/boot/realmode_builtins.lap`, `ds = 0` plus a local on `tests/boot/seg_local.lap`, and `sp` plus `jmp` on `tests/boot/jmp_sp.lap`. `tests/freestanding/bits32_regs.lap` assembles `write_cr4`, `rdmsr` / `wrmsr`, and `cpuid` in `bits 32` and is not booted. `tests/freestanding/naked_local.lap` assembles the slot and the segment write and is not booted. `tests/freestanding/naked_regs.lap` assembles the named registers, the sized store, `jmp 0x8200`, and `far_jump` / `retfq`, and is not booted. `tests/freestanding/insns.lap` assembles `lodsb`, `rep stos`, `push`/`pop`, `syscall`, and a load of `__syscall_rsp`, and is not booted. `tests/boot/stc_carry.lap` executes `stc` and `if carry` under QEMU. `tests/lang/naked_param.lap` runs the 64-bit register parameters. `tests/lang/extern_data.lap` runs a load of an `extern` qword. `tests/usermode` executes long mode, `ltr`, the syscall MSRs, `iretq` to ring 3, `syscall`/`sysret`, and `iretq` from an interrupt, also under QEMU.
 - `syscall fn` does not program `STAR`, `LSTAR`, `SFMASK`, or `EFER`, and it does not emit `swapgs`. The kernel does that with `wrmsr` and `asm`. The `syscall` stack is `set_syscall_stack`, not `TSS.rsp0`. `volatile` is per access, as described above. It is not a memory model. `let volatile` on a local scalar keeps the stack slot at hosted `-O2`.

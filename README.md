@@ -64,8 +64,8 @@ The full language reference is in [docs/REFERENCE.md](docs/REFERENCE.md).
 - Functions, recursion, up to 16 parameters, return types `*T`, `**T`, and `[T; N]` (hosted, freestanding, and flat), structs passed by value (copied) or by pointer
 - Block scope: a `let` lives until the end of its block, a nested block may shadow it, and the same name twice in one block is a compile error
 - `let` locals, globals, `let volatile` globals, `*volatile T` pointers, `volatile` struct fields, integer types `i8 i16 i32 i64 u8 u16 u32 u64`, typed arrays, pointers, `&`, `*`, `->`
-- `struct`s, including nested structs, arrays of structs, nested struct literals, and assignment `a = b` (exact size, packed records included)
-- `packed struct` for hardware records (an x86-64 IDT gate is 16 bytes, not eight slots of 8)
+- `struct`s, including nested structs, arrays of structs, array fields `[T; N]`, nested struct literals, and assignment `a = b` (exact size, packed records included). Ordinary fields use their real width and natural alignment. `sizeof` and `offsetof` are compile-time integers
+- `packed struct` for hardware records (an x86-64 IDT gate is 16 bytes, a TSS keeps `rsp0` at offset 4, and a `[u8; 16]` field is 16 bytes, not 1)
 - Function addresses (`&timer`) and indirect calls, so a table of handlers can be installed from the language
 - `interrupt fn` (full GPR save, optional CPU error code, `iretq` back to the ring in the CPU frame, including ring 3) and `syscall fn` (`syscall`/`sysretq` entry, up to 7 arguments)
 - `ltr(selector)`, `iretq()`, and `sysretq()` (`o64 sysret` in NASM). A packed 104-byte TSS: `rsp0` at offset 4, IST at 36, and `tss.rsp0 = sp` on a context switch
@@ -95,8 +95,8 @@ The full language reference is in [docs/REFERENCE.md](docs/REFERENCE.md).
 
 | Suite | What it checks |
 |---|---|
-| 150 test programs + 18 examples | compiled at `-O0` and `-O2`, run, and stdout + exit code compared to golden files in `tests/expected/`. One program `import`s a second file. `tests/lang/o2_flow.lap` checks hosted `-O2` register arguments, direct branches, and a bounds trap. `tests/lang/o2_reduce.lap` checks the proved linear sum, a byte fill, and division with negatives, zero, and overflow. The suite also compiles two files given on the command line |
-| 52 error tests | the compiler rejects the program with the exact expected message. Four of them are a duplicate name, a duplicate across an import, an import cycle, and a missing import. A fifth check rejects the same name in two command-line files |
+| 151 test programs + 18 examples | compiled at `-O0` and `-O2`, run, and stdout + exit code compared to golden files in `tests/expected/`. One program `import`s a second file. `tests/lang/o2_flow.lap` checks hosted `-O2` register arguments, direct branches, and a bounds trap. `tests/lang/o2_reduce.lap` checks the proved linear sum, a byte fill, and division with negatives, zero, and overflow. `tests/lang/struct_width.lap` checks real field widths. The suite also compiles two files given on the command line |
+| 53 error tests | the compiler rejects the program with the exact expected message. Four of them are a duplicate name, a duplicate across an import, an import cycle, and a missing import. A fifth check rejects the same name in two command-line files |
 | 18 freestanding tests | `--freestanding` output has no `_start` and assembles; the instruction stream is golden. A `syscall` instruction is kept only when the source calls `syscall()`. Ten of them also require the same stream at `-O2` |
 | 4 flat-binary tests | `--flat` puts `_start` at offset 0; the raw image matches a golden hexdump. Two of them also require the same image at `-O2` |
 | 5 boot sectors | `--boot` at `-O0` and `-O2` is the same 512-byte image ending in `55 aa`, compared to a golden hexdump. If `qemu-system-x86_64` is installed, each image is booted and COM1 must contain `COPIHUE`. CI installs QEMU; without it the hexdump test still runs |
@@ -105,7 +105,7 @@ The full language reference is in [docs/REFERENCE.md](docs/REFERENCE.md).
 
 ### Known limitations
 
-- Ordinary struct fields still occupy 8 bytes each. Only `packed struct` uses the real width of `u8`/`u16`/`u32`. There is no padding or alignment attribute beyond packed-or-not. `a = b` copies the whole struct; it does not check anything beyond the struct type name. A store into a narrow field truncates the value first.
+- Ordinary structs align each field to its width (1, 2, 4, or 8) and round the struct up to that alignment. `packed struct` does not. A field `[T; N]` is `N * sizeof(T)` in both, or `cannot lay out field '...'` if the size is not known. `sizeof` and `offsetof` are compile-time integers. Operators are still 64-bit; a narrow field is truncated on store and extended on load. Scalar locals and globals still occupy 8-byte slots. `a = b` copies the whole struct; it does not check anything beyond the struct type name.
 - Direct calls check the name, the argument count, and the argument types. An assignment and an integer or pointer `return` are checked against the declared type. `as` is the explicit conversion. An integer literal may initialize a pointer (`0xB8000`); an integer variable may not, without `as`. `*i8` and `*u8` match. Indirect calls, comparisons, array and struct returns, and `const` are not checked. The bits still come back in `rax`. Function pointers are integer addresses, not a typed `fn` type.
 - Locals are block-scoped. Two `let`s of the same name in sibling blocks are different slots, so a use reads the one that is in scope. The stack slot is not reused after the block ends.
 - Integer arithmetic is always 64-bit and overflow wraps. Storing into an `i8`/`u8`/`i16`/`u16`/`i32`/`u32` variable or field truncates: unsigned keeps the low bits, signed sign-extends. A literal that does not fit is a compile error. There are no bounds checks on pointer indexing.

@@ -2,7 +2,7 @@
 
 Todos los cambios importantes del proyecto.
 
-## [0.26.3] - 2026-10-25
+## [0.27.1] - 2026-10-25
 
 ### Added
 - Hosted 64-bit `-O2` stores a constant with an immediate `mov` when the value fits the element, including a constant index (`mov byte [mem], 0`).
@@ -10,7 +10,19 @@ Todos los cambios importantes del proyecto.
 - `s = S; i = I; while (i < N) { s = s + A*i + B; i = i + 1; }` is replaced by the closed sum only when `N`, `A`, `B`, `S`, and `I` are constants, every product `A*i` and every partial sum fits in `i64`, and the terms are all non-negative or all non-positive. A sum that can wrap keeps the loop. `tests/lang/o2_reduce.lap` checks that against `-O0`, including a negative trip count, mixed signs, `i * i`, overflow, and division by a negative, by zero, and by a power of two.
 
 ### Changed
-- Language version is 0.26.3. `-O0`, `--freestanding`, `--flat`, and `--boot` generate the same code as 0.26.2. `bits 16` and `bits 32` do not take these paths. On this machine (`make bench`, medians) `fold` went from 142.1 ms (141.8–142.7) to 1.6 ms (1.1–2.5) and overlaps C (1.3–1.9) and Rust (1.3–2.1); it does not beat them. `sieve` went from 82.3 ms (82.1–82.5) to 69.6 ms (69.4–70.0). Against C (70.0–70.4) the ranges touch at 70.0, so it is not below C, and it stays above Rust (42.8–43.6). `arith`, `fib`, `matmul`, `chain`, `array`, and `sort` are the same binary as 0.26.2. `fib` is still 3.00× C. Inverting `while` was measured (2026-10-25 16:52:01–16:52:37 UTC) and not kept: `arith` went from 67.6 ms (66.9–71.6) to 73.4 ms (70.7–74.6). There is no inlining, no unrolling, and no rewrite of `fib`.
+- Language version is 0.27.1. `-O0`, `--freestanding`, `--flat`, and `--boot` generate the same code as 0.27.0. `bits 16` and `bits 32` do not take these paths. The `make bench` samples were taken on a compiler that printed 0.26.3, before 0.27.0 landed on main. On this machine the medians are `fold` 142.1 ms (141.8–142.7) to 1.6 ms (1.1–2.5), overlapping C (1.3–1.9) and Rust (1.3–2.1), and `sieve` 82.3 ms (82.1–82.5) to 69.6 ms (69.4–70.0). Against C (70.0–70.4) the ranges touch at 70.0, so `sieve` is not below C, and it stays above Rust (42.8–43.6). `arith`, `fib`, `matmul`, `chain`, `array`, and `sort` are the same binary as 0.26.2. `fib` is still 3.00× C. Inverting `while` was measured (2026-10-25 16:52:01–16:52:37 UTC) and not kept: `arith` went from 67.6 ms (66.9–71.6) to 73.4 ms (70.7–74.6). There is no inlining, no unrolling, and no rewrite of `fib`.
+
+## [0.27.0] - 2026-10-25
+
+### Added
+- An ordinary `struct` lays fields out at their real width with natural alignment. `u8`/`i8` align to 1, `u16`/`i16` to 2, `u32`/`i32` to 4, and `u64`/`i64` and every pointer to 8. A nested struct uses its own alignment and size. The struct's alignment is the strictest of its fields, and its size is rounded up to that alignment. `packed struct` is unchanged for scalars: no padding, so an IDT gate stays 16 bytes and `rsp0` stays at offset 4. A TSS still has to be packed, because natural alignment would place `rsp0` at 8.
+- A field `[T; N]` occupies `N * sizeof(T)` bytes, packed or not. `e.name[i]` and `e.blocks[i]` address that field. `T` may be an integer, a pointer, or a struct whose size is already known. A count that is not positive, an unknown element type, or a size that does not fit is `cannot lay out field 'name' of type '[Missing; 4]'` and the compiler exits with status 1. It does not emit a smaller struct and exit 0.
+- `sizeof(T)` and `sizeof(value)` are the type's size in bytes. `offsetof(Struct, field)` is the field's offset. Both are compile-time integers (`mov rax, N`). `sizeof()` takes one argument. `offsetof(Struct, field)` takes a struct name and a field name. An unknown size is `sizeof() has no size for this type`.
+- A load of a `u8`/`u16`/`u32` field zero-extends into `rax`. A load of an `i8`/`i16`/`i32` field sign-extends. A store writes only that field's width. Operators stay 64-bit; the narrow value is the one that was loaded, and the store truncates again. Scalar locals and globals still occupy 8-byte slots.
+- `tests/lang/struct_width.lap` runs under Linux. A packed directory entry is 56 bytes (`name` at 0, `size` at 16, `nblocks` at 20, `blocks` at 24), the same shape without `packed` is also 56, and a `u8` then a `u32` then a `u16` then a `u64` is 24 bytes with those fields at 0, 4, 8, and 16. Writing `name[0]` does not change `size`. A `u8` field `200 + 100` stores 44. It is not booted. `tests/errors/struct_layout.lap` is the layout the compiler rejects.
+
+### Changed
+- Language version is 0.27.0.
 
 ## [0.26.2] - 2026-10-25
 

@@ -16,7 +16,7 @@
 
 // ==== NAMING (single place to change when the language is renamed) ====
 #define LANG_NAME     "Copihue"
-#define LANG_VERSION  "0.26.3"
+#define LANG_VERSION  "0.27.1"
 #define COMPILER_BIN  "copihue"
 #define SRC_EXT       ".lap"   /* Lapageria rosea, the copihue */
 #define OLD_SRC_EXT   ".cph"   /* v0.18.x extension, still accepted with a warning */
@@ -125,10 +125,11 @@ typedef struct TypeInfo {
 typedef struct StructField {
     char* name;
     int offset;
-    int size;             // Bytes occupied (8 for a normal struct field)
-    int is_signed;        // Narrow signed loads use movsx
-    char* type_name;      // Type of the field (e.g., "i64", "*Token")
-    int is_pointer;       // 1 if pointer type, 0 otherwise
+    int size;             // Bytes occupied. An array is N * sizeof(element)
+    int array_len;        // 0 if the field is not [T; N]
+    int is_signed;        // Narrow signed loads use movsx / movsxd
+    char* type_name;      // Element or scalar type (e.g., "i64", "u8", "*Token")
+    int is_pointer;       // 1 if the field itself is a pointer, 0 otherwise
     int is_volatile;      // Reloaded/stored on every access; never folded or hoisted
 } StructField;
 
@@ -136,8 +137,9 @@ typedef struct StructType {
     char* name;
     StructField* fields;
     int field_count;
-    int size;
-    int is_packed;        // 1: fields packed at their real sizes (IDT, GDT, ...)
+    int size;             // Laid-out size, including tail padding when not packed
+    int align;            // Natural alignment. 0 until the struct is finished. Packed is 1
+    int is_packed;        // 1: no padding. Hardware records stay contiguous
 } StructType;
 
 typedef struct TypeTable {
@@ -374,30 +376,147 @@ void typetab_add(TypeTable* tt, char* name) {
     tt->types[tt->count - 1].fields = NULL;
     tt->types[tt->count - 1].field_count = 0;
     tt->types[tt->count - 1].size = 0;
+    tt->types[tt->count - 1].align = 0;
     tt->types[tt->count - 1].is_packed = 0;
 }
 
-void typetab_add_field(TypeTable* tt, char* struct_name, char* field_name, char* field_type, int is_pointer, int is_volatile) {
+// Natural alignment of a scalar: its own width. A pointer is 8. A struct is
+// the strictest of its fields. Packed structs report 1 so an outer struct
+// does not insert padding in front of a hardware record.
+static int align_up(int v, int a) {
+    if (a <= 1) return v;
+    return (v + a - 1) & ~(a - 1);
+}
+
+static int prim_width(const char* name) {
+    if (!name) return 0;
+    if (!strcmp(name, "i8") || !strcmp(name, "u8")) return 1;
+    if (!strcmp(name, "i16") || !strcmp(name, "u16")) return 2;
+    if (!strcmp(name, "i32") || !strcmp(name, "u32")) return 4;
+    if (!strcmp(name, "i64") || !strcmp(name, "u64")) return 8;
+    return 0;
+}
+
+// "[T; N]" as spelled by the parser, including one level of nesting.
+// The count is the last "; " before the closing bracket.
+static int parse_one_array(const char* s, char* inner, int inner_n, int* count) {
+    int len, semi;
+    if (!s || s[0] != '[') return 0;
+    len = (int)strlen(s);
+    if (len < 5 || s[len - 1] != ']') return 0;
+    semi = -1;
+    for (int i = len - 2; i >= 1; i--) {
+        if (s[i] == ';') { semi = i; break; }
+    }
+    if (semi < 2 || s[semi + 1] != ' ') return 0;
+    *count = atoi(s + semi + 2);
+    if (semi - 1 <= 0 || semi - 1 >= inner_n) return 0;
+    memcpy(inner, s + 1, semi - 1);
+    inner[semi - 1] = 0;
+    return 1;
+}
+
+// Byte size of a type, or -1 when it cannot be laid out. align_out receives
+// the natural alignment. A struct that is still being defined has align 0
+// and is rejected, so a field of its own type is an error instead of a
+// zero-size hole. An unknown name is also -1: guessing 8 would be the old
+// silent wrong size.
+static int type_layout(TypeTable* tt, const char* name, int is_pointer, int* align_out, int depth) {
+    int w, n, es, al;
+    char inner[256];
+    if (depth > 16) return -1;
+    if (is_pointer || (name && name[0] == '*')) {
+        if (align_out) *align_out = 8;
+        return 8;
+    }
+    w = prim_width(name);
+    if (w) {
+        if (align_out) *align_out = w;
+        return w;
+    }
+    if (name && name[0] == '[') {
+        if (!parse_one_array(name, inner, (int)sizeof inner, &n) || n <= 0) return -1;
+        al = 1;
+        es = type_layout(tt, inner, 0, &al, depth + 1);
+        if (es <= 0) return -1;
+        if (n > 2147483647 / es) return -1;
+        if (align_out) *align_out = al;
+        return es * n;
+    }
+    if (name && tt) {
+        StructType* st = typetab_lookup(tt, (char*)name);
+        if (st && st->align > 0) {
+            if (align_out) *align_out = st->align;
+            return st->size;
+        }
+    }
+    return -1;
+}
+
+// array_len > 0 is [T; N]. array_len < 0 is an array whose count is not a
+// positive integer. 0 is a scalar or a pointer field.
+void typetab_add_field(TypeTable* tt, char* struct_name, char* field_name, char* field_type,
+                       int is_pointer, int is_volatile, int array_len, int line, int col) {
     StructType* st = typetab_lookup(tt, struct_name);
     if (!st) return;
 
+    int al = 1;
+    int fsize = -1;
+    int stored_len = 0;
+    char shown[256];
+    if (array_len > 0) {
+        int elem = type_layout(tt, field_type, is_pointer, &al, 0);
+        stored_len = array_len;
+        if (elem <= 0 || array_len > 2147483647 / elem) fsize = -1;
+        else fsize = elem * array_len;
+        snprintf(shown, sizeof shown, "[%s; %d]", field_type ? field_type : "?", array_len);
+    } else if (array_len < 0) {
+        snprintf(shown, sizeof shown, "[%s; %d]", field_type ? field_type : "?", 0);
+        fsize = -1;
+    } else {
+        fsize = type_layout(tt, field_type, is_pointer, &al, 0);
+        if (is_pointer && field_type && field_type[0] != '*')
+            snprintf(shown, sizeof shown, "*%s", field_type);
+        else
+            snprintf(shown, sizeof shown, "%s", field_type ? field_type : "?");
+    }
+    if (fsize < 0) {
+        diag_error(line, col, "cannot lay out field '%s' of type '%s'", field_name, shown);
+        fsize = 0;
+        al = 1;
+        stored_len = 0;
+    }
+    // Packed records stay contiguous. An IDT gate is 16 bytes and rsp0 of a
+    // TSS stays at offset 4. Natural alignment would move both.
+    if (st->is_packed) al = 1;
+    else st->size = align_up(st->size, al);
+    if (al > st->align) st->align = al;
+
     st->field_count++;
     st->fields = safe_realloc(st->fields, sizeof(StructField) * st->field_count);
-    st->fields[st->field_count - 1].name = strdup(field_name);
-    st->fields[st->field_count - 1].offset = st->size;
-    st->fields[st->field_count - 1].type_name = field_type ? strdup(field_type) : NULL;
-    st->fields[st->field_count - 1].is_pointer = is_pointer;
-    st->fields[st->field_count - 1].is_volatile = is_volatile;
-    st->fields[st->field_count - 1].is_signed = (field_type && field_type[0] == 'i' && !is_pointer);
-    // An embedded (non-pointer) struct field occupies the full nested struct.
-    // Packed structs lay scalar fields at their real width with no padding,
-    // so an IDT gate can be the 16 bytes the CPU expects.
-    StructType* nested = (!is_pointer && field_type) ? typetab_lookup(tt, field_type) : NULL;
-    int fsize = 8;
-    if (nested && nested != st && nested->size > 0) fsize = nested->size;
-    else if (st->is_packed) fsize = is_pointer ? 8 : type_size(field_type);
-    st->fields[st->field_count - 1].size = fsize;
+    StructField* f = &st->fields[st->field_count - 1];
+    memset(f, 0, sizeof *f);
+    f->name = strdup(field_name);
+    f->offset = st->size;
+    f->size = fsize;
+    f->array_len = stored_len;
+    f->type_name = field_type ? strdup(field_type) : NULL;
+    f->is_pointer = is_pointer;
+    f->is_volatile = is_volatile;
+    f->is_signed = (field_type && field_type[0] == 'i' && !is_pointer);
     st->size += fsize;
+}
+
+// Round an ordinary struct up to its strictest field alignment. A packed
+// struct is not rounded: its size is the sum of the field widths.
+static void typetab_finish(StructType* st) {
+    if (!st) return;
+    if (st->is_packed) {
+        st->align = 1;
+        return;
+    }
+    if (st->align < 1) st->align = 1;
+    st->size = align_up(st->size, st->align);
 }
 
 int typetab_field_offset(TypeTable* tt, char* struct_name, char* field_name) {
@@ -1795,6 +1914,10 @@ AstNode* parse_struct_def(Parser* p) {
         field->name = strndup(field_name.s, field_name.len);
         field->value = field_type.base_type;      // Store type name
         field->is_pointer = field_type.is_pointer;  // Store if it's a pointer
+        field->array_size = field_type.array_count;
+        // The count has to survive into the type table. Dropping it is what
+        // made [u8; 16] occupy one byte and the compiler still exit 0.
+        if (field_type.is_array) field->struct_type = strdup("__array__");
         if (field_vol) field->flags |= AF_VOLATILE;
         ast_add(struct_def, field);
 
@@ -2475,43 +2598,20 @@ static void emit_sized_store_mark(Codegen* cg, const char* mem, int size, int fr
     else emit(cg, "    mov [%s], %s%s\n", mem, r64, m);
 }
 
-// Packed-struct field geometry. Returns 0 for ordinary (8-byte slot) structs
-// so those loads and stores stay on the historical path.
-static int packed_field_info(Codegen* cg, const char* stype, const char* field,
-                             int* off, int* size, int* is_signed) {
-    if (!stype || !field) return 0;
-    StructType* st = typetab_lookup(cg->types, (char*)stype);
-    if (!st || !st->is_packed) return 0;
-    StructField* f = typetab_field(cg->types, (char*)stype, field);
-    if (!f) return 0;
-    *off = f->offset;
-    *size = f->size > 0 ? f->size : 8;
-    *is_signed = f->is_signed;
-    return 1;
-}
-
-// Sized access for a packed field, or for any volatile field (MMIO).
-// Ordinary non-volatile fields return 0 and keep the 8-byte slot path.
-// A volatile field is accessed at its real width even inside an ordinary
-// struct, so a u32 register does not touch the next slot.
+// Scalar field geometry, packed or not. Every field is stored at its real
+// width: u8 is one byte, u32 is four, a pointer is eight. An array field is
+// not a scalar (the index path addresses it) and returns 0. A size of 8
+// still emits `mov rax, [mem]`, the same text an all-i64 struct already had.
 static int field_mem_info(Codegen* cg, const char* stype, const char* field,
                           int* off, int* size, int* is_signed, int* vol) {
     if (vol) *vol = 0;
-    if (!stype || !field) return 0;
+    if (!stype || !field || !cg->types) return 0;
     StructField* f = typetab_field(cg->types, (char*)stype, field);
-    if (!f) return 0;
-    if (packed_field_info(cg, stype, field, off, size, is_signed)) {
-        if (vol) *vol = f->is_volatile;
-        return 1;
-    }
-    if (!f->is_volatile) return 0;
+    if (!f || f->array_len > 0 || f->size <= 0) return 0;
     *off = f->offset;
+    *size = f->size;
     *is_signed = f->is_signed;
-    if (vol) *vol = 1;
-    if (f->type_name && f->type_name[0] != '*' && !typetab_lookup(cg->types, f->type_name))
-        *size = type_size(f->type_name);
-    else
-        *size = f->size > 0 ? f->size : 8;
+    if (vol) *vol = f->is_volatile;
     return 1;
 }
 
@@ -2541,6 +2641,9 @@ static AstNode* find_func(Codegen* cg, const char* name) {
 
 static char* array_elem_type_name(Codegen* cg, AstNode* arr);
 static char* obj_record_type(Codegen* cg, AstNode* obj);
+static StructField* access_field(Codegen* cg, AstNode* fa);
+static int sizeof_node(Codegen* cg, AstNode* n);
+static int gen_embedded_array(Codegen* cg, AstNode* field, AstNode* index, AstNode* value);
 
 typedef enum { VK_UNK = 0, VK_INT, VK_PTR, VK_ADDR, VK_STRUCT, VK_MEM } VKind;
 
@@ -2825,6 +2928,7 @@ static int builtin_ret_ty(const char* f, VTy* out) {
         !strcmp(f, "lodsb") || !strcmp(f, "stosb") || !strcmp(f, "stosd") ||
         !strcmp(f, "pushfd") || !strcmp(f, "popfd") || !strcmp(f, "push") || !strcmp(f, "pop") ||
         !strcmp(f, "stc") || !strcmp(f, "clc") || !strcmp(f, "ud2") ||
+        !strcmp(f, "sizeof") || !strcmp(f, "offsetof") ||
         !strcmp(f, "rep_stosb") || !strcmp(f, "rep_stosw") || !strcmp(f, "rep_stosd") || !strcmp(f, "rep_stosq") ||
         !strcmp(f, "rep_movsb") || !strcmp(f, "rep_movsw") || !strcmp(f, "rep_movsd") || !strcmp(f, "rep_movsq")) {
         *out = ty_i64();
@@ -3308,6 +3412,41 @@ static int rep_insn(const char* f, const char** mnem, int* wide) {
 // Returns 1 if handled.
 static int gen_core_builtin(Codegen* cg, AstNode* n) {
     const char* f = n->name;
+    if (!strcmp(f, "sizeof")) {
+        if (n->child_count != 1) {
+            diag_error(n->line, n->col, "sizeof() takes 1 argument");
+            return 1;
+        }
+        int sz = sizeof_node(cg, n->children[0]);
+        if (sz < 0) {
+            diag_error(n->line, n->col, "sizeof() has no size for this type");
+            return 1;
+        }
+        if (legacy_bits()) emit(cg, "    mov eax, %d\n", sz);
+        else emit(cg, "    mov rax, %d\n", sz);
+        return 1;
+    }
+    if (!strcmp(f, "offsetof")) {
+        if (n->child_count != 2 || !n->children[0] || n->children[0]->type != AST_IDENT ||
+            !n->children[0]->name || !n->children[1] || n->children[1]->type != AST_IDENT ||
+            !n->children[1]->name) {
+            diag_error(n->line, n->col, "offsetof(Struct, field) takes a struct name and a field name");
+            return 1;
+        }
+        if (!typetab_lookup(cg->types, n->children[0]->name)) {
+            diag_error(n->line, n->col, "offsetof() unknown struct '%s'", n->children[0]->name);
+            return 1;
+        }
+        int off = typetab_field_offset(cg->types, n->children[0]->name, n->children[1]->name);
+        if (off < 0) {
+            diag_error(n->line, n->col, "struct '%s' has no field '%s'",
+                       n->children[0]->name, n->children[1]->name);
+            return 1;
+        }
+        if (legacy_bits()) emit(cg, "    mov eax, %d\n", off);
+        else emit(cg, "    mov rax, %d\n", off);
+        return 1;
+    }
     if (!strcmp(f, "outb") || !strcmp(f, "outw") || !strcmp(f, "outl")) {
         if (n->child_count != 2) { diag_error(n->line, n->col, "%s(port, value) takes 2 arguments", f); return 1; }
         gen_two_args(cg, n);
@@ -4017,8 +4156,9 @@ void gen_array_index(Codegen* cg, AstNode* n) {
     g_fwd_ok = 0;
     check_indexable(cg, arr);
 
-    // Handle field access indexing: lex.source[i]
+    // Handle field access indexing: lex.source[i], or e.name[i] for [T; N]
     if (arr->type == AST_FIELD_ACCESS) {
+        if (gen_embedded_array(cg, arr, n->children[1], NULL)) return;
         AstNode* obj = arr->children[0];
         char* field_name = arr->name;
 
@@ -4607,6 +4747,132 @@ static int gen_struct_addr(Codegen* cg, AstNode* n) {
     if (n->type == AST_FIELD_ACCESS && n->child_count == 1)
         return gen_field_addr(cg, n->children[0], n->name);
     return 0;
+}
+
+static StructField* access_field(Codegen* cg, AstNode* fa) {
+    char* rec;
+    if (!cg || !fa || fa->type != AST_FIELD_ACCESS || !fa->name || fa->child_count < 1)
+        return NULL;
+    rec = obj_record_type(cg, fa->children[0]);
+    if (!rec) return NULL;
+    return typetab_field(cg->types, rec, fa->name);
+}
+
+// Size of a type name, or -1 when this compiler cannot lay it out.
+static int known_type_size(Codegen* cg, const char* name, int is_pointer) {
+    int al = 1;
+    StructType* st;
+    if (is_pointer || (name && name[0] == '*'))
+        return type_layout(cg ? cg->types : NULL, name, 1, &al, 0);
+    if (!name) return -1;
+    if (prim_width(name) || name[0] == '[')
+        return type_layout(cg ? cg->types : NULL, name, 0, &al, 0);
+    st = (cg && cg->types) ? typetab_lookup(cg->types, (char*)name) : NULL;
+    if (st && st->align > 0) return st->size;
+    return -1;
+}
+
+// sizeof(T), sizeof(value), or sizeof(obj.field). -1 if the size is not known.
+// A scalar local still occupies an 8-byte slot; this reports the type's width.
+static int sizeof_node(Codegen* cg, AstNode* n) {
+    if (!n || !cg) return -1;
+    if (n->type == AST_FIELD_ACCESS) {
+        StructField* f = access_field(cg, n);
+        if (!f) return -1;
+        return f->size;
+    }
+    if (n->type != AST_IDENT || !n->name) return -1;
+    {
+        Symbol* s = cg->symtab ? symtab_lookup_symbol(cg->symtab, n->name) : NULL;
+        if (s) {
+            if (s->is_array && s->array_len > 0 && s->type_name) {
+                int es = known_type_size(cg, s->type_name, 0);
+                if (es <= 0 || s->array_len > 2147483647 / es) return -1;
+                return es * s->array_len;
+            }
+            if (s->is_pointer || (s->type_name && s->type_name[0] == '*')) return 8;
+            if (s->type_name) return known_type_size(cg, s->type_name, 0);
+            return -1;
+        }
+    }
+    {
+        GlobalVar* g = cg->global_symtab ? global_symtab_lookup(cg->global_symtab, n->name) : NULL;
+        if (g) {
+            if (g->is_array && g->array_count > 0 && g->elem_type) {
+                int es = known_type_size(cg, g->elem_type, 0);
+                if (es <= 0 || g->array_count > 2147483647 / es) return -1;
+                return es * g->array_count;
+            }
+            if (g->is_pointer) return 8;
+            if (g->type_name) return known_type_size(cg, g->type_name, 0);
+            return -1;
+        }
+    }
+    return known_type_size(cg, n->name, 0);
+}
+
+static void emit_elem_load_rax(Codegen* cg, int elem, int sg) {
+    if (elem <= 1)
+        emit(cg, sg ? "    movsx rax, byte [rax]\n" : "    movzx rax, byte [rax]\n");
+    else if (elem == 2)
+        emit(cg, sg ? "    movsx rax, word [rax]\n" : "    movzx rax, word [rax]\n");
+    else if (elem == 4)
+        emit(cg, sg ? "    movsxd rax, dword [rax]\n" : "    mov eax, [rax]\n");
+    else
+        emit(cg, "    mov rax, [rax]\n");
+}
+
+static void emit_elem_store_rcx(Codegen* cg, int elem) {
+    if (elem <= 1) emit(cg, "    mov byte [rcx], al\n");
+    else if (elem == 2) emit(cg, "    mov word [rcx], ax\n");
+    else if (elem == 4) emit(cg, "    mov dword [rcx], eax\n");
+    else emit(cg, "    mov [rcx], rax\n");
+}
+
+// Index an embedded [T; N] field. value == NULL loads the element (a struct
+// element leaves its address in rax). Returns 1 when this was an array field,
+// including when the layout or the address cannot be honored.
+static int gen_embedded_array(Codegen* cg, AstNode* field, AstNode* index, AstNode* value) {
+    StructField* f = access_field(cg, field);
+    int elem, is_struct;
+    if (!f || f->array_len <= 0) return 0;
+    if (f->size <= 0 || f->size % f->array_len != 0) {
+        diag_error(field->line, field->col, "cannot lay out field '%s'", field->name ? field->name : "?");
+        return 1;
+    }
+    elem = f->size / f->array_len;
+    is_struct = 0;
+    if (f->type_name && f->type_name[0] != '*' && !prim_width(f->type_name) &&
+        typetab_lookup(cg->types, f->type_name))
+        is_struct = 1;
+    if (value && is_struct) {
+        diag_error(field->line, field->col, "cannot assign a whole struct element of field '%s'",
+                   field->name ? field->name : "?");
+        return 1;
+    }
+    if (value) {
+        gen_expr(cg, value);
+        emit(cg, "    push rax\n");
+    }
+    if (index) gen_expr(cg, index);
+    else emit(cg, "    xor rax, rax\n");
+    if (elem > 1) emit(cg, "    imul rax, %d\n", elem);
+    emit(cg, "    push rax\n");
+    if (!field->children || !gen_field_addr(cg, field->children[0], field->name)) {
+        emit(cg, "    pop rax\n");
+        if (value) emit(cg, "    pop rax\n");
+        diag_error(field->line, field->col, "cannot index field '%s'", field->name ? field->name : "?");
+        return 1;
+    }
+    emit(cg, "    pop rbx\n");
+    emit(cg, "    add rax, rbx\n");
+    if (value) {
+        emit(cg, "    mov rcx, rax\n    pop rax\n");
+        emit_elem_store_rcx(cg, elem);
+    } else if (!is_struct) {
+        emit_elem_load_rax(cg, elem, f->is_signed);
+    }
+    return 1;
 }
 
 // Copy exactly `sz` bytes. A short tail is copied a byte at a time so a packed
@@ -5792,6 +6058,17 @@ void gen_expr(Codegen* cg, AstNode* n) {
         AstNode* obj = n->children[0];
         char* field_name = n->name;
 
+        // [T; N] decays to the address of its first element. Loading it as a
+        // scalar would read past the element and into the next field.
+        {
+            StructField* af = access_field(cg, n);
+            if (af && af->array_len > 0) {
+                if (!gen_field_addr(cg, obj, field_name))
+                    diag_error(n->line, n->col, "cannot take the address of field '%s'", field_name);
+                return;
+            }
+        }
+
         // Check if object is a dereference (pointer access)
         if (obj->type == AST_DEREF) {
             // ptr->field case (already desugared)
@@ -5968,6 +6245,9 @@ void gen_expr(Codegen* cg, AstNode* n) {
         AstNode* arr = n->children[0];
         AstNode* index_expr = n->children[1];
         AstNode* value_expr = n->children[2];
+        if (arr && arr->type == AST_FIELD_ACCESS &&
+            gen_embedded_array(cg, arr, index_expr, value_expr))
+            return;
         check_indexable(cg, arr);
 
         if (!arr || !arr->name) return;
@@ -8459,24 +8739,33 @@ void build_type_table(TypeTable* tt, AstNode* ast) {
             for (int j = 0; j < struct_def->child_count; j++) {
                 AstNode* field = struct_def->children[j];
                 // field->name = field name
-                // field->value = base type (e.g., "i64", "Token")
-                // field->is_pointer = 1 if pointer type
+                // field->value = base type (e.g., "i64", "Token", "*u8" for [*u8; N])
+                // field->is_pointer = 1 if the field itself is a pointer
+                // field->struct_type == "__array__" keeps [T; N]
                 char* field_type = field->value;
                 int is_ptr = field->is_pointer;
+                int is_array = field->struct_type && !strcmp(field->struct_type, "__array__");
+                int array_len = is_array ? (field->array_size > 0 ? field->array_size : -1) : 0;
 
                 // Build full type name for pointer types (e.g., "*Token")
                 char* full_type = NULL;
-                if (is_ptr && field_type) {
+                if (is_ptr && field_type && !is_array) {
                     full_type = malloc(strlen(field_type) + 2);
                     sprintf(full_type, "*%s", field_type);
                 } else if (field_type) {
                     full_type = strdup(field_type);
                 }
 
+                if (field->file) focus_file(field->file);
                 typetab_add_field(tt, struct_def->name, field->name, full_type, is_ptr,
-                                  (field->flags & AF_VOLATILE) ? 1 : 0);
+                                  (field->flags & AF_VOLATILE) ? 1 : 0, array_len,
+                                  field->line, field->col);
 
                 if (full_type) free(full_type);
+            }
+            {
+                StructType* done = typetab_lookup(tt, struct_def->name);
+                typetab_finish(done);
             }
         }
     }
