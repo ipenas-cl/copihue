@@ -1,4 +1,4 @@
-# Copihue Language Reference (v0.20)
+# Copihue Language Reference (v0.20.1)
 
 This document describes the language that `copihue` accepts today. Anything not listed here is not supported.
 Planned features are in the README roadmap.
@@ -154,12 +154,16 @@ Hosted built-ins are a compile error. These built-ins are available:
 | `inb(port)`, `inw(port)`, `inl(port)` | `in al/ax/eax, dx` (zero-extended) |
 | `outb(port, v)`, `outw(port, v)`, `outl(port, v)` | `out dx, al/ax/eax` |
 | `cli()`, `sti()`, `hlt()`, `pause()`, `swapgs()` | the matching instruction |
-| `lidt(ptr)`, `lgdt(ptr)`, `invlpg(ptr)` | `lidt/lgdt/invlpg [rax]` |
+| `lidt(ptr)`, `lgdt(ptr)`, `invlpg(ptr)` | `lidt/lgdt/invlpg [rax]`. `ptr` is any address expression, including a local variable |
+| `read_cr0()`, `read_cr2()`, `read_cr3()`, `read_cr4()` | `mov rax, crN`. The result is an `i64` |
+| `write_cr0(v)`, `write_cr3(v)`, `write_cr4(v)` | `mov crN, rax`. The written value stays in `rax`, so the call is an `i64` expression |
 | `rdmsr(msr)` | returns the 64-bit MSR value |
 | `wrmsr(msr, value)` | writes a 64-bit MSR |
 | `set_syscall_stack(top)` | stack pointer `syscall fn` switches to. Call it with a 16-byte-aligned top before any syscall entry |
 | `asm("instr; instr")` | inline NASM. `;` separates instructions; the string must be a literal |
 | `bss_start()`, `bss_end()` | address of the first / one past the last zero-initialized global (`--flat` only) |
+
+`read_cr*` and `write_cr*` are a compile error without `--freestanding` or `--flat`. The regression suite assembles them with `nasm` and does not execute them: those instructions fault in Linux user mode, the same way `iretq` and `sysret` do.
 
 Memory-mapped I/O uses typed pointers, for example `let vga: *u16 = 0xB8000; vga[i] = 0x0F00 | 'A';`.
 
@@ -167,11 +171,13 @@ Memory-mapped I/O uses typed pointers, for example `let vga: *u16 = 0xB8000; vga
 
 `copihue --flat ADDR -o out.bin file.lap` implies `--freestanding` and produces a raw binary (assembled with `nasm -f bin`, `org ADDR`) instead of assembly. Execution starts at the first byte, and the compiler always emits `fn _start` first, wherever it appears in the source; without `_start` compilation fails. `bss_start()` and `bss_end()` bound the zero-initialized globals so `_start` can clear them before calling anything else. `-S` writes the assembly instead of the binary.
 
+`tests/flat/min_kernel.lap` is one such image, loaded at `0x10000`. Its IDT gates use code selector `0x18`, the 64-bit code segment of the AtomicOS bootloader GDT. Selector `0x08` on that loader is a 32-bit code segment; a gate that names it leaves long mode and the image hangs. The binary assumes that GDT is already loaded. It is not a generic bootable kernel.
+
 ## Known limitations
 
 - Integer arithmetic is 64-bit two's complement and wraps. Narrow types only affect memory accesses.
 - Direct calls check the function name and the argument count. Assignments, argument types, and indirect calls are not type-checked. There is no bounds checking on pointer indexing.
 - Struct assignment `a = b` is not supported. Copy fields individually or pass structs by value. Ordinary structs are not packed; nested field access through an ordinary struct still addresses the first 8 bytes of a nested value.
 - Indexing a local array inserts a hosted bounds check, so freestanding programs should index globals or pointers.
-- There are no modules or imports, no relocatable objects, and no 16-bit or 32-bit codegen. A program is a single file. `interrupt fn` and `syscall fn` can be assembled; running `iretq` or `sysret` requires a CPU already in the right mode, which the hosted test suite does not do.
+- There are no modules or imports, no relocatable objects, and no 16-bit or 32-bit codegen. A program is a single file. `interrupt fn`, `syscall fn`, and the `read_cr*` / `write_cr*` builtins can be assembled; running `iretq`, `sysret`, or a move to or from a control register requires a CPU already in ring 0, which the hosted test suite does not do.
 - `syscall fn` does not program the syscall MSRs or a TSS. `volatile` covers global scalars only.

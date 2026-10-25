@@ -1,0 +1,30 @@
+section .data
+section .text
+invalidate:
+    push rbp
+    mov rbp, rsp
+    sub rsp, __frame_invalidate
+    mov [rbp-8], rdi
+    mov [rbp-16], rsi
+    mov rax, [rbp-8]
+    push rax
+    mov rax, [rbp-16]
+    push rax
+    mov rax, 12
+    mov rbx, rax
+    pop rax
+    mov rcx, rbx
+    shl rax, cl
+    mov rbx, rax
+    pop rax
+    add rax, rbx
+    mov [rbp-24], rax
+    mov rax, [rbp-24]
+    invlpg [rax]
+    mov rax, [rbp-24]
+    leave
+    ret
+    xor rax, rax
+    leave
+    ret
+__frame_invalidate equ 96
