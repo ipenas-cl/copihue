@@ -1,0 +1,3 @@
+section ".extra" {
+    fn marker() -> i64 { return 1; }
+}

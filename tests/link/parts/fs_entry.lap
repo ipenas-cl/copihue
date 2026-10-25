@@ -1,0 +1,21 @@
+// Linked at 0x8000 and entered from tests/usermode/boot.lap, which jumps
+// to selector 0x08 (32-bit code, base 0). SS is still the real-mode null
+// selector, so the first instructions load the boot sector's data
+// selector 0x10 before any call pushes.
+extern bits 32 naked fn putc(c: i64) -> i64;
+
+bits 32 naked fn _start() {
+    ax = 0x10;
+    ds = ax;
+    es = ax;
+    ss = ax;
+    esp = 0x7C00;
+    putc(67);
+    putc(79);
+    putc(80);
+    putc(73);
+    putc(72);
+    putc(85);
+    putc(69);
+    while (1) { hlt(); }
+}

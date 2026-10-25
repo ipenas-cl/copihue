@@ -1,0 +1,4 @@
+tests/errors/extern_fn_arity.lap:5:12: error: function 'add' takes 1 argument, not 2
+      5 |     return add(1, 2);
+        |            ^
+1 error, compilation failed
