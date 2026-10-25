@@ -2,6 +2,19 @@
 
 Todos los cambios importantes del proyecto.
 
+## [0.29.4] - 2026-10-25
+
+### Fixed
+- In `bits 16` and `bits 32`, an arithmetic expression outside `if` / `while` no longer leaves the other operand in `ebx`. `ebx = 7; di = di + 24` used to store 24 in `ebx`, so the next `int 0x15` continued the E820 map with the summand instead of the token. `+`, `-`, `&`, `|`, `^`, `*`, `/`, `%`, and a shift now `push ebx` before the right-hand operand and `pop ebx` after the ALU, the same pair an `if` or `while` already used. A shift also `push`/`pop ecx` (`shl`/`sar` use `cl`) outside the condition, not only inside it. A comparison used as a value (`let x = a == b`) `pop`s `ebx` after `cmp` and before `sete`; `pop` does not change the flags. A `let` of one of those expressions, a compound assignment (`di += 4` is `di = di + 4`), and each argument of a call take that path. The call itself still uses `ax`/`cx`/`dx`/`si` or `eax`/`ecx`/`edx`/`esi`. `idiv` still overwrites `edx`. A store whose address is not a bare operand still leaves that address in `ebx`. `lgdt`, `lidt`, and `invlpg` of a pointer that is not a data label still move the address into `bx` or `ebx`. 64-bit `rbx` stays scratch.
+
+### Added
+- `tests/boot/ebx_expr.lap` is a 512-byte sector. `ebx` is 7, then `di` is updated with `+` `-` `*` `&` `|` `<<` `>>`, `di += 4`, and a call whose body adds. `COPIHUE` is written only when `ebx` is still 7. QEMU reads `COPIHUE` on COM1. `-O0` and `-O2` are the same image. A `let` and a comparison used as a value do not fit in the sector.
+- `tests/freestanding/ebx_expr.lap` is the instruction stream at `-O0` and `-O2` for that sequence in `bits 16` (including the `let`, the call, and `si = di == 0`) and for `+`, `<<`, `+=`, and a value compare in `bits 32`. `ax = ebx` and `bp = ecx` (and `eax = ebx`, `edx = ecx`) follow the pops. It is assembled, not booted.
+
+### Changed
+- Language version is 0.29.4, on top of 0.29.3.
+- Three boot hex dumps grew by `push ebx` / `pop ebx` (`66 53` / `66 5b` in real mode, the same opcodes without the operand-size prefix in `bits 32`) around an operator that was not inside a condition, and the short jumps after them moved: `tests/expected/boot/ebx_keep.hex` (`ebx = ebx - 1` in the countdown body), `call32.hex` (`read_cr0() | 1`), and `realmode_builtins.hex` (the same `|`). Each image is still 512 bytes ending in `55 aa`, and QEMU still reads `COPIHUE`. `tests/expected/freestanding/ebx_cond.asm.txt` gained the same pair around `ebx = ebx - 1` in `bits 16` and `bits 32`. `naked_local.asm.txt` gained it around `ch = ch + 1`. `bits32_regs.asm.txt` gained it around each `|` (`inb | 2`, `cr0 | 1`, `cr4 | 32`, `rdmsr | 0x100`, `cr0 | 0x80000000`); the `while` `&` was already saved. Sectors and images with no `bits 16`/`bits 32` operator outside a condition are the same bytes: `boot_sector`, `call16`, `jmp_sp`, `section`, `stc_carry`, `rax_keep`, `seg_local`, the flat images, `tests/usermode`, and `tests/ctx`.
+
 ## [0.29.3] - 2026-10-25
 
 ### Added

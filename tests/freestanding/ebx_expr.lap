@@ -1,0 +1,40 @@
+// also-o2
+// bits 16 and bits 32: + - * & | << >> outside if/while push ebx and pop
+// it before the next instruction. A shift also restores ecx. A let, a
+// call, a compound assignment, and a comparison used as a value do too.
+// Assembled, not booted. tests/boot/ebx_expr.lap runs the bits 16 case.
+
+bits 16 naked fn bump16(n: i64) -> i64 {
+    return n + 1;
+}
+
+bits 16 naked fn expr16() {
+    ebx = 7;
+    ecx = 3;
+    di = 1;
+    di = di + 24;
+    di = di - 3;
+    di = di * 2;
+    di = di & 255;
+    di = di | 1;
+    di = di << 1;
+    di = di >> 1;
+    di += 4;
+    let k = di + 8;
+    di = bump16(k);
+    si = di == 0;
+    ax = ebx;
+    bp = ecx;
+}
+
+bits 32 naked fn expr32() {
+    ebx = 7;
+    ecx = 3;
+    edi = 1;
+    edi = edi + 24;
+    edi = edi << 1;
+    edi += 4;
+    esi = edi == 0;
+    eax = ebx;
+    edx = ecx;
+}
