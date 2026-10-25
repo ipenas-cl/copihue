@@ -1,0 +1,39 @@
+section .data
+section .text
+cr_roundtrip:
+    push rbp
+    mov rbp, rsp
+    sub rsp, __frame_cr_roundtrip
+    mov [rbp-8], rdi
+    mov rax, cr2
+    mov [rbp-16], rax
+    mov rax, cr3
+    mov [rbp-24], rax
+    mov rax, cr0
+    mov [rbp-32], rax
+    mov rax, cr4
+    mov [rbp-40], rax
+    mov rax, [rbp-8]
+    mov cr3, rax
+    mov [rbp-48], rax
+    mov rax, [rbp-32]
+    mov cr0, rax
+    mov rax, [rbp-40]
+    mov cr4, rax
+    mov rax, [rbp-48]
+    push rax
+    mov rax, [rbp-24]
+    mov rbx, rax
+    pop rax
+    add rax, rbx
+    push rax
+    mov rax, [rbp-16]
+    mov rbx, rax
+    pop rax
+    add rax, rbx
+    leave
+    ret
+    xor rax, rax
+    leave
+    ret
+__frame_cr_roundtrip equ 112

@@ -1,0 +1,6 @@
+// invlpg accepts a variable address, not only a constant.
+fn invalidate(base: i64, index: i64) -> i64 {
+    let addr = base + (index << 12);
+    invlpg(addr);
+    return addr;
+}

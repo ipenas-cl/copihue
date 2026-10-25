@@ -2,6 +2,18 @@
 
 Todos los cambios importantes del proyecto.
 
+## [0.20.1] - 2026-10-25
+
+### Added
+- Freestanding and flat builtins `read_cr0()`, `read_cr2()`, `read_cr3()`, and `read_cr4()` return the register as an `i64`. `write_cr0(v)`, `write_cr3(v)`, and `write_cr4(v)` store that value and leave it in `rax`. In hosted mode each one is a compile error.
+- `invlpg` accepts a variable address. The freestanding suite assembles `invlpg [rax]` from a computed local.
+
+### Fixed
+- `tests/flat/min_kernel.lap` installs IDT gates with code selector `0x18`, the 64-bit code segment of the AtomicOS bootloader GDT. Selector `0x08` is that loader's 32-bit code segment and hangs. The image assumes that GDT and is not a generic bootable kernel.
+
+### Changed
+- Language version is 0.20.1.
+
 ## [0.20.0] - 2026-10-25
 
 ### Added
