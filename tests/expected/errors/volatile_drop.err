@@ -1,0 +1,4 @@
+tests/errors/volatile_drop.lap:3:18: error: expected *u8, found *volatile u8
+      3 |     let q: *u8 = p;
+        |                  ^
+1 error, compilation failed

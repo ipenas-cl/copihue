@@ -1,0 +1,5 @@
+fn main() -> i32 {
+    let p: *volatile u8 = 0;
+    let q: *u8 = p;
+    return 0;
+}

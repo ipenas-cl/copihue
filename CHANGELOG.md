@@ -2,6 +2,23 @@
 
 Todos los cambios importantes del proyecto.
 
+## [0.30.0] - 2026-10-25
+
+### Added
+- `u8`, `u16`, `u32`, `i8`, `i16`, and `i32` operators truncate to that width after the instruction. Unsigned keeps the low bits. Signed sign-extends. The width is the wider typed operand. The result is signed only when both operands are signed. A shift uses the left operand and does not widen to the count. A fitting untyped literal adopts the other operand, so `let x: u8 = 200; x + 100` is 44 and `x + 100 < 50` is true. A literal that does not fit stays 64-bit (`x + 300` is 500). Two untyped literals stay `i64`: `let x: u8 = 200 + 100` is still a literal error at `-O1` and `-O2`, and a truncating store at `-O0`. `i64` and `u64` are unchanged.
+- In 64-bit code a narrow unsigned value is zero-extended, so `sar`, `idiv`, and a signed condition match the unsigned operation. In `bits 16` and `bits 32`, a `u32` with bit 31 set does not: `>>` is `shr`, `/` and `%` are `div`, and `<` `>` `<=` `>=` use `jb` / `ja` / `setb` / `seta`. `u8` and `u16` stay on `sar`, `idiv`, and the signed condition. `idiv` and that `div` still overwrite `edx`. The 0.29.4 rule stays: every operator push/pops `ebx`, and a shift push/pops `ecx`, inside a condition and outside one.
+- `volatile` is part of the pointer type. `*volatile mut T` and `*mut volatile T` are `*volatile T`. `mut` is not. Assigning `*volatile T` to a non-volatile pointer is `expected *u8, found *volatile u8`. Assigning `*u8` to `*volatile u8` is allowed, including an array of `u8`. `*volatile i8` and `*volatile u8` match. An integer literal still converts to any pointer. `as` drops volatile and emits no instruction. Each source-level volatile read or write is still one memory instruction of that width. `-O2` does not delete it, fold it, or reorder it with another volatile access. There are no atomics and no fence stronger than the instruction. A non-volatile neighbor can still be simplified.
+- `tests/lang/narrow_arith.lap` prints the wrapped values at `-O0` and `-O2`, including `u32` division and shifts and a `*volatile u8` load. `tests/errors/volatile_drop.lap` is the drop error. `tests/boot/narrow_arith.lap` is a 512-byte sector: `COPIHUE` is written only when the `u8` sum wrapped before the compare and the `u32` compare, `>>`, and `/` are unsigned. QEMU reads `COPIHUE` on COM1. `-O0` and `-O2` are the same image.
+
+### Fixed
+- Hosted `-O2` truncates a narrow result in the register that holds it. `rdi`, `rsi`, `r8`, and `r9` used to fall back to `eax` / `ax` / `al`, so `lea rdi, [r12-1]` was followed by `movsxd rdi, eax`. The recursive call kept the old `n` and ran off the stack (`fibonacci`, `factorial`). The low names are `edi` / `esi` / `r8d` / `r9d`, `di` / `si` / `r8w` / `r9w`, and `dil` / `sil` / `r8b` / `r9b`.
+
+### Changed
+- Language version is 0.30.0, on top of 0.29.4.
+- `tests/lang/o2_reduce.lap` `holes_neg` prints 2. Both elements are `i8`, so `-1 + 3` is an `i8` sum, not the old zero-extended `255 + 3` (258). `-O0` and `-O2` agree. `holes` stays 258: the accumulator is an untyped `i64`.
+- A `u8` subtraction such as `line[i] - '0'` emits `movzx rax, al` after `sub`. On the AtomicOS kernel (`kernel.lap`, `console.lap`, `keyboard.lap`, `shell.lap`, `--flat 0x10000`) that is the only new instruction, in `parse_int`. The image grows from 6004 to 6008 bytes. A digit in `'0'..'9'` has the same value. Jump displacements that cross the instruction move. `tests/flat/min_kernel.hex` is unchanged.
+- `tests/lang/ptr_return.lap` drops `*volatile mut u8` with `as *u8`. The cast emits no instruction. Adding volatile in `as_vol` stays legal. `tests/flat/min_kernel.hex` is unchanged: `let p: *volatile u32 = regs` adds volatile.
+
 ## [0.29.4] - 2026-10-25
 
 ### Fixed
