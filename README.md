@@ -87,7 +87,7 @@ The full language reference is in [docs/REFERENCE.md](docs/REFERENCE.md).
 - Diagnostics in the form `file:line:col: error: ...`, with the source line and a caret. They cover syntax errors,
   undeclared variables, indexing a non-array, unknown struct fields, unknown functions, a call with the wrong
   number or type of arguments, a pointer where an integer is required (and the reverse) without `as`, two different pointer types, a `return` that does not match `->`, an integer literal that does not fit, an interrupt function with the wrong shape, bad escapes, and hosted-only calls in freestanding code
-- Optimizations: `-O1` constant folding; `-O2` adds strength reduction and, in hosted code, keeps up to four scalar locals in registers and evaluates a simple right-hand side without `push`/`pop`. `-O0`, `--freestanding`, `--flat`, and `--boot` keep the stack-machine code. Every test must give identical output at `-O0` and `-O2`
+- Optimizations: `-O1` constant folding; hosted `-O2` adds strength reduction, evaluates simple arithmetic directly in a local's register, keeps up to six scalar locals in registers, addresses arrays as `base+index*scale`, and returns a parameter from an opening `if` before building the frame. `-O0`, `--freestanding`, `--flat`, and `--boot` keep the stack-machine code. Every test must give identical output at `-O0` and `-O2`
 
 ### Tested
 
@@ -95,7 +95,7 @@ The full language reference is in [docs/REFERENCE.md](docs/REFERENCE.md).
 
 | Suite | What it checks |
 |---|---|
-| 145 test programs + 18 examples | compiled at `-O0` and `-O2`, run, and stdout + exit code compared to golden files in `tests/expected/`. One program `import`s a second file. The suite also compiles two files given on the command line |
+| 146 test programs + 18 examples | compiled at `-O0` and `-O2`, run, and stdout + exit code compared to golden files in `tests/expected/`. One program `import`s a second file. The suite also compiles two files given on the command line |
 | 38 error tests | the compiler rejects the program with the exact expected message. Four of them are a duplicate name, a duplicate across an import, an import cycle, and a missing import. A fifth check rejects the same name in two command-line files |
 | 15 freestanding tests | `--freestanding` output has no `_start`/syscalls and assembles; the instruction stream is golden. Seven of them also require the same stream at `-O2` |
 | 4 flat-binary tests | `--flat` puts `_start` at offset 0; the raw image matches a golden hexdump. Two of them also require the same image at `-O2` |
