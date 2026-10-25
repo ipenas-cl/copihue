@@ -2,6 +2,22 @@
 
 Todos los cambios importantes del proyecto.
 
+## [0.24.1] - 2026-10-25
+
+### Added
+- In a `bits 16` or `bits 32` function, integer expressions and `if` / `while` use `eax` (and `ebx` / `ecx` / `edx`), not `rax`. `mov rax, 1` is what nasm rejects in those modes. `while (1)` and `if (inb(port) & mask)` assemble. A 64-bit function is unchanged.
+- `read_cr0` / `read_cr2` / `read_cr3` / `read_cr4` and `write_cr0` / `write_cr3` / `write_cr4` emit `mov eax, crN` and `mov crN, eax` in `bits 16` and `bits 32`. There is no `mov ax, cr0` encoding. In `bits 64` they still emit `mov rax, crN`.
+- `inb` / `inw` / `inl` / `outb` / `outw` / `outl` load the port with `edx` in those modes. `outb(0x92, inb(0x92) | 2)` no longer emits `mov rax, 146`.
+- `rdmsr` in `bits 16` / `bits 32` leaves the low half in `eax` and the high half in `edx`. It does not emit `shl rdx, 32`. `wrmsr` writes `edx:eax`. `wrmsr(m, rdmsr(m) | 0x100)` keeps the high half. A value that is not an `rdmsr` writes `edx = 0`.
+- `lgdt(&name)`, `lidt(&name)`, and `invlpg(&name)` accept a `data` label (and a label inside a `data` block). The old error was `use of undeclared variable 'gdtr'`. In `bits 16` / `bits 32` the instruction is `lgdt [name]`, not `lgdt [rax]`.
+- A `db` / `dw` / `dd` / `dq` operand may be a label plus or minus an integer: `dq page + 3`, `dq page + 0x83`. NASM evaluates the address. A lone label (`dd gdt`) is unchanged.
+- `if carry { } else { }` branches on CF (`jnc`). `int_carry()` returns 1 when CF is set and 0 otherwise (`setc`). Both work after `int(0x13)` or `asm("stc")`, in every mode.
+- `cpuid(leaf)` executes `cpuid` and returns `eax`. `cpuid_edx(leaf)` returns `edx`, which is where the long-mode bit lives (`1 << 29` after leaf `0x80000001`). `cpuid()` with no argument is `cpuid(leaf) takes 1 argument`.
+- `tests/boot/realmode_builtins.lap` enters protected mode with `lgdt(&gdtr)` and `write_cr0` and writes `COPIHUE` to COM1. QEMU checks that string. `tests/freestanding/bits32_regs.lap` is the instruction stream for the MSR and `cpuid` forms; it is assembled, not booted.
+
+### Changed
+- Language version is 0.24.1.
+
 ## [0.24.0] - 2026-10-25
 
 ### Added

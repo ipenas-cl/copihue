@@ -14,7 +14,7 @@
 
 // ==== NAMING (single place to change when the language is renamed) ====
 #define LANG_NAME     "Copihue"
-#define LANG_VERSION  "0.24.0"
+#define LANG_VERSION  "0.24.1"
 #define COMPILER_BIN  "copihue"
 #define SRC_EXT       ".lap"   /* Lapageria rosea, the copihue */
 #define OLD_SRC_EXT   ".cph"   /* v0.18.x extension, still accepted with a warning */
@@ -159,6 +159,7 @@ typedef struct AstNode {
 #define AF_INTERRUPT  4
 #define AF_SYSCALL    8
 #define AF_NAKED      16
+#define AF_CARRY      32   // `if carry`: branch on CF, no accumulator load
 
 // Symbol table
 typedef struct {
@@ -253,8 +254,11 @@ typedef struct {
 
 // Kind of the function currently being generated (for return/epilogue).
 static int g_fn_flags = 0;
+static int g_fn_bits = 0;   // 0 or 64: rax. 16 or 32: eax (legacy mode)
 static char g_fn_name[128];
 static AstNode* g_cur_fn = NULL;   // Function whose body is being generated
+
+static int legacy_bits(void) { return g_fn_bits == 16 || g_fn_bits == 32; }
 
 // ==== MEMORY HELPERS ====
 void* safe_realloc(void* ptr, size_t size) {
@@ -1315,6 +1319,22 @@ AstNode* parse_stmt(Parser* p) {
     }
     if (match_tok(p, T_IF)) {
         AstNode* ifnode = ast_new(AST_IF);
+        // `if carry { }` reads CF (setc / jnc). `if (carry)` stays a normal call.
+        if (peek_word(p, "carry") && !peek_tok_at(p, 1, T_LPAREN)) {
+            advance_tok(p);
+            ifnode->flags |= AF_CARRY;
+            ast_add(ifnode, parse_block(p));
+            if (match_tok(p, T_ELSE)) {
+                if (check_tok(p, T_IF)) {
+                    AstNode* else_block = ast_new(AST_BLOCK);
+                    ast_add(else_block, parse_stmt(p));
+                    ast_add(ifnode, else_block);
+                } else {
+                    ast_add(ifnode, parse_block(p));
+                }
+            }
+            return ifnode;
+        }
         expect(p, T_LPAREN);
         ast_add(ifnode, parse_expr(p));
         expect(p, T_RPAREN);
@@ -1776,25 +1796,36 @@ static char* parse_data_ops(Parser* p) {
                     append_byte(buf, &n, (int)sizeof(buf), c, &first);
                 }
             }
-        } else if (check_tok(p, T_NUM)) {
-            Tok num = advance_tok(p);
-            char piece[80];
-            int k = snprintf(piece, sizeof(piece), "%s%.*s", first ? "" : ", ", num.len, num.s);
-            if (n + k < (int)sizeof(buf)) {
-                memcpy(buf + n, piece, k);
-                n += k;
-                buf[n] = '\0';
+        } else if (check_tok(p, T_NUM) || check_tok(p, T_IDENT)) {
+            // `dd gdt` and `dq next + 3`. NASM evaluates the label. `*` is not
+            // an operand separator, so `1 * 2` still fails at the semicolon.
+            if (!first) {
+                if (n + 2 < (int)sizeof(buf)) {
+                    memcpy(buf + n, ", ", 2);
+                    n += 2;
+                    buf[n] = '\0';
+                }
             }
-            first = 0;
-        } else if (check_tok(p, T_IDENT)) {
-            // A label used as an address (dd gdt).
-            Tok id = advance_tok(p);
-            char piece[80];
-            int k = snprintf(piece, sizeof(piece), "%s%.*s", first ? "" : ", ", id.len, id.s);
-            if (n + k < (int)sizeof(buf)) {
-                memcpy(buf + n, piece, k);
-                n += k;
-                buf[n] = '\0';
+            for (;;) {
+                Tok t = advance_tok(p);
+                if (n + t.len < (int)sizeof(buf)) {
+                    memcpy(buf + n, t.s, t.len);
+                    n += t.len;
+                    buf[n] = '\0';
+                }
+                if (!check_tok(p, T_PLUS) && !check_tok(p, T_MINUS)) break;
+                Tok op = advance_tok(p);
+                const char* sep = op.t == T_MINUS ? " - " : " + ";
+                if (n + 3 < (int)sizeof(buf)) {
+                    memcpy(buf + n, sep, 3);
+                    n += 3;
+                    buf[n] = '\0';
+                }
+                if (!check_tok(p, T_NUM) && !check_tok(p, T_IDENT)) {
+                    Tok bad = peek_tok(p);
+                    diag_error(bad.line, bad.col, "expected a number or a label in a data block");
+                    break;
+                }
             }
             first = 0;
         } else {
@@ -2697,10 +2728,18 @@ static const char* hosted_only_builtins[] = {
 // Evaluate up to two call arguments into rdx (first) and rax (second)
 static void gen_two_args(Codegen* cg, AstNode* n) {
     gen_expr(cg, n->children[0]);
-    emit(cg, "    push rax\n");
-    gen_expr(cg, n->children[1]);
-    emit(cg, "    pop rdx\n");
+    if (legacy_bits()) {
+        emit(cg, "    push eax\n");
+        gen_expr(cg, n->children[1]);
+        emit(cg, "    pop edx\n");
+    } else {
+        emit(cg, "    push rax\n");
+        gen_expr(cg, n->children[1]);
+        emit(cg, "    pop rdx\n");
+    }
 }
+
+static const char* addr_data_label(Codegen* cg, AstNode* e);
 
 // Builtins that work everywhere, including --freestanding (kernel) code.
 // Returns 1 if handled.
@@ -2715,7 +2754,8 @@ static int gen_core_builtin(Codegen* cg, AstNode* n) {
     if (!strcmp(f, "inb") || !strcmp(f, "inw") || !strcmp(f, "inl")) {
         if (n->child_count != 1) { diag_error(n->line, n->col, "%s(port) takes 1 argument", f); return 1; }
         gen_expr(cg, n->children[0]);
-        emit(cg, "    mov rdx, rax\n    xor rax, rax\n");
+        if (legacy_bits()) emit(cg, "    mov edx, eax\n    xor eax, eax\n");
+        else emit(cg, "    mov rdx, rax\n    xor rax, rax\n");
         emit(cg, "    in %s, dx\n", f[2] == 'b' ? "al" : f[2] == 'w' ? "ax" : "eax");
         return 1;
     }
@@ -2726,20 +2766,48 @@ static int gen_core_builtin(Codegen* cg, AstNode* n) {
     }
     if (!strcmp(f, "lidt") || !strcmp(f, "lgdt") || !strcmp(f, "invlpg")) {
         if (n->child_count != 1) { diag_error(n->line, n->col, "%s(ptr) takes 1 argument", f); return 1; }
+        // `lgdt [gdtr]` is the 16-bit form. `lgdt [rax]` is not a 16-bit address.
+        const char* lab = addr_data_label(cg, n->children[0]);
+        if (lab && legacy_bits()) {
+            emit(cg, "    %s [%s]\n", f, lab);
+            return 1;
+        }
         gen_expr(cg, n->children[0]);
-        emit(cg, "    %s [rax]\n", f);
+        if (legacy_bits()) {
+            if (g_fn_bits == 16) emit(cg, "    mov bx, ax\n    %s [bx]\n", f);
+            else emit(cg, "    mov ebx, eax\n    %s [ebx]\n", f);
+        } else {
+            emit(cg, "    %s [rax]\n", f);
+        }
         return 1;
     }
     if (!strcmp(f, "rdmsr")) {
         if (n->child_count != 1) { diag_error(n->line, n->col, "rdmsr(msr) takes 1 argument"); return 1; }
         gen_expr(cg, n->children[0]);
-        emit(cg, "    mov rcx, rax\n    rdmsr\n    shl rdx, 32\n    or rax, rdx\n");
+        if (legacy_bits()) {
+            // Leave the high half in edx. A later wrmsr of this value keeps it.
+            // `shl rdx, 32` is not encodable in bits 16 or bits 32.
+            emit(cg, "    mov ecx, eax\n    rdmsr\n");
+        } else {
+            emit(cg, "    mov rcx, rax\n    rdmsr\n    shl rdx, 32\n    or rax, rdx\n");
+        }
         return 1;
     }
     if (!strcmp(f, "wrmsr")) {
         if (n->child_count != 2) { diag_error(n->line, n->col, "wrmsr(msr, value) takes 2 arguments"); return 1; }
-        gen_two_args(cg, n);                 // rdx = msr, rax = value
-        emit(cg, "    mov rcx, rdx\n    mov rdx, rax\n    shr rdx, 32\n    wrmsr\n");
+        if (legacy_bits()) {
+            // edx:eax is the value. Zero the high half first so a plain integer
+            // writes edx = 0; rdmsr inside the value expression overwrites edx
+            // with the MSR's real high half, and the OR below preserves it.
+            emit(cg, "    xor edx, edx\n");
+            gen_expr(cg, n->children[1]);
+            emit(cg, "    push eax\n    push edx\n");
+            gen_expr(cg, n->children[0]);
+            emit(cg, "    mov ecx, eax\n    pop edx\n    pop eax\n    wrmsr\n");
+        } else {
+            gen_two_args(cg, n);                 // rdx = msr, rax = value
+            emit(cg, "    mov rcx, rdx\n    mov rdx, rax\n    shr rdx, 32\n    wrmsr\n");
+        }
         return 1;
     }
     // ltr takes a selector value (the low 16 bits), not a pointer. lidt/lgdt
@@ -2784,7 +2852,10 @@ static int gen_core_builtin(Codegen* cg, AstNode* n) {
             return 1;
         }
         if (n->child_count != 0) { diag_error(n->line, n->col, "%s() takes no arguments", f); return 1; }
-        emit(cg, "    mov rax, cr%c\n", f[7]);
+        // CR moves are r32 outside long mode. `mov rax, cr0` does not assemble
+        // in bits 16 or bits 32; `mov ax, cr0` is not an encoding either.
+        if (legacy_bits()) emit(cg, "    mov eax, cr%c\n", f[7]);
+        else emit(cg, "    mov rax, cr%c\n", f[7]);
         return 1;
     }
     if (!strcmp(f, "write_cr0") || !strcmp(f, "write_cr3") || !strcmp(f, "write_cr4")) {
@@ -2794,7 +2865,8 @@ static int gen_core_builtin(Codegen* cg, AstNode* n) {
             diag_error(n->line, n->col, "%s() is only available with --freestanding or --flat", f);
             return 1;
         }
-        emit(cg, "    mov cr%c, rax\n", f[8]);
+        if (legacy_bits()) emit(cg, "    mov cr%c, eax\n", f[8]);
+        else emit(cg, "    mov cr%c, rax\n", f[8]);
         return 1;
     }
     if (!strcmp(f, "set_syscall_stack")) {
@@ -2833,6 +2905,29 @@ static int gen_core_builtin(Codegen* cg, AstNode* n) {
             return 1;
         }
         emit(cg, "    int %s\n", n->children[0]->value);
+        return 1;
+    }
+    if (!strcmp(f, "int_carry")) {
+        if (n->child_count != 0) { diag_error(n->line, n->col, "int_carry() takes no arguments"); return 1; }
+        // CF as 0 or 1. No instruction between the flag and setc.
+        if (legacy_bits()) emit(cg, "    setc al\n    movzx eax, al\n");
+        else emit(cg, "    setc al\n    movzx rax, al\n");
+        return 1;
+    }
+    if (!strcmp(f, "cpuid") || !strcmp(f, "cpuid_edx")) {
+        if (n->child_count != 1) {
+            diag_error(n->line, n->col, "%s(leaf) takes 1 argument", f);
+            return 1;
+        }
+        gen_expr(cg, n->children[0]);
+        emit(cg, "    cpuid\n");
+        // cpuid writes edx. cpuid() returns eax (already the accumulator in
+        // legacy mode; in 64-bit, eax is zero-extended into rax). cpuid_edx()
+        // returns that edx so a long-mode feature bit is visible.
+        if (!strcmp(f, "cpuid_edx")) {
+            if (legacy_bits()) emit(cg, "    mov eax, edx\n");
+            else emit(cg, "    mov rax, rdx\n");
+        }
         return 1;
     }
     if (!strcmp(f, "asm")) {
@@ -3064,6 +3159,34 @@ void gen_builtin_call(Codegen* cg, AstNode* n) {
     }
 }
 
+// A `data` block name, or a label written inside one (`mark:`).
+static int is_data_name(Codegen* cg, const char* name) {
+    if (!cg || !cg->program || !name) return 0;
+    AstNode* prog = cg->program;
+    for (int i = 0; i < prog->child_count; i++) {
+        AstNode* d = prog->children[i];
+        if (!d || d->type != AST_DATA) continue;
+        if (d->name && !strcmp(d->name, name)) return 1;
+        for (int j = 0; j < d->child_count; j++) {
+            AstNode* it = d->children[j];
+            if (it && it->name && !strcmp(it->name, "label") &&
+                it->value && !strcmp(it->value, name))
+                return 1;
+        }
+    }
+    return 0;
+}
+
+// `&gdtr` or a bare `gdtr` when that name is a data label. NULL otherwise.
+static const char* addr_data_label(Codegen* cg, AstNode* e) {
+    if (!e) return NULL;
+    if (e->type == AST_IDENT && is_data_name(cg, e->name)) return e->name;
+    if (e->type == AST_ADDR_OF && e->child_count > 0 && e->children[0] &&
+        e->children[0]->type == AST_IDENT && is_data_name(cg, e->children[0]->name))
+        return e->children[0]->name;
+    return NULL;
+}
+
 // Helper: Generate address-of operator (&)
 void gen_addr_of(Codegen* cg, AstNode* n) {
     if (!n->children || n->child_count == 0) return;
@@ -3091,6 +3214,10 @@ void gen_addr_of(Codegen* cg, AstNode* n) {
             } else if (find_func(cg, var->name)) {
                 // Address of a function, for an IDT gate or a syscall table.
                 emit(cg, "    lea rax, [%s]\n", var->name);
+            } else if (is_data_name(cg, var->name)) {
+                // `data gdtr` is a label, not a `let`. bits 16/32 cannot `lea rax`.
+                if (legacy_bits()) emit(cg, "    mov eax, %s\n", var->name);
+                else emit(cg, "    lea rax, [%s]\n", var->name);
             } else {
                 diag_error(var->line, var->col, "use of undeclared variable '%s'", var->name);
             }
@@ -3894,7 +4021,32 @@ static void emit_rbx(Codegen* cg, AstNode* n) {
     emit_leaf_reg(cg, n, "rbx");
 }
 
+// eax/ebx form for bits 16 and bits 32. edx is not touched, so an rdmsr
+// high half survives `rdmsr(m) | imm`.
+static void emit_binop_legacy(Codegen* cg, const char* op) {
+    if (!strcmp(op, "<<")) emit(cg, "    mov ecx, ebx\n    shl eax, cl\n");
+    else if (!strcmp(op, ">>")) emit(cg, "    mov ecx, ebx\n    sar eax, cl\n");
+    else if (op[0] == '&') emit(cg, "    and eax, ebx\n");
+    else if (op[0] == '|') emit(cg, "    or eax, ebx\n");
+    else if (op[0] == '^') emit(cg, "    xor eax, ebx\n");
+    else if (op[0] == '+') emit(cg, "    add eax, ebx\n");
+    else if (op[0] == '-') emit(cg, "    sub eax, ebx\n");
+    else if (op[0] == '*') emit(cg, "    imul eax, ebx\n");
+    else if (op[0] == '/' || op[0] == '%') {
+        int skip_label = new_label(cg);
+        emit(cg, "    test ebx, ebx\n");
+        emit(cg, "    jnz .L%d\n", skip_label);
+        emit(cg, "    xor eax, eax\n");
+        emit(cg, "    jmp .L%d_end\n", skip_label);
+        emit(cg, ".L%d:\n", skip_label);
+        emit(cg, "    cdq\n    idiv ebx\n");
+        if (op[0] == '%') emit(cg, "    mov eax, edx\n");
+        emit(cg, ".L%d_end:\n", skip_label);
+    }
+}
+
 static void emit_binop_rax_rbx(Codegen* cg, const char* op) {
+    if (legacy_bits()) { emit_binop_legacy(cg, op); return; }
     if (!strcmp(op, "<<")) emit(cg, "    mov rcx, rbx\n    shl rax, cl\n");
     else if (!strcmp(op, ">>")) emit(cg, "    mov rcx, rbx\n    sar rax, cl\n");
     else if (op[0] == '&') emit(cg, "    and rax, rbx\n");
@@ -3930,11 +4082,15 @@ static void emit_binop_rax_rbx(Codegen* cg, const char* op) {
 void gen_expr(Codegen* cg, AstNode* n) {
     if (!n) return;  // Null safety guard
     if (n->type == AST_NUMBER) {
-        emit(cg, "    mov rax, %s\n", n->value);
+        if (legacy_bits()) emit(cg, "    mov eax, %s\n", n->value);
+        else emit(cg, "    mov rax, %s\n", n->value);
     } else if (n->type == AST_STRING) {
         char* label = strtab_add(cg->strtab, n->value, strlen(n->value));
-        emit(cg, "    mov rax, %s\n", label);
-        emit(cg, "    mov rbx, %d\n", (int)strlen(n->value));
+        if (legacy_bits()) emit(cg, "    mov eax, %s\n", label);
+        else {
+            emit(cg, "    mov rax, %s\n", label);
+            emit(cg, "    mov rbx, %d\n", (int)strlen(n->value));
+        }
     } else if (n->type == AST_IDENT) {
         // Try local variable first
         int off = symtab_lookup(cg->symtab, n->name);
@@ -3984,7 +4140,14 @@ void gen_expr(Codegen* cg, AstNode* n) {
         // Unary operators: '-' (negation) and '!' (logical NOT)
         if (n->children && n->child_count > 0) {
             gen_expr(cg, n->children[0]);
-            if (n->op && n->op[0] == '-') {
+            if (legacy_bits()) {
+                if (n->op && n->op[0] == '-') emit(cg, "    neg eax\n");
+                else if (n->op && n->op[0] == '!') {
+                    emit(cg, "    test eax, eax\n");
+                    emit(cg, "    setz al\n");
+                    emit(cg, "    movzx eax, al\n");
+                } else if (n->op && n->op[0] == '~') emit(cg, "    not eax\n");
+            } else if (n->op && n->op[0] == '-') {
                 emit(cg, "    neg rax\n");  // Two's complement negation
             } else if (n->op && n->op[0] == '!') {
                 // Logical NOT: convert non-zero to 0, zero to 1
@@ -4050,7 +4213,7 @@ void gen_expr(Codegen* cg, AstNode* n) {
         long right_val = 0;
         int shift_amount = 0;
 
-        if (optimization_level >= 2 && right && right->type == AST_NUMBER) {
+        if (optimization_level >= 2 && !legacy_bits() && right && right->type == AST_NUMBER) {
             right_val = atol(right->value);
             if (right_val > 1 && is_power_of_2(right_val)) {
                 use_shift = 1;
@@ -4079,7 +4242,12 @@ void gen_expr(Codegen* cg, AstNode* n) {
             emit(cg, "    add rax, rdx\n    and rax, %ld\n    sub rax, rdx\n", mask);
         } else {
             // Hosted -O2: a simple right-hand side lands in rbx. No push/pop.
-            if (optimization_level >= 2 && !g_freestanding && can_emit_rbx(cg, right))
+            // bits 16/32 keep edx (the high half of an MSR) across the operator.
+            if (legacy_bits()) {
+                emit(cg, "    push eax\n    push edx\n");
+                gen_expr(cg, n->children[1]);
+                emit(cg, "    mov ebx, eax\n    pop edx\n    pop eax\n");
+            } else if (optimization_level >= 2 && !g_freestanding && can_emit_rbx(cg, right))
                 emit_rbx(cg, right);
             else {
                 emit(cg, "    push rax\n");
@@ -4090,21 +4258,28 @@ void gen_expr(Codegen* cg, AstNode* n) {
         }
     } else if (n->type == AST_COMPARE) {
         gen_expr(cg, n->children[0]);
-        if (optimization_level >= 2 && !g_freestanding && can_emit_rbx(cg, n->children[1]))
+        if (legacy_bits()) {
+            emit(cg, "    push eax\n    push edx\n");
+            gen_expr(cg, n->children[1]);
+            emit(cg, "    mov ebx, eax\n    pop edx\n    pop eax\n");
+            emit(cg, "    cmp eax, ebx\n");
+        } else if (optimization_level >= 2 && !g_freestanding && can_emit_rbx(cg, n->children[1])) {
             emit_rbx(cg, n->children[1]);
-        else {
+            emit(cg, "    cmp rax, rbx\n");
+        } else {
             emit(cg, "    push rax\n");
             gen_expr(cg, n->children[1]);
             emit(cg, "    mov rbx, rax\n    pop rax\n");
+            emit(cg, "    cmp rax, rbx\n");
         }
-        emit(cg, "    cmp rax, rbx\n");
         if (!strcmp(n->op, "==")) emit(cg, "    sete al\n");
         else if (!strcmp(n->op, "!=")) emit(cg, "    setne al\n");
         else if (!strcmp(n->op, "<")) emit(cg, "    setl al\n");
         else if (!strcmp(n->op, ">")) emit(cg, "    setg al\n");
         else if (!strcmp(n->op, "<=")) emit(cg, "    setle al\n");
         else if (!strcmp(n->op, ">=")) emit(cg, "    setge al\n");
-        emit(cg, "    movzx rax, al\n");
+        if (legacy_bits()) emit(cg, "    movzx eax, al\n");
+        else emit(cg, "    movzx rax, al\n");
     } else if (n->type == AST_LOGICAL) {
         if (!strcmp(n->op, "&&")) {
             // Short-circuit AND: if left is false (0), don't evaluate right
@@ -4112,18 +4287,22 @@ void gen_expr(Codegen* cg, AstNode* n) {
             int end_label = new_label(cg);
 
             gen_expr(cg, n->children[0]);  // Evaluate left
-            emit(cg, "    test rax, rax\n");
+            if (legacy_bits()) emit(cg, "    test eax, eax\n");
+            else emit(cg, "    test rax, rax\n");
             emit(cg, "    jz .L%d  ; Jump if left is false\n", false_label);
 
             gen_expr(cg, n->children[1]);  // Evaluate right
-            emit(cg, "    test rax, rax\n");
+            if (legacy_bits()) emit(cg, "    test eax, eax\n");
+            else emit(cg, "    test rax, rax\n");
             emit(cg, "    jz .L%d  ; Jump if right is false\n", false_label);
 
-            emit(cg, "    mov rax, 1  ; Both true\n");
+            if (legacy_bits()) emit(cg, "    mov eax, 1\n");
+            else emit(cg, "    mov rax, 1  ; Both true\n");
             emit(cg, "    jmp .L%d\n", end_label);
 
             emit(cg, ".L%d:\n", false_label);
-            emit(cg, "    xor rax, rax  ; Result is false\n");
+            if (legacy_bits()) emit(cg, "    xor eax, eax\n");
+            else emit(cg, "    xor rax, rax  ; Result is false\n");
             emit(cg, ".L%d:\n", end_label);
         } else if (!strcmp(n->op, "||")) {
             // Short-circuit OR: if left is true (non-zero), don't evaluate right
@@ -4131,18 +4310,22 @@ void gen_expr(Codegen* cg, AstNode* n) {
             int end_label = new_label(cg);
 
             gen_expr(cg, n->children[0]);  // Evaluate left
-            emit(cg, "    test rax, rax\n");
+            if (legacy_bits()) emit(cg, "    test eax, eax\n");
+            else emit(cg, "    test rax, rax\n");
             emit(cg, "    jnz .L%d  ; Jump if left is true\n", true_label);
 
             gen_expr(cg, n->children[1]);  // Evaluate right
-            emit(cg, "    test rax, rax\n");
+            if (legacy_bits()) emit(cg, "    test eax, eax\n");
+            else emit(cg, "    test rax, rax\n");
             emit(cg, "    jnz .L%d  ; Jump if right is true\n", true_label);
 
-            emit(cg, "    xor rax, rax  ; Both false\n");
+            if (legacy_bits()) emit(cg, "    xor eax, eax\n");
+            else emit(cg, "    xor rax, rax  ; Both false\n");
             emit(cg, "    jmp .L%d\n", end_label);
 
             emit(cg, ".L%d:\n", true_label);
-            emit(cg, "    mov rax, 1  ; Result is true\n");
+            if (legacy_bits()) emit(cg, "    mov eax, 1\n");
+            else emit(cg, "    mov rax, 1  ; Result is true\n");
             emit(cg, ".L%d:\n", end_label);
         }
     } else if (n->type == AST_CALL) {
@@ -5023,20 +5206,31 @@ void gen_stmt(Codegen* cg, AstNode* n) {
     } else if (n->type == AST_IF) {
         int else_lab = new_label(cg);
         int end_lab = new_label(cg);
-        gen_expr(cg, n->children[0]);
-        emit(cg, "    test rax, rax\n    jz .L%d\n", else_lab);
-        gen_stmt(cg, n->children[1]);
-        emit(cg, "    jmp .L%d\n.L%d:\n", end_lab, else_lab);
-        if (n->child_count > 2)
-            gen_stmt(cg, n->children[2]);
-        emit(cg, ".L%d:\n", end_lab);
+        if (n->flags & AF_CARRY) {
+            emit(cg, "    jnc .L%d\n", else_lab);
+            gen_stmt(cg, n->children[0]);
+            emit(cg, "    jmp .L%d\n.L%d:\n", end_lab, else_lab);
+            if (n->child_count > 1)
+                gen_stmt(cg, n->children[1]);
+            emit(cg, ".L%d:\n", end_lab);
+        } else {
+            gen_expr(cg, n->children[0]);
+            if (legacy_bits()) emit(cg, "    test eax, eax\n    jz .L%d\n", else_lab);
+            else emit(cg, "    test rax, rax\n    jz .L%d\n", else_lab);
+            gen_stmt(cg, n->children[1]);
+            emit(cg, "    jmp .L%d\n.L%d:\n", end_lab, else_lab);
+            if (n->child_count > 2)
+                gen_stmt(cg, n->children[2]);
+            emit(cg, ".L%d:\n", end_lab);
+        }
     } else if (n->type == AST_WHILE) {
         int start_lab = new_label(cg);
         int end_lab = new_label(cg);
         int cont_lab = new_label(cg);
         emit(cg, ".L%d:\n", start_lab);
         gen_expr(cg, n->children[0]);
-        emit(cg, "    test rax, rax\n    jz .L%d\n", end_lab);
+        if (legacy_bits()) emit(cg, "    test eax, eax\n    jz .L%d\n", end_lab);
+        else emit(cg, "    test rax, rax\n    jz .L%d\n", end_lab);
         if (g_loop_depth >= MAX_LOOP_DEPTH) { diag_error(n->line, n->col, "loops nested too deeply"); return; }
         g_loop_break[g_loop_depth] = end_lab;
         g_loop_cont[g_loop_depth] = cont_lab;
@@ -5169,6 +5363,7 @@ void gen_func(Codegen* cg, AstNode* n) {
     }
 
     g_fn_flags = n->flags;
+    g_fn_bits = bits;
     g_cur_fn = n;
     snprintf(g_fn_name, sizeof(g_fn_name), "%s", n->name);
 
@@ -5297,6 +5492,7 @@ void gen_func(Codegen* cg, AstNode* n) {
     if (bits && bits != 64) emit(cg, "bits 64\n");
 
     g_fn_flags = 0;
+    g_fn_bits = 0;
     g_fn_name[0] = '\0';
     cg->symtab = old_symtab;
 }

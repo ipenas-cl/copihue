@@ -1,0 +1,56 @@
+// Sector that enters protected mode without asm() for lgdt, CR0, or
+// the COM1 writes. QEMU must show COPIHUE. Segment loads stay asm():
+// assigning ds is not in the language yet.
+
+data gdt {
+    dq 0;
+    dw 0xFFFF;
+    dw 0;
+    db 0;
+    db 0x9A;
+    db 0xCF;
+    db 0;
+    dw 0xFFFF;
+    dw 0;
+    db 0;
+    db 0x92;
+    db 0xCF;
+    db 0;
+}
+
+data gdtr {
+    dw 23;
+    dd gdt;
+}
+
+bits 16 naked fn _start() {
+    cli();
+    asm("xor ax, ax");
+    asm("mov ds, ax");
+    asm("mov es, ax");
+    asm("mov ss, ax");
+    asm("mov sp, 0x7C00");
+    asm("stc");
+    if carry {
+    }
+    lgdt(&gdtr);
+    write_cr0(read_cr0() | 1);
+    ljmp(0x08, pm);
+}
+
+bits 32 naked fn pm() {
+    asm("mov ax, 0x10");
+    asm("mov ds, ax");
+    asm("mov es, ax");
+    asm("mov ss, ax");
+    read_cr4();
+    while ((inb(0x3FD) & 0x20) == 0) { pause(); }
+    outb(0x3F8, 67);
+    outb(0x3F8, 79);
+    outb(0x3F8, 80);
+    outb(0x3F8, 73);
+    outb(0x3F8, 72);
+    outb(0x3F8, 85);
+    outb(0x3F8, 69);
+    while (1) { hlt(); }
+}

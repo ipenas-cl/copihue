@@ -1,0 +1,133 @@
+section .data
+section .text
+page:
+    dq 0
+pt:
+    dq page + 3
+    dq page + 0x83
+gdt:
+    dq 0
+    dw 0xFFFF, 0, 0x9A00, 0x00CF
+gdtr:
+    dw 23
+    dd gdt
+bits 16
+real_mode:
+    mov eax, 146
+    push eax
+    mov eax, 146
+    mov edx, eax
+    xor eax, eax
+    in al, dx
+    push eax
+    push edx
+    mov eax, 2
+    mov ebx, eax
+    pop edx
+    pop eax
+    or eax, ebx
+    pop edx
+    out dx, al
+    lgdt [gdtr]
+    mov eax, cr0
+    push eax
+    push edx
+    mov eax, 1
+    mov ebx, eax
+    pop edx
+    pop eax
+    or eax, ebx
+    mov cr0, eax
+    stc
+    jnc .L0
+    hlt
+    jmp .L1
+.L0:
+.L1:
+.L2:
+    mov eax, 1
+    test eax, eax
+    jz .L3
+    hlt
+.L4:
+    jmp .L2
+.L3:
+    ret
+bits 64
+bits 32
+protected:
+    mov eax, cr4
+    push eax
+    push edx
+    mov eax, 32
+    mov ebx, eax
+    pop edx
+    pop eax
+    or eax, ebx
+    mov cr4, eax
+    xor edx, edx
+    mov eax, 3221225600
+    mov ecx, eax
+    rdmsr
+    push eax
+    push edx
+    mov eax, 256
+    mov ebx, eax
+    pop edx
+    pop eax
+    or eax, ebx
+    push eax
+    push edx
+    mov eax, 3221225600
+    mov ecx, eax
+    pop edx
+    pop eax
+    wrmsr
+    mov eax, cr0
+    push eax
+    push edx
+    mov eax, 2147483648
+    mov ebx, eax
+    pop edx
+    pop eax
+    or eax, ebx
+    mov cr0, eax
+    mov eax, 2147483648
+    cpuid
+    mov eax, 2147483649
+    cpuid
+    mov eax, edx
+.L5:
+    mov eax, 1021
+    mov edx, eax
+    xor eax, eax
+    in al, dx
+    push eax
+    push edx
+    mov eax, 32
+    mov ebx, eax
+    pop edx
+    pop eax
+    and eax, ebx
+    push eax
+    push edx
+    mov eax, 0
+    mov ebx, eax
+    pop edx
+    pop eax
+    cmp eax, ebx
+    sete al
+    movzx eax, al
+    test eax, eax
+    jz .L6
+    pause
+.L7:
+    jmp .L5
+.L6:
+    mov eax, 1016
+    push eax
+    mov eax, 67
+    pop edx
+    out dx, al
+    ret
+bits 64
