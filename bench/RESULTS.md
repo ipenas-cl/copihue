@@ -1,13 +1,13 @@
 # Resultados
 
-Generado por `bench/run.sh`. Las muestras se tomaron entre 2026-10-25 22:33:23 UTC y 2026-10-25 22:34:10 UTC. Este archivo se escribió el 2026-10-25 22:36:02 UTC a partir de esas muestras, en la misma máquina. `make bench` vuelve a medir y sustituye este archivo.
+Generado por `bench/run.sh`. Las muestras se tomaron entre 2026-10-25 22:33:23 UTC y 2026-10-25 22:34:10 UTC. Este archivo se escribió el 2026-10-25 22:40:50 UTC a partir de esas muestras, en la misma máquina. `make bench` vuelve a medir y sustituye este archivo.
 
 ## Máquina y versiones
 
 | Dato | Valor |
 |---|---|
 | Muestras | 2026-10-25 22:33:23 UTC — 2026-10-25 22:34:10 UTC |
-| Tablas escritas | 2026-10-25 22:36:02 UTC |
+| Tablas escritas | 2026-10-25 22:40:50 UTC |
 | Sistema | Linux 6.12.94+ x86_64 |
 | CPU | Intel(R) Xeon(R) Processor |
 | Frecuencia que reporta `/proc/cpuinfo` | 2700.000 MHz |
@@ -106,29 +106,29 @@ Tiempo de ejecución en milisegundos: mediana (mínimo–máximo). La salida es 
 
 ```
 /workspace/bench/out/bin/fib_c: ELF 64-bit LSB pie executable, x86-64, version 1 (SYSV), dynamically linked, interpreter /lib64/ld-linux-x86-64.so.2, BuildID[sha1]=8c7fbbe3fe25a028fbbbcb1c2a779126601723cd, for GNU/Linux 3.2.0, not stripped
-	linux-vdso.so.1 (0x00007f53015f8000)
-	libc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x00007f5301200000)
-	/lib64/ld-linux-x86-64.so.2 (0x00007f53015fa000)
+	linux-vdso.so.1 (0x00007f3ca2634000)
+	libc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x00007f3ca2400000)
+	/lib64/ld-linux-x86-64.so.2 (0x00007f3ca2636000)
 ```
 
 ### fib rs
 
 ```
 /workspace/bench/out/bin/fib_rs: ELF 64-bit LSB pie executable, x86-64, version 1 (SYSV), dynamically linked, interpreter /lib64/ld-linux-x86-64.so.2, BuildID[sha1]=60a688d408ce3b39d85f0efd6c7cd70dc5e1ef56, for GNU/Linux 3.2.0, with debug_info, not stripped
-	linux-vdso.so.1 (0x00007fdfefe36000)
-	libgcc_s.so.1 => /lib/x86_64-linux-gnu/libgcc_s.so.1 (0x00007fdfefda3000)
-	libc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x00007fdfefa00000)
-	/lib64/ld-linux-x86-64.so.2 (0x00007fdfefe38000)
+	linux-vdso.so.1 (0x00007fee178d8000)
+	libgcc_s.so.1 => /lib/x86_64-linux-gnu/libgcc_s.so.1 (0x00007fee17845000)
+	libc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x00007fee17600000)
+	/lib64/ld-linux-x86-64.so.2 (0x00007fee178da000)
 ```
 
 ### fib ml
 
 ```
 /workspace/bench/out/bin/fib_ml: ELF 64-bit LSB pie executable, x86-64, version 1 (SYSV), dynamically linked, interpreter /lib64/ld-linux-x86-64.so.2, BuildID[sha1]=3696434e115e14f52c1f11eac0f27956aacd7f73, for GNU/Linux 3.2.0, with debug_info, not stripped
-	linux-vdso.so.1 (0x00007fd8399ad000)
-	libm.so.6 => /lib/x86_64-linux-gnu/libm.so.6 (0x00007fd8397f3000)
-	libc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x00007fd839400000)
-	/lib64/ld-linux-x86-64.so.2 (0x00007fd8399af000)
+	linux-vdso.so.1 (0x00007f6a8c0ff000)
+	libm.so.6 => /lib/x86_64-linux-gnu/libm.so.6 (0x00007f6a8bf45000)
+	libc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x00007f6a8bc00000)
+	/lib64/ld-linux-x86-64.so.2 (0x00007f6a8c101000)
 ```
 
 ## `fold` y el bucle que otros compiladores pueden borrar
@@ -383,9 +383,9 @@ En la ventana 21:45, con rangos que no se solapan salvo donde se dice: `sort` qu
 
 `-O0`, `--freestanding`, `--flat` y `--boot`, incluido `tests/usermode` y `tests/ctx`, generan el mismo código que 0.29.0, salvo la línea de versión. `bits 16` y `bits 32` no entran en el desplazamiento.
 
-## 0.29.1 → 0.29.2
+## 0.29.1 → 0.29.3
 
-El generador no cambia. El único diff de `copihue.c` contra 0.29.1 es `LANG_VERSION`. La ventana de esta página es 2026-10-25 22:33:23 UTC — 2026-10-25 22:34:10 UTC, binario 0.29.2. Los ocho programas de antes se solapan con la ventana 21:45 (el binario de aquella imprimía 0.28.2 y el `-O2` coincide con 0.29.1 salvo la versión): `fib` 393.3–404.6 contra 393.0–394.8, `sieve` 72.1–72.7 contra 71.9–72.5, `matmul` 46.2–46.5 contra 46.4–48.6, `arith` 62.8–63.4 contra 63.1–63.9, `chain` 165.9–166.6 contra 166.4–168.6, `fold` 0.9–2.3 contra 1.3–2.5, `array` 45.0–45.9 contra 45.1–45.5, `sort` 52.3–53.0 contra 52.4–53.1. `text` de esos ocho no cambia (`fib` 385, `sieve` 672, `matmul` 1018, `arith` 435, `chain` 406, `fold` 380, `array` 588, `sort` 659).
+`main` tomó 0.29.2 para el arreglo de `ebx` en `bits 16` y `bits 32`. Esta ronda es 0.29.3 y no cambia el generador de 64 bits. La ventana de esta página es 2026-10-25 22:33:23 UTC — 2026-10-25 22:34:10 UTC. El binario medido imprimía 0.29.2. El `-O2` hosted de los trece programas coincide con ese binario salvo la línea de versión. Los ocho programas de antes se solapan con la ventana 21:45 (el binario de aquella imprimía 0.28.2 y el `-O2` coincide con 0.29.1 salvo la versión): `fib` 393.3–404.6 contra 393.0–394.8, `sieve` 72.1–72.7 contra 71.9–72.5, `matmul` 46.2–46.5 contra 46.4–48.6, `arith` 62.8–63.4 contra 63.1–63.9, `chain` 165.9–166.6 contra 166.4–168.6, `fold` 0.9–2.3 contra 1.3–2.5, `array` 45.0–45.9 contra 45.1–45.5, `sort` 52.3–53.0 contra 52.4–53.1. `text` de esos ocho no cambia (`fib` 385, `sieve` 672, `matmul` 1018, `arith` 435, `chain` 406, `fold` 380, `array` 588, `sort` 659).
 
 gcc `-O2` de `matmul.c` no intercambia `i, j, k`. El producto interno es SSE (`movdqa`, `pmuludq`, `paddq`) y el cero del resultado es `memset`. Eso no se emite. El desenrollado par y el `k` probado al final siguen fuera. gcc `-O2` de `fib.c` sigue en 416 líneas: árbol par/impar, `sub rsp, 200`, una `call fib`. No hay un `mov` de menos en el prólogo de la recurrencia directa. El prólogo de `n >= 2` sigue en 16 instrucciones. `fib` en esta ventana es 3.06× C (393.3–404.6 contra 130.4–131.8), por encima de Rust (193.3–194.1) y de OCaml (365.3–365.8).
 
@@ -399,4 +399,4 @@ Los cinco programas nuevos ejecutan el bucle: el decimal de la salida no está e
 
 `sieve` en esta ventana queda por encima de C sin solape (72.1–72.7 contra 69.7–70.2); el rango de Copihue se solapa con el de 21:45, y el ensamblado es el de entonces. `arith` queda por encima de C (62.8–63.4 contra 58.9–59.7) y `array` también (45.0–45.9 contra 40.9–41.5). Los dos se solapan con 21:45. `matmul` sigue por encima de C (46.2–46.5 contra 31.4–32.1) y por debajo de Rust (50.0–50.7) y de OCaml (77.6–80.3). `sort` queda por debajo de C (52.3–53.0 contra 73.2–77.2) y de OCaml (153.2–157.7). Contra Rust (52.7–53.5) se solapa; el cociente de medianas es 0.99. El local de `array` y el global se solapan (45.0–45.9 y 45.0–45.4). `fold` se solapa con C (0.9–2.3 contra 1.2–2.2) y con Rust (1.3–1.6). Queda por debajo de OCaml (230.3–254.1). El decimal está en el `.s` de gcc, rustc y Copihue. `chain` queda por debajo de los tres (165.9–166.6 contra C 186.7–187.4, Rust 181.8–184.7 y OCaml 186.9–187.5). El binario de `chain` es el de 0.25.1, y esto es esta fila y estas corridas.
 
-`-O0`, `--freestanding`, `--flat` y `--boot` generan el mismo código que 0.29.1, salvo la línea de versión. `make test`: 311 passed, 0 failed. `make net-test` salió 0.
+El hosted de 64 bits genera el mismo código que el binario medido (imprimía 0.29.2), salvo la línea de versión. `bits 16` y `bits 32` son el arreglo de `ebx` de 0.29.2.

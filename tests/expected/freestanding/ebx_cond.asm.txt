@@ -1,0 +1,112 @@
+section .data
+section .text
+bits 16
+keep16:
+    mov ebx, 7
+.L0:
+    mov eax, ebx
+    push ebx
+    push eax
+    push edx
+    mov eax, 0
+    mov ebx, eax
+    pop edx
+    pop eax
+    cmp eax, ebx
+    pop ebx
+    je .L1
+    mov eax, ebx
+    push eax
+    push edx
+    mov eax, 1
+    mov ebx, eax
+    pop edx
+    pop eax
+    sub eax, ebx
+    mov ebx, eax
+.L2:
+    jmp .L0
+.L1:
+    mov eax, ebx
+    push ebx
+    push eax
+    push edx
+    mov eax, 1
+    mov ebx, eax
+    pop edx
+    pop eax
+    and eax, ebx
+    pop ebx
+    push ebx
+    push eax
+    push edx
+    mov eax, 0
+    mov ebx, eax
+    pop edx
+    pop eax
+    cmp eax, ebx
+    pop ebx
+    jne .L3
+    mov ebx, 1
+    jmp .L4
+.L3:
+.L4:
+    ret
+bits 64
+bits 32
+keep32:
+    mov ebx, 7
+    mov ecx, 1
+.L5:
+    mov eax, ebx
+    push ebx
+    push eax
+    push edx
+    mov eax, 0
+    mov ebx, eax
+    pop edx
+    pop eax
+    cmp eax, ebx
+    pop ebx
+    je .L6
+    mov eax, ebx
+    push eax
+    push edx
+    mov eax, 1
+    mov ebx, eax
+    pop edx
+    pop eax
+    sub eax, ebx
+    mov ebx, eax
+.L7:
+    jmp .L5
+.L6:
+    mov eax, ecx
+    push ebx
+    push eax
+    push edx
+    mov eax, 1
+    mov ebx, eax
+    pop edx
+    pop eax
+    push ecx
+    mov ecx, ebx
+    shl eax, cl
+    pop ecx
+    pop ebx
+    push ebx
+    push eax
+    push edx
+    mov eax, 0
+    mov ebx, eax
+    pop edx
+    pop eax
+    cmp eax, ebx
+    pop ebx
+    jne .L8
+    mov ecx, 1
+    jmp .L9
+.L8:
+.L9:
+    ret
+bits 64

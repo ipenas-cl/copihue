@@ -1,0 +1,25 @@
+// also-o2
+// bits 16 and bits 32: an if/while comparison does not use ebx. `&` and
+// `<<` inside the condition push the scratch and pop it before the jump.
+// Assembled, not booted. tests/boot/ebx_keep.lap runs the bits 16 case.
+
+bits 16 naked fn keep16() {
+    ebx = 7;
+    while (ebx != 0) {
+        ebx = ebx - 1;
+    }
+    if ((ebx & 1) == 0) {
+        ebx = 1;
+    }
+}
+
+bits 32 naked fn keep32() {
+    ebx = 7;
+    ecx = 1;
+    while (ebx != 0) {
+        ebx = ebx - 1;
+    }
+    if ((ecx << 1) == 0) {
+        ecx = 1;
+    }
+}
