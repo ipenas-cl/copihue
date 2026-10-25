@@ -14,7 +14,7 @@
 
 // ==== NAMING (single place to change when the language is renamed) ====
 #define LANG_NAME     "Copihue"
-#define LANG_VERSION  "0.22.2"
+#define LANG_VERSION  "0.23.0"
 #define COMPILER_BIN  "copihue"
 #define SRC_EXT       ".lap"   /* Lapageria rosea, the copihue */
 #define OLD_SRC_EXT   ".cph"   /* v0.18.x extension, still accepted with a warning */
@@ -2145,6 +2145,38 @@ static int gen_core_builtin(Codegen* cg, AstNode* n) {
         if (n->child_count != 2) { diag_error(n->line, n->col, "wrmsr(msr, value) takes 2 arguments"); return 1; }
         gen_two_args(cg, n);                 // rdx = msr, rax = value
         emit(cg, "    mov rcx, rdx\n    mov rdx, rax\n    shr rdx, 32\n    wrmsr\n");
+        return 1;
+    }
+    // ltr takes a selector value (the low 16 bits), not a pointer. lidt/lgdt
+    // are the ones that load a memory operand.
+    if (!strcmp(f, "ltr")) {
+        if (n->child_count != 1) {
+            diag_error(n->line, n->col, "ltr(selector) takes 1 argument");
+            return 1;
+        }
+        if (!g_freestanding) {
+            diag_error(n->line, n->col,
+                       "ltr() is only available with --freestanding, --flat, or --boot");
+            return 1;
+        }
+        gen_expr(cg, n->children[0]);
+        emit(cg, "    ltr ax\n");
+        return 1;
+    }
+    if (!strcmp(f, "iretq") || !strcmp(f, "sysretq")) {
+        if (n->child_count != 0) {
+            diag_error(n->line, n->col, "%s() takes no arguments", f);
+            return 1;
+        }
+        if (!g_freestanding) {
+            diag_error(n->line, n->col,
+                       "%s() is only available with --freestanding, --flat, or --boot", f);
+            return 1;
+        }
+        // NASM has no `sysretq` mnemonic. `o64 sysret` is REX.W SYSRET
+        // (48 0F 07): RIP from rcx, RFLAGS from r11, ring 3.
+        if (!strcmp(f, "sysretq")) emit(cg, "    o64 sysret\n");
+        else emit(cg, "    iretq\n");
         return 1;
     }
     // CR0/CR2/CR3/CR4. Reads leave the register in rax (an i64 expression).
@@ -4345,14 +4377,17 @@ void gen_func(Codegen* cg, AstNode* n) {
         if (has_err) emit(cg, "    pop rax\n");
         for (int i = 14; i >= 0; i--) emit(cg, "    pop %s\n", saved[i]);
         if (has_err) emit(cg, "    add rsp, 8\n");  // drop the CPU error code
+        // RIP, CS, RFLAGS, RSP, SS are still below the saved GPRs. iretq
+        // returns to the ring in that frame, including ring 3 when CS.RPL is 3.
         emit(cg, "    iretq\n");
     } else if (is_sys) {
         emit(cg, "    xor rax, rax\n");
         emit(cg, ".Lret_%s:\n", n->name);
         emit(cg, "    leave\n");
         if (param_count >= 7) {
-            emit(cg, "    pop rax\n");
-            emit(cg, "    pop r9\n");
+            // Spacer and a6 sit above the saved r11. Drop them without
+            // popping into rax: rax is the value sysret returns to ring 3.
+            emit(cg, "    add rsp, 16\n");
         }
         emit(cg, "    pop r11\n");
         emit(cg, "    pop rcx\n");

@@ -1,0 +1,10 @@
+tests/errors/priv_hosted.lap:2:5: error: ltr() is only available with --freestanding, --flat, or --boot
+      2 |     ltr(0x28);
+        |     ^
+tests/errors/priv_hosted.lap:3:5: error: iretq() is only available with --freestanding, --flat, or --boot
+      3 |     iretq();
+        |     ^
+tests/errors/priv_hosted.lap:4:5: error: sysretq() is only available with --freestanding, --flat, or --boot
+      4 |     sysretq();
+        |     ^
+3 errors, compilation failed
