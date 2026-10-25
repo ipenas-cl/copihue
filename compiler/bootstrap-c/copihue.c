@@ -683,11 +683,18 @@ static int g_strength_busy;
 static AstNode* g_enclosing_while;
 static AstNode* g_enclosing_prev;
 
+// Argument registers (rdi, rsi, r8, r9) must map to their own low names.
+// Falling back to eax/ax/al reads a different register: lea rdi, [r12-1]
+// followed by movsxd rdi, eax keeps the old eax and the call never shrinks.
 static const char* reg_dword(const char* reg) {
     if (!strcmp(reg, "rax")) return "eax";
     if (!strcmp(reg, "rbx")) return "ebx";
     if (!strcmp(reg, "rcx")) return "ecx";
     if (!strcmp(reg, "rdx")) return "edx";
+    if (!strcmp(reg, "rsi")) return "esi";
+    if (!strcmp(reg, "rdi")) return "edi";
+    if (!strcmp(reg, "r8")) return "r8d";
+    if (!strcmp(reg, "r9")) return "r9d";
     if (!strcmp(reg, "r10")) return "r10d";
     if (!strcmp(reg, "r11")) return "r11d";
     if (!strcmp(reg, "r12")) return "r12d";
@@ -702,6 +709,10 @@ static const char* reg_word(const char* reg) {
     if (!strcmp(reg, "rbx")) return "bx";
     if (!strcmp(reg, "rcx")) return "cx";
     if (!strcmp(reg, "rdx")) return "dx";
+    if (!strcmp(reg, "rsi")) return "si";
+    if (!strcmp(reg, "rdi")) return "di";
+    if (!strcmp(reg, "r8")) return "r8w";
+    if (!strcmp(reg, "r9")) return "r9w";
     if (!strcmp(reg, "r10")) return "r10w";
     if (!strcmp(reg, "r11")) return "r11w";
     if (!strcmp(reg, "r12")) return "r12w";
@@ -5839,6 +5850,10 @@ static const char* reg_low(const char* reg) {
     if (!strcmp(reg, "rbx")) return "bl";
     if (!strcmp(reg, "rcx")) return "cl";
     if (!strcmp(reg, "rdx")) return "dl";
+    if (!strcmp(reg, "rsi")) return "sil";
+    if (!strcmp(reg, "rdi")) return "dil";
+    if (!strcmp(reg, "r8")) return "r8b";
+    if (!strcmp(reg, "r9")) return "r9b";
     if (!strcmp(reg, "r10")) return "r10b";
     if (!strcmp(reg, "r11")) return "r11b";
     if (!strcmp(reg, "r12")) return "r12b";
