@@ -14,7 +14,7 @@
 
 // ==== NAMING (single place to change when the language is renamed) ====
 #define LANG_NAME     "Copihue"
-#define LANG_VERSION  "0.22.0"
+#define LANG_VERSION  "0.22.1"
 #define COMPILER_BIN  "copihue"
 #define SRC_EXT       ".lap"   /* Lapageria rosea, the copihue */
 #define OLD_SRC_EXT   ".cph"   /* v0.18.x extension, still accepted with a warning */
@@ -1473,11 +1473,47 @@ AstNode* parse_struct_def(Parser* p) {
     return struct_def;
 }
 
-// Parse type specification: i32, [i32; 10], *i32, *mut i32, Point (struct)
+static int at_type_start(Parser* p) {
+    return check_tok(p, T_STAR) || check_tok(p, T_LBRACKET) || check_tok(p, T_IDENT);
+}
+
+static void error_expected_type(Parser* p) {
+    Tok got = peek_tok(p);
+    if (got.t == T_EOF)
+        diag_error(got.line, got.col, "expected a type, found end of file");
+    else
+        diag_error(got.line, got.col, "expected a type, found '%.*s'", got.len, got.s);
+    exit(1);
+}
+
+// A nested pointer or array, spelled back out so one TypeSpec level can hold it.
+// A plain `*u8` does not use this: its base stays `u8`.
+static char* type_spec_name(TypeSpec s) {
+    char buf[256];
+    if (s.is_array) {
+        snprintf(buf, sizeof(buf), "[%s; %d]", s.base_type ? s.base_type : "i64", s.array_count);
+        return strdup(buf);
+    }
+    if (s.is_pointer) {
+        snprintf(buf, sizeof(buf), "*%s%s%s",
+                 s.is_volatile ? "volatile " : "",
+                 s.is_mutable ? "mut " : "",
+                 s.base_type ? s.base_type : "");
+        return strdup(buf);
+    }
+    return s.base_type ? strdup(s.base_type) : strdup("");
+}
+
+static char* pointee_name(TypeSpec inner) {
+    if (inner.is_pointer || inner.is_array) return type_spec_name(inner);
+    return inner.base_type;
+}
+
+// Parse type specification: i32, [i32; 10], *i32, *mut i32, **u8, Point (struct)
 TypeSpec parse_type(Parser* p) {
     TypeSpec spec = {0};
 
-    // Check for pointer: *T, *mut T, *volatile T, *volatile mut T
+    // Check for pointer: *T, *mut T, *volatile T, *volatile mut T, **T
     if (check_tok(p, T_STAR)) {
         advance_tok(p);
         spec.is_pointer = 1;
@@ -1496,20 +1532,18 @@ TypeSpec parse_type(Parser* p) {
             spec.is_volatile = 1;
         }
 
-        // Get pointee type
-        Tok type = advance_tok(p);
-        spec.base_type = strndup(type.s, type.len);
+        if (!at_type_start(p)) error_expected_type(p);
+        spec.base_type = pointee_name(parse_type(p));
         return spec;
     }
 
-    // Check for array: [T; N]
+    // Check for array: [T; N], including [*u8; 4]
     if (check_tok(p, T_LBRACKET)) {
         advance_tok(p);
         spec.is_array = 1;
 
-        // Get element type
-        Tok elem_type = advance_tok(p);
-        spec.base_type = strndup(elem_type.s, elem_type.len);
+        if (!at_type_start(p)) error_expected_type(p);
+        spec.base_type = pointee_name(parse_type(p));
 
         expect(p, T_SEMI);
 
@@ -1522,6 +1556,7 @@ TypeSpec parse_type(Parser* p) {
     }
 
     // Basic type or struct name (i32, i64, Point, Vector, etc.)
+    if (!check_tok(p, T_IDENT)) error_expected_type(p);
     Tok type = advance_tok(p);
     spec.base_type = strndup(type.s, type.len);
     return spec;
@@ -1592,7 +1627,16 @@ AstNode* parse_func(Parser* p) {
     }
     expect(p, T_RPAREN);
 
-    if (match_tok(p, T_ARROW)) advance_tok(p);
+    // The return type used to be a single token, so `-> *u8` ate `*` and then
+    // rejected `u8`. It is parsed and not checked: the value still comes back in rax.
+    if (match_tok(p, T_ARROW)) {
+        TypeSpec spec = parse_type(p);
+        func->is_pointer = spec.is_pointer | (spec.is_mutable << 1) | (spec.is_volatile << 2);
+        func->array_size = spec.array_count;
+        if (spec.is_pointer || spec.is_array) func->value = type_spec_name(spec);
+        else func->value = spec.base_type;
+        if (spec.is_array) func->struct_type = strdup("__array__");
+    }
 
     // Check if this is a forward declaration (ends with ;) or full definition (has body)
     if (check_tok(p, T_SEMI)) {
@@ -2522,6 +2566,8 @@ void gen_array_index(Codegen* cg, AstNode* n) {
                         elem_size = 4;
                     } else if (!strcmp(base_type, "i64") || !strcmp(base_type, "u64")) {
                         elem_size = 8;
+                    } else if (base_type[0] == '*') {
+                        elem_size = 8;
                     } else {
                         // Not a primitive type - check if it's a struct
                         StructType* st = typetab_lookup(cg->types, base_type);
@@ -2636,6 +2682,8 @@ void gen_array_index(Codegen* cg, AstNode* n) {
                 } else if (!strcmp(base_type, "i32") || !strcmp(base_type, "u32")) {
                     elem_size = 4;
                 } else if (!strcmp(base_type, "i64") || !strcmp(base_type, "u64")) {
+                    elem_size = 8;
+                } else if (base_type[0] == '*') {
                     elem_size = 8;
                 } else {
                     // Not a primitive type - check if it's a struct
@@ -2801,6 +2849,7 @@ void gen_array_index(Codegen* cg, AstNode* n) {
                 else if (!strcmp(base, "i16") || !strcmp(base, "u16")) elem_size = 2;
                 else if (!strcmp(base, "i32") || !strcmp(base, "u32")) elem_size = 4;
                 else if (!strcmp(base, "i64") || !strcmp(base, "u64")) elem_size = 8;
+                else if (base[0] == '*') elem_size = 8;
                 else {
                     StructType* est = typetab_lookup(cg->types, (char*)base);
                     if (est && est->size > 0) { elem_size = est->size; is_struct_elem = 1; }
