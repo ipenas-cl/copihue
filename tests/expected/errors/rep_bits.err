@@ -1,0 +1,4 @@
+tests/errors/rep_bits.lap:3:5: error: rep_stosq() is not available in bits 16
+      3 |     rep_stosq();
+        |     ^
+1 error, compilation failed

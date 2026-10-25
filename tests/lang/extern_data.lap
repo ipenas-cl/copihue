@@ -1,0 +1,12 @@
+// `extern` names a qword. The `data` block is its bytes, under that same name.
+// A `let` would have emitted the label itself; this one is defined as data.
+
+extern answer;
+
+fn main() -> i64 {
+    print_int(answer);
+    println("");
+    return 0;
+}
+
+data answer { dq 42; }

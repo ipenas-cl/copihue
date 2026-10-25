@@ -11,7 +11,8 @@
 # 2. Error tests: every tests/errors/*.lap must FAIL to compile and its
 #    diagnostics must match tests/expected/errors/<name>.err.
 # 3. Freestanding tests: tests/freestanding/*.lap compile with --freestanding,
-#    the output must assemble with nasm, and contain no _start or syscall.
+#    the output must assemble with nasm, and contain no _start. A `syscall`
+#    instruction is allowed only when the source calls syscall().
 # 4. Flat binaries: tests/flat/*.lap at --flat 0x10000.
 # 5. Boot sectors: tests/boot/*.lap, and QEMU must print COPIHUE.
 # 6. User mode: tests/usermode, and QEMU must print USER.
@@ -72,7 +73,12 @@ for src in tests/freestanding/*.lap; do
   if ! ( cd "$WORK" && "$CC" --freestanding -o fs.asm "$ROOT/$src" 2>err.txt ); then
     fail=$((fail+1)); failed+=("$src"); echo "FAIL $src:"; cat "$WORK/err.txt"; continue
   fi
-  if grep -qE '_start|^\s*syscall' "$WORK/fs.asm" || ! nasm -f elf64 "$WORK/fs.asm" -o "$WORK/fs.o"; then
+  # A lone `syscall` is the freestanding instruction. The hosted runtime
+  # is still rejected: it is a compile error, and a stray syscall from a
+  # source that never calls syscall() fails this check.
+  if grep -q '_start' "$WORK/fs.asm" || \
+     { grep -qE '^\s*syscall' "$WORK/fs.asm" && ! grep -q 'syscall(' "$src"; } || \
+     ! nasm -f elf64 "$WORK/fs.asm" -o "$WORK/fs.o"; then
     fail=$((fail+1)); failed+=("$src"); echo "FAIL $src: not freestanding or does not assemble"; continue
   fi
   # Keep only instructions (drop comments/blank lines) as the golden output.
@@ -83,7 +89,9 @@ for src in tests/freestanding/*.lap; do
     if ! ( cd "$WORK" && "$CC" -O2 --freestanding -o fs2.asm "$ROOT/$src" 2>err.txt ); then
       fail=$((fail+1)); failed+=("$src -O2"); echo "FAIL $src -O2:"; cat "$WORK/err.txt"; continue
     fi
-    if grep -qE '_start|^\s*syscall' "$WORK/fs2.asm" || ! nasm -f elf64 "$WORK/fs2.asm" -o "$WORK/fs2.o"; then
+    if grep -q '_start' "$WORK/fs2.asm" || \
+       { grep -qE '^\s*syscall' "$WORK/fs2.asm" && ! grep -q 'syscall(' "$src"; } || \
+       ! nasm -f elf64 "$WORK/fs2.asm" -o "$WORK/fs2.o"; then
       fail=$((fail+1)); failed+=("$src -O2"); echo "FAIL $src -O2: not freestanding or does not assemble"; continue
     fi
     grep -vE '^\s*(;|$)' "$WORK/fs2.asm" | grep -v '^; Generated' > "$WORK/fs2.norm"
