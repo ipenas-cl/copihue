@@ -1,0 +1,4 @@
+tests/errors/store_range.lap:3:24: error: expected u8, found integer literal 300
+      3 |     *(0x1000 as *u8) = 300;
+        |                        ^
+1 error, compilation failed

@@ -1,0 +1,4 @@
+tests/errors/reg_naked.lap:2:8: error: register 'ax' is only available in a naked function
+      2 |     ax = 1;
+        |        ^
+1 error, compilation failed

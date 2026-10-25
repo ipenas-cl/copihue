@@ -1,0 +1,7 @@
+tests/errors/naked_addr.lap:2:12: error: return value: expected i64, found *i64
+      2 |     return &n;
+        |            ^
+tests/errors/naked_addr.lap:2:13: error: naked parameter 'n' has no address
+      2 |     return &n;
+        |             ^
+2 errors, compilation failed
