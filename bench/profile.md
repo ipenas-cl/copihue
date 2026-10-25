@@ -205,3 +205,28 @@ Los cinco programas nuevos ejecutan el bucle: el decimal de la salida no está e
 `sieve` en esta ventana queda por encima de C sin solape (72.1–72.7 contra 69.7–70.2); el rango de Copihue se solapa con el de 21:45, y el ensamblado es el de entonces. `arith` queda por encima de C (62.8–63.4 contra 58.9–59.7) y `array` también (45.0–45.9 contra 40.9–41.5). Los dos se solapan con 21:45. `matmul` sigue por encima de C (46.2–46.5 contra 31.4–32.1) y por debajo de Rust (50.0–50.7) y de OCaml (77.6–80.3). `sort` queda por debajo de C (52.3–53.0 contra 73.2–77.2) y de OCaml (153.2–157.7). Contra Rust (52.7–53.5) se solapa; el cociente de medianas es 0.99. El local de `array` y el global se solapan (45.0–45.9 y 45.0–45.4). `fold` se solapa con C (0.9–2.3 contra 1.2–2.2) y con Rust (1.3–1.6). Queda por debajo de OCaml (230.3–254.1). El decimal está en el `.s` de gcc, rustc y Copihue. `chain` queda por debajo de los tres (165.9–166.6 contra C 186.7–187.4, Rust 181.8–184.7 y OCaml 186.9–187.5). El binario de `chain` es el de 0.25.1, y esto es esta fila y estas corridas.
 
 El hosted de 64 bits genera el mismo código que el binario medido (imprimía 0.29.2), salvo la línea de versión. `bits 16` y `bits 32` son el arreglo de `ebx` de 0.29.2.
+
+## 0.29.3 → 0.29.5
+
+`main` tomó 0.29.4 para restaurar `ebx` en la aritmética de `bits 16` y `bits 32`. Esta ronda es 0.29.5 y no toca ese camino. La ventana de esta página es 2026-10-25 23:19:30 UTC — 2026-10-25 23:20:17 UTC. La referencia es la ventana 22:33:23–22:34:10 UTC (el binario imprimía 0.29.2; el `-O2` hosted de 0.29.3 coincide con él salvo la versión). Mediana de Copihue en milisegundos (mínimo–máximo). El cociente es la referencia / esta medición.
+
+| Programa | 22:33 (0.29.3) | 0.29.5 | referencia / 0.29.5 |
+|---|---:|---:|---:|
+| `copy` | 47.8 (47.5–49.0) | 37.7 (37.5–38.4) | 1.27 |
+| `fill` | 32.4 (32.1–32.7) | 17.2 (16.8–17.7) | 1.88 |
+| `list` | 53.4 (53.0–54.2) | 40.4 (40.1–40.8) | 1.32 |
+| `parse` | 22.3 (21.9–22.5) | 22.1 (21.9–22.7) | 1.01 |
+
+`copy`, `fill` y `list` bajan, y los rangos no se solapan. `parse` se solapa. Su ensamblado `-O2` es el de 0.29.3, salvo la línea de versión, y `text` sigue en 586. `fib`, `sieve`, `matmul`, `arith`, `chain`, `fold`, `array`, `sort`, `hash` y `array_global` también coinciden con ese ensamblado, salvo la versión. `text` de esos diez no cambia (`fib` 385, `sieve` 672, `matmul` 1018, `arith` 435, `chain` 406, `fold` 380, `array` 588, `sort` 659, `hash` 494; `array_global` sigue en 549). `copy` pasa de 534 a 549, `fill` de 493 a 582 y `list` de 627 a 586.
+
+La copia reconocible es `rep movsb` (`push rsi` / `push rdi` / `pushfq` / `cld` / dos `lea` / `mov rcx, 262144` / `rep movsb` / los tres `pop`) y luego `mov` de `i` al límite. El bucle que sigue, `sum = sum + dst[i]` y `src[i] = (src[i] + 1) & 255`, queda escalar. Por eso `copy` sigue en 3.84× C (37.5–38.4 contra 9.2–9.9), por encima de Rust (16.6–19.4) y por debajo de OCaml (162.6–163.9). gcc sigue con `call memcpy` en la copia.
+
+El llenado `(buf[i] + i + r) & 255` es ocho instrucciones: `movdqu` / `paddb` índice / `paddb` de `r` / `movdqu` / `paddb` de 16 / `add rax, 16` / `sub rcx` / `jnz`. El vector de índice arranca en los bytes 0..15. `movdqu` no pide alineación a 16. No es `rep stosb`: el byte no es constante. `fill` queda en 1.54× C (16.8–17.7 contra 11.0–11.6), por encima de Rust (11.9–12.8) y por debajo de OCaml (90.9–91.5). La suma del buffer sigue escalar. Un largo que no es múltiplo de 16 no entra.
+
+El salto de `list` es `mov rax, i` / `shl rax, 4` / `lea rax, [nodes+rax]` / `add sum, [rax]` / `mov i, [rax+8]` / `cmp i, 0` / `jge`. Siete instrucciones. Antes eran dos `imul rax, 16` y un `push`/`pop` del acumulador. `sal` y `shl` son el mismo opcode; el emisor escribe `shl`. Un array local no entra, para no saltarse el chequeo de límites. Un struct de 24 bytes sigue con `imul`. En esta ventana `list` queda por encima de C (40.1–40.8 contra 32.9–33.5) y de OCaml (30.5–31.2). Queda por debajo de Rust (41.6–42.1); los rangos no se solapan. El cociente de medianas contra C es 1.21 y contra Rust 0.96. Esto es esta fila y estas corridas.
+
+`* 10` sigue siendo `imul`. Se midió `lea` de `(x+x*4)*2`, y el `lea` fusionado de `v * 10 + (c - 48)`, antes de esta ventana (un calentamiento y siete corridas, `taskset -c 0`). `parse` quedó en 22.6 ms (22.2–22.9) contra 22.3 ms (21.9–22.5). Los rangos se solapan, y esa forma no está. En la ventana oficial, con `imul`, `parse` es 22.1 ms (21.9–22.7), 1.60× C (13.4–14.4), por encima de C y por debajo de OCaml (33.2–34.7). Contra Rust (13.1–15.7) no se solapa: Copihue queda por encima.
+
+`hash` se solapa con C (44.8–45.5 contra 45.2–45.7). El cociente de medianas es 0.99. No queda por debajo de C. El ensamblado no cambió. `sort` se solapa con Rust (52.3–52.9 contra 52.8–53.2); el cociente de medianas es 1.00. `fold` se solapa con C (1.1–1.8 contra 1.1–1.6) y con Rust (1.3–1.7). `chain` queda por debajo de los tres (166.0–168.0 contra C 187.0–187.5, Rust 181.8–183.5 y OCaml 187.3–187.7). El binario es el de 0.25.1, y esto es esta fila y estas corridas. `fib` sigue en 3.01× C (392.8–394.4 contra 130.1–130.9). El prólogo de `n >= 2` sigue en 16 instrucciones. gcc `-O2` de `matmul` sigue con `pmuludq`; eso no se emite.
+
+`-O0`, `--freestanding`, `--flat` y `--boot` no entran en estas tres reescrituras. `bits 16` y `bits 32` tampoco: siguen en el arreglo de `ebx` de 0.29.4.
