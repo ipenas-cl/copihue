@@ -2,7 +2,7 @@
 
 Todos los cambios importantes del proyecto.
 
-## [0.27.2] - 2026-10-25
+## [0.27.3] - 2026-10-25
 
 ### Added
 - `cld()` and `std()` emit that instruction and take no arguments, in `bits 16`, `bits 32`, and 64-bit code. `rep` still honors whatever DF is set.
@@ -13,7 +13,7 @@ Todos los cambios importantes del proyecto.
 - `tests/boot/call16.lap` calls a `bits 16` function, uses `bx` and `bp`, jumps through `jmp word [land]`, and writes `COPIHUE` to COM1. QEMU checks that string. `tests/boot/call32.lap` does the same in protected mode (`eax` / `ebx` / `ebp` / `esi`, `jmp dword [land]`). `tests/freestanding/jmp_call.lap` is the instruction stream at `-O0` and `-O2`, including `syscall(1, 65, 1, 1)`. It is assembled, not booted.
 
 ### Changed
-- Language version is 0.27.2.
+- Language version is 0.27.3.
 
 ## [0.26.1] - 2026-10-25
 
