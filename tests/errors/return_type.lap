@@ -1,0 +1,3 @@
+fn exc_name(vec: i64) -> * {
+    return vec;
+}

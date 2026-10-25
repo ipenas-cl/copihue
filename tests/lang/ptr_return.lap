@@ -1,0 +1,64 @@
+struct Point { x: i64, y: i64 }
+
+fn exc_name(vec: i64) -> *u8 {
+    return vec;
+}
+
+fn as_mut(p: *u8) -> *mut u8 {
+    return p;
+}
+
+fn as_vol(p: *u8) -> *volatile mut u8 {
+    return p;
+}
+
+fn nested(p: *u8) -> **u8 {
+    return p;
+}
+
+fn bytes() -> [u8; 4] {
+    return 4;
+}
+
+fn slots() -> [*u8; 2] {
+    return 2;
+}
+
+fn point_of(p: *Point) -> *Point {
+    return p;
+}
+
+fn main() -> i32 {
+    let buf: [u8; 2];
+    buf[0] = 65;
+    buf[1] = 66;
+    let p: *u8 = exc_name(buf);
+    print_int(p[0]);
+    println("");
+    let q: *u8 = as_mut(p);
+    print_int(q[1]);
+    println("");
+    let r: *u8 = as_vol(p);
+    print_int(r[0]);
+    println("");
+
+    let table: [i64; 2];
+    table[0] = p;
+    let pp: **u8 = nested(table);
+    let inner: *u8 = pp[0];
+    print_int(inner[0]);
+    println("");
+
+    print_int(bytes());
+    println("");
+    print_int(slots());
+    println("");
+
+    let pt = Point { x: 7, y: 9 };
+    let ppnt: *Point = point_of(&pt);
+    print_int(ppnt->x);
+    println("");
+    print_int(ppnt->y);
+    println("");
+    return 0;
+}
