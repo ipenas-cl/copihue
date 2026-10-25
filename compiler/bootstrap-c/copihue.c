@@ -15,7 +15,7 @@
 
 // ==== NAMING (single place to change when the language is renamed) ====
 #define LANG_NAME     "Copihue"
-#define LANG_VERSION  "0.27.0"
+#define LANG_VERSION  "0.27.1"
 #define COMPILER_BIN  "copihue"
 #define SRC_EXT       ".lap"   /* Lapageria rosea, the copihue */
 #define OLD_SRC_EXT   ".cph"   /* v0.18.x extension, still accepted with a warning */
@@ -156,7 +156,7 @@ typedef enum {
     AST_LOGICAL,  // && and || operators with short-circuit evaluation
     AST_BREAK, AST_CONTINUE,
     AST_DATA, AST_DATA_ITEM, AST_CAST,
-    AST_JMP, AST_MEM_STORE
+    AST_JMP, AST_MEM_STORE, AST_LABEL
 } AstType;
 
 typedef struct AstNode {
@@ -1713,6 +1713,17 @@ AstNode* parse_stmt(Parser* p) {
 
         return block;
     }
+    // `label name;` is a code address inside a function. `label()` stays a call.
+    if (peek_word(p, "label") && peek_tok_at(p, 1, T_IDENT) && peek_tok_at(p, 2, T_SEMI)) {
+        Tok kw = advance_tok(p);
+        Tok name = advance_tok(p);
+        expect(p, T_SEMI);
+        AstNode* lab = ast_new(AST_LABEL);
+        lab->name = strndup(name.s, name.len);
+        lab->line = kw.line;
+        lab->col = kw.col;
+        return lab;
+    }
     if (check_tok(p, T_IDENT)) {
         Tok t = peek_tok(p);
         int is_break = (t.len == 5 && !memcmp(t.s, "break", 5));
@@ -2928,7 +2939,8 @@ static int builtin_ret_ty(const char* f, VTy* out) {
         !strcmp(f, "stc") || !strcmp(f, "clc") || !strcmp(f, "ud2") ||
         !strcmp(f, "sizeof") || !strcmp(f, "offsetof") ||
         !strcmp(f, "rep_stosb") || !strcmp(f, "rep_stosw") || !strcmp(f, "rep_stosd") || !strcmp(f, "rep_stosq") ||
-        !strcmp(f, "rep_movsb") || !strcmp(f, "rep_movsw") || !strcmp(f, "rep_movsd") || !strcmp(f, "rep_movsq")) {
+        !strcmp(f, "rep_movsb") || !strcmp(f, "rep_movsw") || !strcmp(f, "rep_movsd") || !strcmp(f, "rep_movsq") ||
+        !strcmp(f, "save_context") || !strcmp(f, "restore_context") || !strcmp(f, "label_addr")) {
         *out = ty_i64();
         return 1;
     }
@@ -3128,6 +3140,10 @@ static void check_builtin_args(Codegen* cg, AstNode* n) {
     // syscall registers are raw values: an integer or any pointer.
     if (!strcmp(f, "syscall") || !strcmp(f, "syscall6")) {
         for (int i = 0; i < c && i < 7; i++) check_arg(cg, n->children[i], i, f, ty_mem());
+        return;
+    }
+    if (!strcmp(f, "save_context") || !strcmp(f, "restore_context")) {
+        if (c == 1) check_arg(cg, n->children[0], 0, f, ty_mem());
         return;
     }
 }
@@ -3404,6 +3420,149 @@ static int rep_insn(const char* f, const char** mnem, int* wide) {
         }
     }
     return 0;
+}
+
+static int is_data_name(Codegen* cg, const char* name);
+
+// A `label name;` statement anywhere in the program.
+static int ast_has_label(AstNode* n, const char* name) {
+    if (!n || !name) return 0;
+    if (n->type == AST_LABEL && n->name && !strcmp(n->name, name)) return 1;
+    for (int i = 0; i < n->child_count; i++)
+        if (ast_has_label(n->children[i], name)) return 1;
+    return 0;
+}
+
+static int is_code_label(Codegen* cg, const char* name) {
+    return cg && cg->program && ast_has_label(cg->program, name);
+}
+
+// Address of a context in r11. r11 is caller-saved and is not one of the
+// registers the context holds, so the lea cannot clobber what we are about
+// to save. Only a bare name or &name: a general expression would run through
+// the accumulator and might use rbx.
+static int emit_ctx_r11(Codegen* cg, AstNode* e) {
+    int take_addr = 0;
+    AstNode* id = e;
+    if (e && e->type == AST_ADDR_OF && e->child_count == 1 && e->children[0] &&
+        e->children[0]->type == AST_IDENT) {
+        take_addr = 1;
+        id = e->children[0];
+    } else if (!e || e->type != AST_IDENT || !e->name) {
+        return 0;
+    }
+    if (!id->name) return 0;
+    Symbol* s = cg->symtab ? symtab_lookup_symbol(cg->symtab, id->name) : NULL;
+    if (s) {
+        if (s->hwreg) return 0;
+        if (take_addr) {
+            if (s->mem) emit(cg, "    lea r11, [%s]\n", s->mem);
+            else emit(cg, "    lea r11, [rbp%d]\n", s->offset);
+            return 1;
+        }
+        if (s->is_pointer || (s->type_name && s->type_name[0] == '*')) {
+            if (s->mem) emit(cg, "    mov r11, [%s]\n", s->mem);
+            else emit(cg, "    mov r11, [rbp%d]\n", s->offset);
+            return 1;
+        }
+        return 0;
+    }
+    GlobalVar* g = cg->global_symtab ? global_symtab_lookup(cg->global_symtab, id->name) : NULL;
+    if (g) {
+        if (take_addr) {
+            emit(cg, "    lea r11, [%s]\n", g->name);
+            return 1;
+        }
+        if (g->is_pointer) {
+            emit(cg, "    mov r11, [%s]\n", g->name);
+            return 1;
+        }
+        return 0;
+    }
+    if (take_addr && is_data_name(cg, id->name)) {
+        emit(cg, "    lea r11, [%s]\n", id->name);
+        return 1;
+    }
+    return 0;
+}
+
+static int gen_save_context(Codegen* cg, AstNode* n) {
+    if (n->child_count != 1) {
+        diag_error(n->line, n->col, "save_context() takes the address of a context");
+        return 1;
+    }
+    if (legacy_bits()) {
+        diag_error(n->line, n->col, "save_context() is a 64-bit context switch");
+        return 1;
+    }
+    if (!emit_ctx_r11(cg, n->children[0])) {
+        diag_error(n->line, n->col, "save_context() takes the address of a context");
+        return 1;
+    }
+    // Layout, one qword each: rip, rsp, rbp, rbx, r12, r13, r14, r15.
+    // The resume address is the instruction after this builtin, not a label
+    // the user has to name. rsp and rbp are the live frame, so a later
+    // restore_context lands in this function with the epilogue still valid.
+    int resume = new_label(cg);
+    int done = new_label(cg);
+    emit(cg, "    mov [r11+8], rsp\n");
+    emit(cg, "    mov [r11+16], rbp\n");
+    emit(cg, "    mov [r11+24], rbx\n");
+    emit(cg, "    mov [r11+32], r12\n");
+    emit(cg, "    mov [r11+40], r13\n");
+    emit(cg, "    mov [r11+48], r14\n");
+    emit(cg, "    mov [r11+56], r15\n");
+    emit(cg, "    lea rax, [.L%d]\n", resume);
+    emit(cg, "    mov [r11], rax\n");
+    emit(cg, "    xor eax, eax\n");
+    emit(cg, "    jmp .L%d\n", done);
+    emit(cg, ".L%d:\n", resume);
+    emit(cg, "    mov eax, 1\n");
+    emit(cg, ".L%d:\n", done);
+    return 1;
+}
+
+static int gen_restore_context(Codegen* cg, AstNode* n) {
+    if (n->child_count != 1) {
+        diag_error(n->line, n->col, "restore_context() takes the address of a context");
+        return 1;
+    }
+    if (legacy_bits()) {
+        diag_error(n->line, n->col, "restore_context() is a 64-bit context switch");
+        return 1;
+    }
+    if (!emit_ctx_r11(cg, n->children[0])) {
+        diag_error(n->line, n->col, "restore_context() takes the address of a context");
+        return 1;
+    }
+    // Read every field through r11 before rsp changes. The jump does not return.
+    emit(cg, "    mov rax, [r11]\n");
+    emit(cg, "    mov rbx, [r11+24]\n");
+    emit(cg, "    mov r12, [r11+32]\n");
+    emit(cg, "    mov r13, [r11+40]\n");
+    emit(cg, "    mov r14, [r11+48]\n");
+    emit(cg, "    mov r15, [r11+56]\n");
+    emit(cg, "    mov rbp, [r11+16]\n");
+    emit(cg, "    mov rsp, [r11+8]\n");
+    emit(cg, "    jmp rax\n");
+    return 1;
+}
+
+static int gen_label_addr(Codegen* cg, AstNode* n) {
+    if (n->child_count != 1 || !n->children[0] || n->children[0]->type != AST_IDENT ||
+        !n->children[0]->name) {
+        diag_error(n->line, n->col, "label_addr() takes a label name");
+        return 1;
+    }
+    if (legacy_bits()) {
+        diag_error(n->line, n->col, "label_addr() is a 64-bit address");
+        return 1;
+    }
+    const char* name = n->children[0]->name;
+    if (!is_code_label(cg, name) && !find_func(cg, name) && !is_data_name(cg, name))
+        diag_error(n->line, n->col, "unknown label '%s'", name);
+    emit(cg, "    lea rax, [%s]\n", name);
+    return 1;
 }
 
 // Builtins that work everywhere, including --freestanding (kernel) code.
@@ -3759,6 +3918,9 @@ static int gen_core_builtin(Codegen* cg, AstNode* n) {
         emit(cg, "\n");
         return 1;
     }
+    if (!strcmp(f, "save_context")) return gen_save_context(cg, n);
+    if (!strcmp(f, "restore_context")) return gen_restore_context(cg, n);
+    if (!strcmp(f, "label_addr")) return gen_label_addr(cg, n);
     return 0;
 }
 
@@ -7038,6 +7200,8 @@ static EarlyRet match_early_ret(Codegen* cg, AstNode* fn) {
 
 void gen_stmt(Codegen* cg, AstNode* n);
 
+static char* g_seen_labels[128];
+static int g_nseen_labels;
 static int regplan_has(const char* name) {
     if (!name) return 0;
     for (int i = 0; i < g_reg_local_n; i++)
@@ -7609,6 +7773,18 @@ void gen_stmt(Codegen* cg, AstNode* n) {
     if (!keep) g_fwd_ok = 0;
     g_nonneg_reg = NULL;
     if (n->file) focus_file(n->file);
+    if (n->type == AST_LABEL) {
+        if (!n->name) return;
+        int dup = 0;
+        for (int i = 0; i < g_nseen_labels; i++)
+            if (!strcmp(g_seen_labels[i], n->name)) dup = 1;
+        if (dup || find_func(cg, n->name) || is_data_name(cg, n->name))
+            diag_error(n->line, n->col, "label '%s' is already defined", n->name);
+        else if (g_nseen_labels < 128)
+            g_seen_labels[g_nseen_labels++] = n->name;
+        emit(cg, "%s:\n", n->name);
+        return;
+    }
     if (n->type == AST_BLOCK) {
         // Names declared here hide outer ones and disappear at the closing brace.
         symtab_enter(cg->symtab);
@@ -7876,7 +8052,7 @@ void gen_stmt(Codegen* cg, AstNode* n) {
     } else if (n->type == AST_JMP) {
         if (n->value) emit(cg, "    jmp %s\n", n->value);
         else if (n->name) {
-            if (!find_func(cg, n->name) && !is_data_name(cg, n->name))
+            if (!find_func(cg, n->name) && !is_data_name(cg, n->name) && !is_code_label(cg, n->name))
                 diag_error(n->line, n->col, "unknown jump target '%s'", n->name);
             emit(cg, "    jmp %s\n", n->name);
         }
@@ -7980,7 +8156,44 @@ void gen_func(Codegen* cg, AstNode* n) {
     int is_sys = (n->flags & AF_SYSCALL) != 0;
     int naked = (n->flags & AF_NAKED) != 0;
     int bits = n->bits;
-    int has_err = is_int && param_count == 1;
+    // A pointer parameter is the CPU frame, not the integer error code.
+    // error_code as the first field selects the #PF/#GP layout.
+    int frame_ptr = 0;
+    int frame_err = 0;
+    int frame_slot = 0;
+    AstNode* par0 = (param_count == 1) ? n->children[0] : NULL;
+    if (is_int && par0 && (par0->is_pointer & 1)) {
+        StructType* st = (par0->value && cg->types) ? typetab_lookup(cg->types, par0->value) : NULL;
+        if (!st) {
+            diag_error(par0->line, par0->col, "an interrupt frame parameter must point at a struct");
+        } else {
+            frame_err = st->field_count > 0 && st->fields[0].name &&
+                        !strcmp(st->fields[0].name, "error_code");
+            int need = frame_err ? 6 : 5;
+            if (st->field_count < need) {
+                diag_error(par0->line, par0->col, "interrupt frame '%s' needs %d fields", st->name, need);
+            } else {
+                frame_ptr = 1;
+                for (int i = 0; i < need; i++) {
+                    if (st->fields[i].offset != i * 8 || st->fields[i].size != 8) {
+                        diag_error(par0->line, par0->col,
+                                   "interrupt frame field '%s' must be an 8-byte field at offset %d",
+                                   st->fields[i].name ? st->fields[i].name : "?", i * 8);
+                        frame_ptr = 0;
+                    }
+                }
+            }
+        }
+    } else if (is_int && par0 && !par0->is_pointer && par0->value &&
+               cg->types && typetab_lookup(cg->types, par0->value)) {
+        diag_error(par0->line, par0->col, "an interrupt frame parameter must be a pointer");
+    }
+    int has_err = is_int && param_count == 1 && par0 && !(par0->is_pointer & 1) && !frame_ptr;
+    // A struct passed by value already diagnosed; do not also copy an error code.
+    if (is_int && par0 && !par0->is_pointer && par0->value &&
+        cg->types && typetab_lookup(cg->types, par0->value))
+        has_err = 0;
+    int align_err = has_err || (frame_ptr && frame_err);
     if (is_int && is_sys) {
         diag_error(n->line, n->col, "a function cannot be both interrupt and syscall");
     }
@@ -8035,7 +8248,7 @@ void gen_func(Codegen* cg, AstNode* n) {
             "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15"
         };
         for (int i = 0; i < 15; i++) emit(cg, "    push %s\n", saved[i]);
-        if (has_err) emit(cg, "    push rax\n");  // keep the frame 16-byte aligned
+        if (align_err) emit(cg, "    push rax\n");  // keep the frame 16-byte aligned
         emit(cg, "    mov rbp, rsp\n");
         emit(cg, "    sub rsp, __frame_%s\n", n->name);
     } else if (is_sys) {
@@ -8099,7 +8312,22 @@ void gen_func(Codegen* cg, AstNode* n) {
     symtab_enter(cg->symtab);
 
     if (is_int) {
-        if (has_err) {
+        if (frame_ptr) {
+            if (symtab_redeclared(cg->symtab, par0->name))
+                diag_error(par0->line, par0->col,
+                           "redeclaration of '%s' in the same block", par0->name);
+            // No error code: RIP is at [rbp+120]. With error_code, the CPU
+            // qword is at [rbp+128] and RIP follows it. SavedRegs (r15 first)
+            // sit 120 bytes below that first CPU qword either way.
+            frame_slot = symtab_add_pointer(cg->symtab, par0->name);
+            if (par0->value && cg->symtab->count > 0) {
+                char* type_with_ptr = malloc(strlen(par0->value) + 2);
+                sprintf(type_with_ptr, "*%s", par0->value);
+                cg->symtab->symbols[cg->symtab->count - 1].type_name = type_with_ptr;
+            }
+            emit(cg, "    lea rax, [rbp+%d]\n", frame_err ? 128 : 120);
+            emit(cg, "    mov [rbp%d], rax\n", frame_slot);
+        } else if (has_err) {
             if (symtab_redeclared(cg->symtab, n->children[0]->name))
                 diag_error(n->children[0]->line, n->children[0]->col,
                            "redeclaration of '%s' in the same block", n->children[0]->name);
@@ -8168,10 +8396,19 @@ void gen_func(Codegen* cg, AstNode* n) {
             "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15"
         };
         emit(cg, ".Lret_%s:\n", n->name);
-        emit(cg, "    mov rsp, rbp\n");
-        if (has_err) emit(cg, "    pop rax\n");
-        for (int i = 14; i >= 0; i--) emit(cg, "    pop %s\n", saved[i]);
-        if (has_err) emit(cg, "    add rsp, 8\n");  // drop the CPU error code
+        if (frame_ptr) {
+            // Re-read the parameter. A store to it selects another saved
+            // frame; stores through it change rip/rsp before iretq.
+            emit(cg, "    mov rax, [rbp%d]\n", frame_slot);
+            emit(cg, "    lea rsp, [rax-120]\n");
+            for (int i = 14; i >= 0; i--) emit(cg, "    pop %s\n", saved[i]);
+            if (frame_err) emit(cg, "    add rsp, 8\n");
+        } else {
+            emit(cg, "    mov rsp, rbp\n");
+            if (has_err) emit(cg, "    pop rax\n");
+            for (int i = 14; i >= 0; i--) emit(cg, "    pop %s\n", saved[i]);
+            if (has_err) emit(cg, "    add rsp, 8\n");  // drop the CPU error code
+        }
         // RIP, CS, RFLAGS, RSP, SS are still below the saved GPRs. iretq
         // returns to the ring in that frame, including ring 3 when CS.RPL is 3.
         emit(cg, "    iretq\n");

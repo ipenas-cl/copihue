@@ -1,0 +1,54 @@
+// also-o2
+// A frame pointer is the CPU interrupt frame. Stores through it are what
+// iretq pops. error_code as the first field is the #PF/#GP layout.
+// save_context / label_addr do not name rsp or rbp.
+
+struct InterruptFrame {
+    rip: i64,
+    cs: i64,
+    rflags: i64,
+    rsp: i64,
+    ss: i64
+}
+
+struct PfFrame {
+    error_code: i64,
+    rip: i64,
+    cs: i64,
+    rflags: i64,
+    rsp: i64,
+    ss: i64
+}
+
+struct Ctx {
+    rip: i64,
+    rsp: i64,
+    rbp: i64,
+    rbx: i64,
+    r12: i64,
+    r13: i64,
+    r14: i64,
+    r15: i64
+}
+
+let volatile sink: i64 = 0;
+let ctx: Ctx;
+
+interrupt fn irq(frame: *InterruptFrame) {
+    sink = frame.cs;
+    frame.rip = sink;
+}
+
+interrupt fn pf(frame: *PfFrame) {
+    sink = frame.error_code;
+    frame.rip = sink;
+}
+
+fn kmain() -> i64 {
+    if (save_context(&ctx) == 0) {
+        ctx.rip = label_addr(there);
+        restore_context(&ctx);
+    }
+    label there;
+    return 0;
+}

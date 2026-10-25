@@ -2,6 +2,17 @@
 
 Todos los cambios importantes del proyecto.
 
+## [0.27.1] - 2026-10-25
+
+### Added
+- `label name;` is a code address inside a function. `label_addr(name)` is `lea rax, [name]` for that label, a function, or a data label. An unknown name is `unknown label 'nope'`. In `bits 16` or `bits 32` it is `label_addr() is a 64-bit address`. The address does not change `rsp`.
+- `save_context(&ctx)` stores eight qwords: `rip`, `rsp`, `rbp`, `rbx`, `r12`, `r13`, `r14`, `r15`. `rip` is the next instruction. It returns 0. `restore_context(&ctx)` loads them and jumps there, so `save_context` then returns 1. The argument is a name or `&name`. Anything else is `save_context() takes the address of a context`. In `bits 16` or `bits 32` it is `save_context() is a 64-bit context switch`. The compiler emits the `rsp` and `rbp` moves, after the prologue, so a framed function's epilogue still matches. Callee-saved registers are restored so a value kept in `r12`–`r15` survives the other task. The address is a `lea` into `r11`, which is not part of the context. The builtin is `restore_context`, not `switch_to`, because a kernel may already have a function of that name. Writing `ctx.rip = label_addr(after)` before the restore resumes at that label with the saved frame.
+- `interrupt fn pf(frame: *PfFrame)` takes a pointer to the CPU frame. Without an error code the fields are `rip`, `cs`, `rflags`, `rsp`, `ss` and the pointer is `[rbp+120]`. A struct whose first field is `error_code` points at `[rbp+128]`, and `rip` is the next qword. The epilogue reads the parameter again, so `frame = other` returns through another saved frame, and `frame.rip = x` / `frame.rsp = y` are what `iretq` pops. The fifteen saved registers sit 120 bytes below that first CPU qword (`r15` at the low address through `rax`). Each field must be 8 bytes at `0, 8, 16, ...`. `*i64` is `an interrupt frame parameter must point at a struct`. `interrupt fn timer()` and `interrupt fn fault(err: i64)` are unchanged.
+- `tests/lang/context.lap` runs the switch under Linux at `-O0` and `-O2`. `tests/ctx` boots under QEMU: a `#PF` handler rewrites `rip` and `rsp`, an IRQ handler switches stacks, and `restore_context` returns. COM1 shows `COPIHUE`. `tests/freestanding/frame_handler.lap` is the instruction stream at `-O0` and `-O2`. It is assembled, not booted.
+
+### Changed
+- Language version is 0.27.1.
+
 ## [0.27.0] - 2026-10-25
 
 ### Added
