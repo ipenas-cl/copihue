@@ -410,7 +410,7 @@ Cada programa está escrito cuatro veces (\`.lap\`, \`.c\`, \`.rs\`, \`.ml\`) co
 - Ejecución: $RUNS repeticiones más una de calentamiento que no entra en la mediana. La mediana es el valor central de las $RUNS muestras ordenadas (la 4.ª si son 7). En cada celda, entre paréntesis, el mínimo y el máximo de esas repeticiones.
 - La ejecución medida tira stdout a \`/dev/null\`. El proceso sigue escribiendo una línea. Afinidad a un CPU: $pin_txt.
 - El tamaño es \`wc -c\` del fichero producido, sin \`strip\`. \`text\`/\`data\`/\`bss\` salen de \`size\`.
-- Copihue \`-O2\` pliega constantes y reescribe \`*\`, \`/\` y \`%\` por potencias de dos. No hay asignación de registros ni simplificación de bucles. El código de una operación es el de una máquina de pila (\`push\`/\`pop\`).
+- Copihue \`-O2\` en hosted pliega constantes, reescribe \`*\`, \`/\` y \`%\` por potencias de dos, evalúa el lado derecho simple de una operación en \`rbx\` (sin \`push\`/\`pop\`) y mantiene hasta cuatro locales escalares en \`r12\`–\`r15\`. No simplifica bucles. \`-O0\`, \`--freestanding\`, \`--flat\` y \`--boot\` no usan eso.
 - C usa \`long\` ($long_bit bits aquí). Rust usa \`i64\`. OCaml usa \`int\` nativo, que en amd64 es 63 bits con etiqueta. Las cargas caben en ese rango: las cuatro salidas coincidieron. El desborde de \`rustc -O\` envuelve, igual que un binario release; no es el modo debug.
 - No hay intrínsecos, \`unsafe\`, pragmas, \`-march=native\` ni \`-C opt-level=3\`. Los flags son los pedidos: \`gcc -O2\`, \`rustc -O\`, \`ocamlopt -O3\`, \`copihue -O2\`.
 - Esta copia de ocamlopt no trae Flambda. \`-O3\` se pasa igual; no activa Flambda.
@@ -526,7 +526,7 @@ Un bucle de 500000000 vueltas no cabe en unos pocos milisegundos a ninguna frecu
 
 ## Lectura de esta corrida
 
-En tiempo de ejecución Copihue queda por encima de los otros tres en las ocho filas. El cociente Copihue/C más alto es \`$worst_name\` ($worst_ratio×) y el más bajo es \`$best_name\` ($best_ratio×). Esos dos extremos no dicen lo mismo: en \`fold\` el decimal del resultado está en el ensamblado de gcc y de rustc, y el tiempo de esos dos es el de arrancar el proceso; OCaml sí ejecuta el bucle y ahí el cociente es el de la tabla (Copihue/OCaml). En \`chain\` los cuatro tiempos quedan juntos: es una cadena dependiente de multiplicar, y el \`push\`/\`pop\` de Copihue no se ve casi. El hueco grande, en los programas cuyo bucle sí corre en los cuatro, está en \`sort\`, \`array\`, \`fib\`, \`matmul\` y \`arith\`.
+El cociente Copihue/C más alto es \`$worst_name\` ($worst_ratio×) y el más bajo es \`$best_name\` ($best_ratio×). Un cociente menor que 1 quiere decir que, en esa fila, la mediana de Copihue quedó por debajo de la de C; el mínimo y el máximo de la tabla dicen si los rangos se separan. En \`fold\` el decimal del resultado está en el ensamblado de gcc y de rustc, y el tiempo de esos dos es el de arrancar el proceso; OCaml sí ejecuta el bucle y ahí el cociente es el de la tabla (Copihue/OCaml). \`chain\` es una cadena dependiente de multiplicar: el cociente está en la tabla, no se supone. El hueco que queda, en los bucles que los cuatro ejecutan, está en \`sort\`, \`array\`, \`fib\`, \`matmul\` y \`arith\`.
 
 $(if [ "$compile_win" = 1 ]; then
     echo "En tiempo de compilación de estos archivos chicos, la mediana de Copihue es la más baja en las ocho filas. Eso mide el arranque de un compilador de una pasada más nasm y ld, no un proyecto grande."
@@ -536,7 +536,7 @@ fi)
 
 El fichero de Copihue es el más chico de cada fila. \`file\` marca los binarios de Rust y de OCaml con información de depuración; la columna \`text\` de \`size\` es el código, y también ahí Copihue es el más chico. El binario de C está enlazado con libc y el de Copihue no: el tamaño no es "bytes del algoritmo".
 
-El array local y el global de Copihue dieron medianas casi iguales en \`array\`. Esta corrida no muestra que el chequeo de límites sea lo que domina ese programa.
+La mediana del array local y la del global están en la tabla de arriba. La diferencia no es el grueso del tiempo de \`array\`: esta corrida no muestra que el chequeo de límites sea lo que domina ese programa.
 
 ## Límites
 
@@ -546,10 +546,16 @@ El array local y el global de Copihue dieron medianas casi iguales en \`array\`.
 - Máquina virtual. La mediana recorta un pico, no convierte el número en una cifra de hardware físico.
 - No se midió código freestanding, ni un programa grande, ni el uso de memoria.
 - Copihue reserva en la pila 8 bytes por elemento aunque el elemento sea \`u8\` (el hueco se redondea al número de elementos). La criba local de 400000 bytes lógicos ocupa unos 3.2 MB de marco. Cabe en el \`ulimit -s\` de esta corrida.
-- Las variables de Copihue se declaran una vez por función. Volver a hacer \`let\` del mismo nombre dentro de un bucle mezcla ranuras; los programas de esta suite no lo hacen.
+- Un \`let\` vive hasta el fin de su bloque. Declarar el mismo nombre dos veces en un bloque es un error. Los programas de esta suite declaran cada nombre una vez.
 
 Los datos crudos, en nanosegundos, están en \`bench/results.tsv\`.
 EOF
 } > "$ROOT/bench/RESULTS.md"
+
+# Static profile and the before/after note. make bench replaces the tables
+# above; this file is the write-up of the 0.22.2 -> 0.22.3 measurement.
+if [ -f "$ROOT/bench/profile.md" ]; then
+    cat "$ROOT/bench/profile.md" >> "$ROOT/bench/RESULTS.md"
+fi
 
 echo "bench: escribió bench/RESULTS.md y bench/results.tsv" >&2

@@ -14,7 +14,7 @@
 
 // ==== NAMING (single place to change when the language is renamed) ====
 #define LANG_NAME     "Copihue"
-#define LANG_VERSION  "0.23.0"
+#define LANG_VERSION  "0.23.1"
 #define COMPILER_BIN  "copihue"
 #define SRC_EXT       ".lap"   /* Lapageria rosea, the copihue */
 #define OLD_SRC_EXT   ".cph"   /* v0.18.x extension, still accepted with a warning */
@@ -171,6 +171,7 @@ typedef struct {
     int is_volatile;
     int volatile_pointee; // *volatile T: loads/stores through this pointer are volatile
     int array_len;        // Declared element count when is_array (0 if unknown)
+    int reg;              // -1 stack slot; 0..3 = r12..r15 at hosted -O2
 } Symbol;
 
 #define MAX_BLOCK_SCOPE 64
@@ -367,6 +368,27 @@ char* strtab_add(StringTable* st, char* value, int len) {
     return label;
 }
 
+// Hosted -O2 keeps the hottest scalar locals in callee-saved registers.
+// r12 is also scratch inside malloc, so malloc must not use these names.
+#define MAX_REG_LOCAL 4
+static const char *g_reg_local_name[MAX_REG_LOCAL] = {"r12", "r13", "r14", "r15"};
+static char g_reg_local_var[MAX_REG_LOCAL][96];
+static int g_reg_local_n = 0;
+
+static void symbol_assign_reg(Symbol *s) {
+    s->reg = -1;
+    if (!s->name || g_reg_local_n <= 0) return;
+    if (s->is_array || s->is_pointer || s->is_volatile || s->size != 1) return;
+    for (int i = 0; i < g_reg_local_n; i++) {
+        if (!strcmp(s->name, g_reg_local_var[i])) { s->reg = i; return; }
+    }
+}
+
+static const char *local_reg(Symbol *s) {
+    if (!s || s->reg < 0 || s->reg >= g_reg_local_n) return NULL;
+    return g_reg_local_name[s->reg];
+}
+
 // ==== SYMBOL TABLE ====
 SymbolTable* symtab_new() {
     SymbolTable* st = calloc(1, sizeof(SymbolTable));
@@ -388,6 +410,7 @@ int symtab_add(SymbolTable* st, char* name, int size) {
     st->symbols[st->count - 1].is_volatile = 0;
     st->symbols[st->count - 1].volatile_pointee = 0;
     st->symbols[st->count - 1].array_len = 0;
+    symbol_assign_reg(&st->symbols[st->count - 1]);
     return -st->stack_size;
 }
 
@@ -404,6 +427,7 @@ int symtab_add_struct(SymbolTable* st, char* name, char* type_name, int size_byt
     st->symbols[st->count - 1].is_volatile = 0;
     st->symbols[st->count - 1].volatile_pointee = 0;
     st->symbols[st->count - 1].array_len = 0;
+    symbol_assign_reg(&st->symbols[st->count - 1]);
     return -st->stack_size;
 }
 
@@ -420,6 +444,7 @@ int symtab_add_pointer(SymbolTable* st, char* name) {
     st->symbols[st->count - 1].is_volatile = 0;
     st->symbols[st->count - 1].volatile_pointee = 0;
     st->symbols[st->count - 1].array_len = 0;
+    symbol_assign_reg(&st->symbols[st->count - 1]);
     return -st->stack_size;
 }
 
@@ -2015,6 +2040,7 @@ static void gen_load_callee(Codegen* cg, const char* name) {
     Symbol* loc = name ? symtab_lookup_symbol(cg->symtab, (char*)name) : NULL;
     if (loc) {
         if (loc->is_array) emit(cg, "    lea rbx, [rbp%d]\n", loc->offset);
+        else if (local_reg(loc)) emit(cg, "    mov rbx, %s\n", local_reg(loc));
         else emit(cg, "    mov rbx, [rbp%d]\n", loc->offset);
         return;
     }
@@ -2391,7 +2417,8 @@ void gen_builtin_call(Codegen* cg, AstNode* n) {
         // Returns pointer to allocated memory (after header)
         if (n->child_count >= 1) {
             gen_expr(cg, n->children[0]);  // size requested by user
-            emit(cg, "    mov r12, rax\n");  // Save original size in r12
+            // rbx, not r12: hosted -O2 keeps locals in r12-r15 across this call.
+            emit(cg, "    mov rbx, rax\n");  // Save original size in rbx
             emit(cg, "    add rax, 8\n");    // Add 8 bytes for size header
             emit(cg, "    mov rsi, rax\n");  // length = size + 8
             emit(cg, "    xor rdi, rdi\n");  // addr = 0 (let kernel choose)
@@ -2405,7 +2432,7 @@ void gen_builtin_call(Codegen* cg, AstNode* n) {
             emit(cg, "    cmp rax, -1\n");
             emit(cg, "    je .Lmalloc_failed_%d\n", new_label(cg));
             // Store size in header
-            emit(cg, "    mov [rax], r12\n");  // Store original size in first 8 bytes
+            emit(cg, "    mov [rax], rbx\n");  // Store original size in first 8 bytes
             emit(cg, "    add rax, 8\n");      // Return pointer after header
             emit(cg, ".Lmalloc_failed_%d:\n", cg->label_count - 1);
             // Returns pointer in rax (ptr+8, or -1 on error which stays -1)
@@ -3210,6 +3237,126 @@ static int volatile_pointee_info(Codegen* cg, AstNode* p, int* sz, int* sg) {
     return 1;
 }
 
+// A value that can be computed into rbx/rcx without touching rax or the stack.
+// The right child of a binary op has to be a leaf: two registers, no third.
+static int rbx_leaf(Codegen* cg, AstNode* n) {
+    if (!n) return 0;
+    if (n->type == AST_NUMBER) return 1;
+    if (n->type == AST_UNARY && n->op && n->child_count == 1 &&
+        (n->op[0] == '-' || n->op[0] == '!' || n->op[0] == '~'))
+        return rbx_leaf(cg, n->children[0]);
+    if (n->type != AST_IDENT || !n->name) return 0;
+    Symbol* sym = symtab_lookup_symbol(cg->symtab, n->name);
+    if (sym) {
+        if (sym->is_array) return 0;
+        if (sym->size > 1 && !sym->is_pointer) return 0;
+        return 1;
+    }
+    GlobalVar* gv = global_symtab_lookup(cg->global_symtab, n->name);
+    return gv && !gv->is_array;
+}
+
+static int can_emit_rbx(Codegen* cg, AstNode* n) {
+    if (!n) return 0;
+    if (rbx_leaf(cg, n)) return 1;
+    if (n->type == AST_UNARY && n->op && n->child_count == 1 &&
+        (n->op[0] == '-' || n->op[0] == '!' || n->op[0] == '~'))
+        return can_emit_rbx(cg, n->children[0]);
+    if (n->type == AST_BINOP && n->op && n->child_count == 2 &&
+        n->op[0] != '/' && n->op[0] != '%')
+        return can_emit_rbx(cg, n->children[0]) && rbx_leaf(cg, n->children[1]);
+    return 0;
+}
+
+static void emit_leaf_reg(Codegen* cg, AstNode* n, const char* reg) {
+    if (n->type == AST_NUMBER) {
+        emit(cg, "    mov %s, %s\n", reg, n->value);
+        return;
+    }
+    if (n->type == AST_UNARY) {
+        emit_leaf_reg(cg, n->children[0], reg);
+        if (n->op[0] == '-') emit(cg, "    neg %s\n", reg);
+        else if (n->op[0] == '~') emit(cg, "    not %s\n", reg);
+        else {
+            const char* lo = (reg[0] == 'r' && reg[1] == 'b') ? "bl" : "cl";
+            emit(cg, "    test %s, %s\n    setz %s\n    movzx %s, %s\n", reg, reg, lo, reg, lo);
+        }
+        return;
+    }
+    Symbol* sym = symtab_lookup_symbol(cg->symtab, n->name);
+    if (sym) {
+        if (local_reg(sym)) emit(cg, "    mov %s, %s\n", reg, local_reg(sym));
+        else emit(cg, "    mov %s, [rbp%d]\n", reg, sym->offset);
+        return;
+    }
+    GlobalVar* gv = global_symtab_lookup(cg->global_symtab, n->name);
+    if (gv && gv->is_volatile) emit(cg, "    mov %s, [%s]  ; volatile\n", reg, gv->name);
+    else if (gv) emit(cg, "    mov %s, [%s]\n", reg, gv->name);
+    else emit(cg, "    xor %s, %s\n", reg, reg);
+}
+
+static void emit_rbx_binop(Codegen* cg, const char* op) {
+    if (!strcmp(op, "<<")) emit(cg, "    shl rbx, cl\n");
+    else if (!strcmp(op, ">>")) emit(cg, "    sar rbx, cl\n");
+    else if (op[0] == '&') emit(cg, "    and rbx, rcx\n");
+    else if (op[0] == '|') emit(cg, "    or rbx, rcx\n");
+    else if (op[0] == '^') emit(cg, "    xor rbx, rcx\n");
+    else if (op[0] == '+') emit(cg, "    add rbx, rcx\n");
+    else if (op[0] == '-') emit(cg, "    sub rbx, rcx\n");
+    else if (op[0] == '*') emit(cg, "    imul rbx, rcx\n");
+}
+
+// Result in rbx. Does not read or write rax.
+static void emit_rbx(Codegen* cg, AstNode* n) {
+    if (n->type == AST_BINOP) {
+        emit_rbx(cg, n->children[0]);
+        emit_leaf_reg(cg, n->children[1], "rcx");
+        emit_rbx_binop(cg, n->op);
+        return;
+    }
+    if (n->type == AST_UNARY) {
+        emit_rbx(cg, n->children[0]);
+        if (n->op[0] == '-') emit(cg, "    neg rbx\n");
+        else if (n->op[0] == '~') emit(cg, "    not rbx\n");
+        else emit(cg, "    test rbx, rbx\n    setz bl\n    movzx rbx, bl\n");
+        return;
+    }
+    emit_leaf_reg(cg, n, "rbx");
+}
+
+static void emit_binop_rax_rbx(Codegen* cg, const char* op) {
+    if (!strcmp(op, "<<")) emit(cg, "    mov rcx, rbx\n    shl rax, cl\n");
+    else if (!strcmp(op, ">>")) emit(cg, "    mov rcx, rbx\n    sar rax, cl\n");
+    else if (op[0] == '&') emit(cg, "    and rax, rbx\n");
+    else if (op[0] == '|') emit(cg, "    or rax, rbx\n");
+    else if (op[0] == '^') emit(cg, "    xor rax, rbx\n");
+    else if (op[0] == '+') emit(cg, "    add rax, rbx\n");
+    else if (op[0] == '-') emit(cg, "    sub rax, rbx\n");
+    else if (op[0] == '*') emit(cg, "    imul rax, rbx\n");
+    else if (op[0] == '/') {
+        int skip_label = new_label(cg);
+        emit(cg, "    test rbx, rbx\n");
+        emit(cg, "    jnz .L%d\n", skip_label);
+        emit(cg, "    ; Division by zero - return 0\n");
+        emit(cg, "    xor rax, rax\n");
+        emit(cg, "    jmp .L%d_end\n", skip_label);
+        emit(cg, ".L%d:\n", skip_label);
+        emit(cg, "    cqo\n    idiv rbx\n");
+        emit(cg, ".L%d_end:\n", skip_label);
+    } else if (op[0] == '%') {
+        int skip_label = new_label(cg);
+        emit(cg, "    test rbx, rbx\n");
+        emit(cg, "    jnz .L%d\n", skip_label);
+        emit(cg, "    ; Modulo by zero - return 0\n");
+        emit(cg, "    xor rax, rax\n");
+        emit(cg, "    jmp .L%d_end\n", skip_label);
+        emit(cg, ".L%d:\n", skip_label);
+        emit(cg, "    cqo\n    idiv rbx\n");
+        emit(cg, "    mov rax, rdx  ; Move remainder to rax\n");
+        emit(cg, ".L%d_end:\n", skip_label);
+    }
+}
+
 void gen_expr(Codegen* cg, AstNode* n) {
     if (!n) return;  // Null safety guard
     if (n->type == AST_NUMBER) {
@@ -3227,6 +3374,8 @@ void gen_expr(Codegen* cg, AstNode* n) {
             if (sym && sym->size > 1 && sym->type_name && !sym->is_pointer) {
                 // This is an array - use lea to get address
                 emit(cg, "    lea rax, [rbp%d]\n", off);
+            } else if (local_reg(sym)) {
+                emit(cg, "    mov rax, %s\n", local_reg(sym));
             } else {
                 // Regular variable or pointer - load value
                 emit(cg, "    mov rax, [rbp%d]\n", off);
@@ -3293,7 +3442,9 @@ void gen_expr(Codegen* cg, AstNode* n) {
         // Try local variable first
         int off = symtab_lookup(cg->symtab, n->name);
         if (off) {
-            emit(cg, "    mov [rbp%d], rax\n", off);
+            Symbol* sym = symtab_lookup_symbol(cg->symtab, n->name);
+            if (sym && local_reg(sym)) emit(cg, "    mov %s, rax\n", local_reg(sym));
+            else emit(cg, "    mov [rbp%d], rax\n", off);
         } else {
             // Try global variable
             GlobalVar* gvar = global_symtab_lookup(cg->global_symtab, n->name);
@@ -3339,49 +3490,25 @@ void gen_expr(Codegen* cg, AstNode* n) {
             emit(cg, "    mov rdx, rax\n    sar rdx, 63\n    shr rdx, %d\n", 64 - shift_amount);
             emit(cg, "    add rax, rdx\n    and rax, %ld\n    sub rax, rdx\n", mask);
         } else {
-            // Normal codegen
-            emit(cg, "    push rax\n");
-            gen_expr(cg, n->children[1]);
-            emit(cg, "    mov rbx, rax\n    pop rax\n");
-            if (!strcmp(n->op, "<<")) emit(cg, "    mov rcx, rbx\n    shl rax, cl\n");
-            else if (!strcmp(n->op, ">>")) emit(cg, "    mov rcx, rbx\n    sar rax, cl\n");
-            else if (n->op[0] == '&') emit(cg, "    and rax, rbx\n");
-            else if (n->op[0] == '|') emit(cg, "    or rax, rbx\n");
-            else if (n->op[0] == '^') emit(cg, "    xor rax, rbx\n");
-            else if (n->op[0] == '+') emit(cg, "    add rax, rbx\n");
-            else if (n->op[0] == '-') emit(cg, "    sub rax, rbx\n");
-            else if (n->op[0] == '*') emit(cg, "    imul rax, rbx\n");
-            else if (n->op[0] == '/') {
-            // Division by zero check
-            int skip_label = new_label(cg);
-            emit(cg, "    test rbx, rbx\n");
-            emit(cg, "    jnz .L%d\n", skip_label);
-            emit(cg, "    ; Division by zero - return 0\n");
-            emit(cg, "    xor rax, rax\n");
-            emit(cg, "    jmp .L%d_end\n", skip_label);
-            emit(cg, ".L%d:\n", skip_label);
-            emit(cg, "    cqo\n    idiv rbx\n");
-            emit(cg, ".L%d_end:\n", skip_label);
-        }
-        else if (n->op[0] == '%') {
-            // Modulo operation (remainder after division)
-            int skip_label = new_label(cg);
-            emit(cg, "    test rbx, rbx\n");
-            emit(cg, "    jnz .L%d\n", skip_label);
-            emit(cg, "    ; Modulo by zero - return 0\n");
-            emit(cg, "    xor rax, rax\n");
-            emit(cg, "    jmp .L%d_end\n", skip_label);
-            emit(cg, ".L%d:\n", skip_label);
-            emit(cg, "    cqo\n    idiv rbx\n");
-            emit(cg, "    mov rax, rdx  ; Move remainder to rax\n");
-            emit(cg, ".L%d_end:\n", skip_label);
+            // Hosted -O2: a simple right-hand side lands in rbx. No push/pop.
+            if (optimization_level >= 2 && !g_freestanding && can_emit_rbx(cg, right))
+                emit_rbx(cg, right);
+            else {
+                emit(cg, "    push rax\n");
+                gen_expr(cg, n->children[1]);
+                emit(cg, "    mov rbx, rax\n    pop rax\n");
             }
+            emit_binop_rax_rbx(cg, n->op);
         }
     } else if (n->type == AST_COMPARE) {
         gen_expr(cg, n->children[0]);
-        emit(cg, "    push rax\n");
-        gen_expr(cg, n->children[1]);
-        emit(cg, "    mov rbx, rax\n    pop rax\n");
+        if (optimization_level >= 2 && !g_freestanding && can_emit_rbx(cg, n->children[1]))
+            emit_rbx(cg, n->children[1]);
+        else {
+            emit(cg, "    push rax\n");
+            gen_expr(cg, n->children[1]);
+            emit(cg, "    mov rbx, rax\n    pop rax\n");
+        }
         emit(cg, "    cmp rax, rbx\n");
         if (!strcmp(n->op, "==")) emit(cg, "    sete al\n");
         else if (!strcmp(n->op, "!=")) emit(cg, "    setne al\n");
@@ -4013,6 +4140,109 @@ void gen_expr(Codegen* cg, AstNode* n) {
     }
 }
 
+// ---- hosted -O2: which scalar locals live in r12-r15 --------------------
+#define MAX_REG_CAND 128
+typedef struct {
+    char name[96];
+    int decls, uses, bad, ord;
+} RegCand;
+static RegCand g_reg_cand[MAX_REG_CAND];
+static int g_reg_ncand;
+static int g_reg_asm;
+
+static RegCand* reg_cand(const char* name) {
+    if (!name || strlen(name) >= sizeof g_reg_cand[0].name) return NULL;
+    for (int i = 0; i < g_reg_ncand; i++)
+        if (!strcmp(g_reg_cand[i].name, name)) return &g_reg_cand[i];
+    if (g_reg_ncand >= MAX_REG_CAND) return NULL;
+    RegCand* c = &g_reg_cand[g_reg_ncand++];
+    memset(c, 0, sizeof *c);
+    memcpy(c->name, name, strlen(name) + 1);
+    c->ord = g_reg_ncand;
+    return c;
+}
+
+static void reg_note_decl(const char* name, int bad) {
+    RegCand* c = reg_cand(name);
+    if (!c) return;
+    c->decls++;
+    if (bad) c->bad = 1;
+}
+
+static void reg_note_use(const char* name) {
+    RegCand* c = reg_cand(name);
+    if (c) c->uses++;
+}
+
+static void reg_walk(Codegen* cg, AstNode* n) {
+    if (!n || n->type == AST_FUNCTION) return;
+    if (n->type == AST_CALL && n->name && !strcmp(n->name, "asm")) g_reg_asm = 1;
+    if (n->type == AST_LET && n->name) {
+        int bad = (n->flags & AF_VOLATILE) || n->is_pointer;
+        if (n->struct_type && !strcmp(n->struct_type, "__array__")) bad = 1;
+        else if (n->struct_type && typetab_lookup(cg->types, n->struct_type)) bad = 1;
+        if (n->child_count > 0 && n->children[0] &&
+            (n->children[0]->type == AST_ARRAY_LITERAL ||
+             n->children[0]->type == AST_STRUCT_LITERAL))
+            bad = 1;
+        reg_note_decl(n->name, bad);
+    }
+    if (n->type == AST_ADDR_OF && n->child_count > 0 && n->children[0] &&
+        n->children[0]->type == AST_IDENT)
+        reg_note_decl(n->children[0]->name, 1);
+    if (n->type == AST_IDENT && n->name) reg_note_use(n->name);
+    if ((n->type == AST_ASSIGN || n->type == AST_ARRAY_ASSIGN) && n->name) reg_note_use(n->name);
+    for (int i = 0; i < n->child_count; i++) reg_walk(cg, n->children[i]);
+}
+
+// Pick the four most-used scalars. A name declared twice (shadowing) stays
+// on the stack, and so does anything whose address is taken or that asm()
+// might name as [rbp-N].
+static void plan_reg_locals(Codegen* cg, AstNode* fn) {
+    g_reg_local_n = 0;
+    g_reg_ncand = 0;
+    g_reg_asm = 0;
+    if (!fn || fn->child_count < 1) return;
+    int pc = fn->child_count - 1;
+    for (int i = 0; i < pc; i++) {
+        AstNode* par = fn->children[i];
+        if (!par || !par->name) continue;
+        int bad = par->is_pointer != 0;
+        if (par->value && typetab_lookup(cg->types, par->value)) bad = 1;
+        reg_note_decl(par->name, bad);
+    }
+    reg_walk(cg, fn->children[pc]);
+    if (g_reg_asm) return;
+    int taken[MAX_REG_CAND];
+    memset(taken, 0, sizeof taken);
+    for (int k = 0; k < MAX_REG_LOCAL; k++) {
+        int best = -1;
+        for (int i = 0; i < g_reg_ncand; i++) {
+            if (taken[i]) continue;
+            RegCand* c = &g_reg_cand[i];
+            if (c->bad || c->decls != 1 || c->uses <= 0) continue;
+            if (best < 0 || c->uses > g_reg_cand[best].uses ||
+                (c->uses == g_reg_cand[best].uses && c->ord < g_reg_cand[best].ord))
+                best = i;
+        }
+        if (best < 0) break;
+        taken[best] = 1;
+        snprintf(g_reg_local_var[g_reg_local_n], sizeof g_reg_local_var[0], "%s", g_reg_cand[best].name);
+        g_reg_local_n++;
+    }
+}
+
+static void emit_reg_restore(Codegen* cg) {
+    for (int i = 0; i < g_reg_local_n; i++)
+        emit(cg, "    mov %s, [rbp - __frame_%s + %d]\n",
+             g_reg_local_name[i], g_fn_name, 8 * (i + 1));
+}
+
+static void emit_hosted_epilogue(Codegen* cg) {
+    emit_reg_restore(cg);
+    emit(cg, "    leave\n    ret\n");
+}
+
 void gen_stmt(Codegen* cg, AstNode* n);
 
 void gen_stmt(Codegen* cg, AstNode* n) {
@@ -4034,7 +4264,7 @@ void gen_stmt(Codegen* cg, AstNode* n) {
         else if (g_fn_flags & AF_NAKED)
             emit(cg, "    ret\n");
         else
-            emit(cg, "    leave\n    ret\n");
+            emit_hosted_epilogue(cg);
     } else if (n->type == AST_LET) {
         if (n->name && symtab_redeclared(cg->symtab, n->name)) {
             diag_error(n->line, n->col, "redeclaration of '%s' in the same block", n->name);
@@ -4157,7 +4387,9 @@ void gen_stmt(Codegen* cg, AstNode* n) {
         if (n->child_count > 0) {
             gen_expr(cg, n->children[0]);
             if (n->children[0]->type != AST_ARRAY_LITERAL) {
-                emit(cg, "    mov [rbp%d], rax\n", off);
+                Symbol* sym = &cg->symtab->symbols[cg->symtab->count - 1];
+                if (local_reg(sym)) emit(cg, "    mov %s, rax\n", local_reg(sym));
+                else emit(cg, "    mov [rbp%d], rax\n", off);
             }
         }
     } else if (n->type == AST_IF) {
@@ -4243,7 +4475,12 @@ static void bind_param(Codegen* cg, AstNode* par, const char* src_reg, int stack
         if (par->value && cg->symtab && cg->symtab->count > 0)
             cg->symtab->symbols[cg->symtab->count - 1].type_name = strdup(par->value);
     }
-    if (from_stack) {
+    Symbol* bound = &cg->symtab->symbols[cg->symtab->count - 1];
+    const char* rr = local_reg(bound);
+    if (rr) {
+        if (from_stack) emit(cg, "    mov %s, [rbp+%d]\n", rr, stack_disp);
+        else if (strcmp(rr, src_reg)) emit(cg, "    mov %s, %s\n", rr, src_reg);
+    } else if (from_stack) {
         emit(cg, "    mov rax, [rbp+%d]\n", stack_disp);
         emit(cg, "    mov [rbp%d], rax\n", off);
     } else {
@@ -4252,6 +4489,7 @@ static void bind_param(Codegen* cg, AstNode* par, const char* src_reg, int stack
 }
 
 void gen_func(Codegen* cg, AstNode* n) {
+    g_reg_local_n = 0;
     if (!n || !n->name) return;  // Null safety
     int param_count = n->child_count - 1;
     int is_int = (n->flags & AF_INTERRUPT) != 0;
@@ -4330,10 +4568,16 @@ void gen_func(Codegen* cg, AstNode* n) {
         emit(cg, "    push rbp\n    mov rbp, rsp\n");
         emit(cg, "    sub rsp, __frame_%s\n", n->name);
     } else {
+        if (optimization_level >= 2 && !g_freestanding)
+            plan_reg_locals(cg, n);
         emit(cg, "    push rbp\n    mov rbp, rsp\n");
         // Frame size is only known after the body is generated: use a NASM
         // forward-referenced constant defined after the function.
         emit(cg, "    sub rsp, __frame_%s\n", n->name);
+        // Caller-saved r12-r15 live in the frame's spare bytes, below the locals.
+        for (int i = 0; i < g_reg_local_n; i++)
+            emit(cg, "    mov [rbp - __frame_%s + %d], %s\n",
+                 n->name, 8 * (i + 1), g_reg_local_name[i]);
     }
 
     const char* regs[] = {"rdi", "rsi", "rdx", "rcx", "r8", "r9"};
@@ -4398,8 +4642,10 @@ void gen_func(Codegen* cg, AstNode* n) {
             diag_error(n->line, n->col, "a naked function cannot have local variables");
         emit(cg, "    ret\n");
     } else {
-        emit(cg, "    xor rax, rax\n    leave\n    ret\n");
+        emit(cg, "    xor rax, rax\n");
+        emit_hosted_epilogue(cg);
     }
+    g_reg_local_n = 0;
 
     // All locals (including nested-scope ones) are now known.
     if (!naked) {
