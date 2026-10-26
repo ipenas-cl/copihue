@@ -1,0 +1,4 @@
+tests/errors/result_mis.lap:8:19: error: error type '*u8' does not match 'i64' in '?'
+      8 |     let x = src(1)?;
+        |                   ^
+1 error, compilation failed

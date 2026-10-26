@@ -1,5 +1,7 @@
 # Enums y `match` (corte 0.39.0)
 
+**Corte 0.42.0.** `?` sobre un enum con `Ok(T)` y `Err(E)` es un `match` que retorna `Err`. El detalle está en [`DESIGN_ERRORS.md`](DESIGN_ERRORS.md).
+
 **Corte 0.41.0.** `enum Option<T> { None, Some(T) }` cuando el campo, ya sustituido, es un entero o un puntero. `enum Option { None, Some(i64) }` no cambia. El detalle está en [`DESIGN_TRAITS.md`](DESIGN_TRAITS.md).
 
 Un `enum` es un tipo suma. Cada variante tiene una etiqueta entera y cero o más campos. El valor cabe en un local, un parámetro, un global o un campo de struct. No hay heap, no hay libc, y el mismo código sirve en hosted, `--freestanding` y `--flat`.

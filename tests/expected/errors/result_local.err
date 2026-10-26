@@ -1,0 +1,4 @@
+tests/errors/result_local.lap:4:14: error: '?' needs a local Result
+      4 |     let x = a?;
+        |              ^
+1 error, compilation failed

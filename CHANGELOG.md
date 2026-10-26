@@ -2,6 +2,32 @@
 
 Todos los cambios importantes del proyecto.
 
+## [0.42.0] - 2026-10-26
+
+### Added
+- `enum Result<T, E> { Ok(T), Err(E) }` is a generic enum the program writes. It is not a compiler type. `Ok` and `Err` each have one field, and that field is still an integer or a pointer. `sizeof(Result<i64, i64>)` is 16. There are no exceptions, no unwinding, and no libc. `vec` is not rewritten.
+- `expr?` returns early on `Err` and yields the `Ok` field. Before the frame is chosen it is the match a programmer writes: `Ok` then `Err`, and the `Err` arm is `{ return Result<T, E>::Err(e); }`. A call is bound with `let` immediately before the statement, because `match` of a call still needs a local. `a`, `s.o`, and `p->o` are places and are not lifted. `?` is postfix. Prefix `*` and `&` wrap it, so `*p?` is `*(p?)`. The early return uses the existing enum return (hidden pointer in `rdi`). An arm block may `return` instead of yielding a value. A block that does neither is still `match arm block needs a result`.
+- The operand is not required to be named `Result`. It must have `Ok(T)` and `Err(E)`, and the function's `Err` field must be the same type. No conversion. A function that does not return an enum is `'?' needs a Result return`. A local that is not an enum is `'?' needs a local Result`. An `Option` is `'?' needs variants Ok(T) and Err(E) on 'Option'`. `Err` of `*u8` against `i64` is `error type '*u8' does not match 'i64' in '?'`. `?` on a call in a `while` condition is `'?' in a while condition needs a local Result` (the call is not hoisted). Omitting `Err` from `match` is still `match does not cover 'Err'`. `bits 16`, `bits 32`, and `naked` stay `an enum is a 64-bit value`.
+- `tests/lang/result.lap` prints 8, -3, 9, 104, -4, and 16 at `-O0` and `-O2`. `tests/flat/result.lap` is the same image at both levels and is not booted. Two `-c` objects link `add1` (`T add1`, `U add1`, prints 9). `examples/parse_result.lap` parses a sum with `Result` instead of a magic code: `12+3` prints 0 then 15, `7` prints 0 then 7, `12+` prints 1 then 3, `12a` prints 1 then 2, and an empty string prints 1 then 0. The note is `docs/DESIGN_ERRORS.md`.
+
+### Left out
+- Exceptions, `panic`, unwinding, libc, and a heap `Result`.
+- `From` / `Into`, and `?` converting `E`.
+- `try` blocks, `?` on `Option`, and `Ok` or `Err` with zero fields or more than one.
+- An `Ok` whose field is an enum. An enum field is still not an enum.
+- Hoisting `?` out of a `while` condition.
+- Rewriting `bench/src/parse.lap`, rewriting `vec`, or a trait-based `Result`.
+- A second lowering that branches on the raw tag. The only lowering is the match.
+
+### Changed
+- Language version is 0.42.0, on top of 0.41.0. 0.41.0 traits and static dispatch are unchanged: the copy still calls the impl symbol, and there is still no vtable. The 0.40.1 hosted `-O2` `while` whose equal arm is cold stays: that arm is `je` after the back edge, the tail falls through, and `align 32` is not applied to that shape. The 0.39.1 `while` stays: the not-equal arm falls through, one global array is `[r8+index*scale]`, and that loop label is `align 32`. The 0.38.1 note rejected sharing one register between two scalars whose live ranges do not overlap. That pass is not emitted. The 0.37.2 note rejected aligning `.text` to 16 or 32, and 0.37.1 rejected a direct `arr[i].field` store. Neither is emitted here.
+
+### Measured
+- No timed bench was added to `make test`. `bench/lowlat`, the SPSC ring, `bench/slice`, the 0.39 enum-versus-`if` windows, the 0.40.1 `book` and `match` windows, and the 0.41 trait listing were not run again.
+- NASM listing (`nasm -f elf64 -l`), hosted. `fn add1(a: Result<i64, i64>) -> Result<i64, i64>` with `let x = a?` against the same function written `let x = match a { Ok(v) => v, Err(e) => { return Result<i64, i64>::Err(e); } }`, then `return Result<i64, i64>::Ok(x + 1)`. Local labels (`.L0`, `.L1`) stay inside the function. The first `ret` is the `Err` return. The last `ret` is the unreachable `leave` / `ret` that already follows the `Ok` return. Listing produced 2026-10-26T10:36:47Z.
+- Those two `add1` bodies are the same bytes. The frame is the enum-return frame (`push rbp`), not the 0.41 slim frame. `sub rsp` is `4881EC90000000` (144) at `-O0` and at `-O2`. `-O0`, from the label through the first `ret`: 122 and 122. The whole function through the last `ret` is 204 and 204. Hosted `-O2`: 138 and 138 through the first `ret`, 221 and 221 through the last.
+- `let x = ok_i(n)?` against `let t = ok_i(n); let x = match t { ... }` is also the same bytes. `sub rsp` is `4881ECA0000000` (160) at both levels. `-O0`: 130 and 130 through the first `ret`, 212 and 212 through the last. `-O2`: 172 and 172 through the first `ret`, 282 and 282 through the last. No exception machinery and no extra instruction.
+
 ## [0.41.0] - 2026-10-26
 
 ### Added

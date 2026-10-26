@@ -1,0 +1,21 @@
+// also-o2
+enum Result<T, E> { Ok(T), Err(E) }
+
+fn add1(a: Result<i64, i64>) -> Result<i64, i64> {
+    let x = a?;
+    return Result<i64, i64>::Ok(x + 1);
+}
+
+fn _start() -> i64 {
+    let a = Result<i64, i64>::Ok(1);
+    let b = add1(a);
+    let n = match b {
+        Ok(v) => v,
+        Err(e) => e
+    };
+    while (1) {
+        cli();
+        hlt();
+    }
+    return n;
+}

@@ -16,7 +16,7 @@
 
 // ==== NAMING (single place to change when the language is renamed) ====
 #define LANG_NAME     "Copihue"
-#define LANG_VERSION  "0.41.0"
+#define LANG_VERSION  "0.42.0"
 #define COMPILER_BIN  "copihue"
 #define SRC_EXT       ".lap"   /* Lapageria rosea, the copihue */
 #define OLD_SRC_EXT   ".cph"   /* v0.18.x extension, still accepted with a warning */
@@ -179,7 +179,7 @@ typedef enum {
     T_EQ, T_EQEQ, T_NEQ, T_LT, T_GT, T_LTE, T_GTE, T_ARROW,
     T_AND_AND, T_OR_OR, T_BANG,
     T_PLUSPLUS, T_MINUSMINUS, T_PLUSEQ, T_MINUSEQ, T_STAREQ, T_SLASHEQ, T_MODEQ,
-    T_PIPE, T_CARET, T_TILDE, T_SHL, T_SHR
+    T_PIPE, T_CARET, T_TILDE, T_SHL, T_SHR, T_QUESTION
 } TokType;
 
 typedef struct { TokType t; char* s; int len; int line; int col; } Tok;
@@ -279,7 +279,7 @@ typedef enum {
     AST_LOGICAL,  // && and || operators with short-circuit evaluation
     AST_BREAK, AST_CONTINUE,
     AST_DATA, AST_DATA_ITEM, AST_CAST,
-    AST_JMP, AST_MEM_STORE, AST_LABEL
+    AST_JMP, AST_MEM_STORE, AST_LABEL, AST_TRY
 } AstType;
 
 typedef struct AstNode {
@@ -327,6 +327,7 @@ typedef struct AstNode {
 #define AF_ENUM_PAREN 16384 // a match arm wrote parentheses, even if empty
 #define AF_DIAG      32768 // this node already reported a generic error
 #define AF_METHOD    65536 // x.f() parsed as f(x); resolve it to an impl, or error
+#define AF_TRY      131072 // match lowered from `?`; value is the return enum name
 
 // Symbol table
 typedef struct {
@@ -1443,6 +1444,7 @@ Tok lex_tok(Lex* l) {
     if (c == '=' && peek(l) == '=') { adv(l); return (Tok){T_EQEQ, st, 2, tok_line, tok_col}; }
     if (c == '=') return (Tok){T_EQ, st, 1, tok_line, tok_col};
     if (c == '!' && peek(l) == '=') { adv(l); return (Tok){T_NEQ, st, 2, tok_line, tok_col}; }
+    if (c == '?') return (Tok){T_QUESTION, st, 1, tok_line, tok_col};
     if (c == '!') return (Tok){T_BANG, st, 1, tok_line, tok_col};
     if (c == '<' && peek(l) == '=') { adv(l); return (Tok){T_LTE, st, 2, tok_line, tok_col}; }
     if (c == '<') return (Tok){T_LT, st, 1, tok_line, tok_col};
@@ -1525,6 +1527,7 @@ const char* tok_name(TokType t) {
         case T_DOTDOT: return "'..'";
         case T_AT: return "'@'";
         case T_ARROW: return "'->'";
+        case T_QUESTION: return "'?'";
         default: return "token";
     }
 }
@@ -2675,6 +2678,14 @@ AstNode* parse_postfix(Parser* p) {
         } else if (check_tok(p, T_DOT)) {
             advance_tok(p);
             left = postfix_member(p, left, 0);
+        } else if (check_tok(p, T_QUESTION)) {
+            /* `expr?` is postfix. It is lowered to a match before the frame is chosen. */
+            Tok q = advance_tok(p);
+            AstNode* t = ast_new(AST_TRY);
+            t->line = q.line;
+            t->col = q.col;
+            ast_add(t, left);
+            left = t;
         } else {
             break;
         }
@@ -5584,6 +5595,7 @@ static int arm_is_expr(AstNode* n) {
     case AST_LOGICAL:
     case AST_CAST:
     case AST_MATCH:
+    case AST_TRY:
     case AST_ADDR_OF:
         return 1;
     default:
@@ -5596,6 +5608,18 @@ static AstNode* block_value(AstNode* n) {
     if (!n || n->type != AST_BLOCK || n->child_count < 1) return NULL;
     last = n->children[n->child_count - 1];
     return arm_is_expr(last) ? last : NULL;
+}
+
+/* A match arm may return instead of yielding. `{ let x = n; }` still has
+ * no result. A return nested in `if` does not count: that path can fall off. */
+static int block_has_return(AstNode* n) {
+    int i;
+    if (!n) return 0;
+    if (n->type == AST_RETURN) return 1;
+    if (n->type != AST_BLOCK) return 0;
+    for (i = 0; i < n->child_count; i++)
+        if (block_has_return(n->children[i])) return 1;
+    return 0;
 }
 
 static VTy expr_ty(Codegen* cg, AstNode* n) {
@@ -5840,6 +5864,12 @@ static VTy match_result_ty(Codegen* cg, AstNode* n) {
             }
         }
         body = (arm->child_count > arm->array_size) ? arm->children[arm->child_count - 1] : NULL;
+        /* An arm that returns has no value. The other arms still give the type. */
+        if (body && (body->type == AST_RETURN ||
+                     (body->type == AST_BLOCK && !block_value(body) && block_has_return(body)))) {
+            g_nbindty = saved;
+            continue;
+        }
         t = expr_ty(cg, body);
         g_nbindty = saved;
         if (t.kind == VK_INT && t.lit) t = ty_i64();
@@ -12456,10 +12486,19 @@ static void gen_arm_body(Codegen* cg, AstNode* body) {
         emit(cg, "    xor rax, rax\n");
         return;
     }
+    if (body->type == AST_RETURN) {
+        gen_stmt(cg, body);
+        return;
+    }
     if (body->type == AST_BLOCK) {
         AstNode* v = block_value(body);
         int i;
         if (!v) {
+            if (block_has_return(body)) {
+                for (i = 0; i < body->child_count; i++)
+                    gen_stmt(cg, body->children[i]);
+                return;
+            }
             emit(cg, "    xor rax, rax\n");
             return;
         }
@@ -12557,6 +12596,48 @@ static int arm_is_wild(AstNode* arm) {
     return arm && arm->name && !strcmp(arm->name, "_") && !arm->struct_type;
 }
 
+static char* try_show(const char* t) {
+    if (!t || !t[0]) return strdup("?");
+    if (strchr(t, '$')) return demangle_disp(t);
+    return strdup(t);
+}
+
+/* `?` is a match on Ok/Err. The Err arm returns the function's Err. The
+ * payload types have to be the same string the enum layout stored. */
+static int try_shape_ok(AstNode* n, EnumType* src) {
+    Variant* ok;
+    Variant* er;
+    Variant* rer;
+    EnumType* ret;
+    const char* st;
+    const char* dt;
+    char* sd;
+    char* dd;
+    char* name;
+    if (!n || !src) return 0;
+    ok = variant_by_name(src, "Ok");
+    er = variant_by_name(src, "Err");
+    if (!ok || !er || ok->field_count != 1 || er->field_count != 1) {
+        name = demangle_disp(src->name);
+        diag_error(n->line, n->col, "'?' needs variants Ok(T) and Err(E) on '%s'", name);
+        free(name);
+        return 0;
+    }
+    ret = (n->value) ? enum_lookup(n->value) : NULL;
+    rer = ret ? variant_by_name(ret, "Err") : NULL;
+    st = er->fields[0].type_name ? er->fields[0].type_name : "";
+    dt = (rer && rer->field_count == 1 && rer->fields[0].type_name) ? rer->fields[0].type_name : "";
+    if (!ret || !rer || rer->field_count != 1 || strcmp(st, dt)) {
+        sd = try_show(st);
+        dd = try_show(dt);
+        diag_error(n->line, n->col, "error type '%s' does not match '%s' in '?'", sd, dd);
+        free(sd);
+        free(dd);
+        return 0;
+    }
+    return 1;
+}
+
 static void gen_match(Codegen* cg, AstNode* n) {
     AstNode* scr;
     EnumType* e;
@@ -12574,7 +12655,14 @@ static void gen_match(Codegen* cg, AstNode* n) {
     e = NULL;
     enum_loc_clear(&loc);
     if (!scr || !enum_loc_of(cg, scr, &loc, &e) || !e) {
-        diag_error(scr ? scr->line : n->line, scr ? scr->col : n->col, "match needs a local enum");
+        if (n->flags & AF_TRY)
+            diag_error(n->line, n->col, "'?' needs a local Result");
+        else
+            diag_error(scr ? scr->line : n->line, scr ? scr->col : n->col, "match needs a local enum");
+        emit(cg, "    xor rax, rax\n");
+        return;
+    }
+    if ((n->flags & AF_TRY) && !try_shape_ok(n, e)) {
         emit(cg, "    xor rax, rax\n");
         return;
     }
@@ -12641,7 +12729,8 @@ static void gen_match(Codegen* cg, AstNode* n) {
         }
         body = (arm->child_count > arm->array_size) ? arm->children[arm->child_count - 1] : NULL;
         if (body && body->type == AST_BLOCK && !block_value(body)) {
-            diag_error(body->line, body->col, "match arm block needs a result");
+            if (!block_has_return(body))
+                diag_error(body->line, body->col, "match arm block needs a result");
             g_nbindty = saved;
             continue;
         }
@@ -13158,6 +13247,9 @@ void gen_expr(Codegen* cg, AstNode* n) {
         }
     } else if (n->type == AST_MATCH) {
         gen_match(cg, n);
+    } else if (n->type == AST_TRY) {
+        diag_error(n->line, n->col, "'?' needs a Result return");
+        emit(cg, "    xor rax, rax\n");
     } else if (n->type == AST_CALL) {
         gen_builtin_call(cg, n);
     } else if (n->type == AST_ARRAY_LITERAL) {
@@ -14530,7 +14622,7 @@ static int expr_pushes(Codegen* cg, AstNode* n) {
         n->type == AST_FIELD_ACCESS || n->type == AST_STRING || n->type == AST_CAST ||
         n->type == AST_ARRAY_LITERAL || n->type == AST_STRUCT_LITERAL ||
         n->type == AST_ARRAY_ASSIGN || n->type == AST_FIELD_ASSIGN ||
-        n->type == AST_MATCH)
+        n->type == AST_MATCH || n->type == AST_TRY)
         return 1;
     if (n->type == AST_CALL) {
         if (!slim_call_shape(cg, n)) return 1;
@@ -17288,6 +17380,9 @@ void gen_stmt(Codegen* cg, AstNode* n) {
         gen_mem_store(cg, n);
     } else if (n->type == AST_MATCH) {
         gen_match(cg, n);
+    } else if (n->type == AST_TRY) {
+        diag_error(n->line, n->col, "'?' needs a Result return");
+        emit(cg, "    xor rax, rax\n");
     } else if (n->type == AST_CALL || n->type == AST_ASSIGN || n->type == AST_ARRAY_ASSIGN || n->type == AST_FIELD_ASSIGN) {
         AstNode* prev_stmt = g_stmt_expr;
         if (n->type == AST_ASSIGN && !assign_dest_narrow(cg, n) &&
@@ -17932,6 +18027,259 @@ static void stride_function(Codegen* cg, AstNode* fn) {
     }
 }
 
+/* `expr?` becomes the match a programmer writes by hand:
+ *     match expr { Ok(v) => v, Err(e) => return Ret::Err(e) }
+ * A call is bound with `let` first, because match still needs a local enum.
+ * That let is inserted before the statement. A while condition is not
+ * hoisted: the call would run once. The frame is chosen after this pass. */
+static int g_try_seq = 0;
+static char g_try_bad[160];
+
+static int try_is_place(AstNode* n) {
+    AstNode* o;
+    if (!n) return 0;
+    if (n->type == AST_IDENT && n->name && !n->qual) return 1;
+    if (n->type != AST_FIELD_ACCESS || n->child_count < 1) return 0;
+    o = n->children[0];
+    if (o && o->type == AST_DEREF && o->child_count == 1) o = o->children[0];
+    return o && o->type == AST_IDENT && o->name && !o->qual;
+}
+
+static AstNode* try_num(int line, int col) {
+    AstNode* z = ast_new(AST_NUMBER);
+    z->value = strdup("0");
+    z->line = line;
+    z->col = col;
+    return z;
+}
+
+static AstNode* try_ident(const char* name, int line, int col) {
+    AstNode* id = ast_new(AST_IDENT);
+    id->name = strdup(name);
+    id->line = line;
+    id->col = col;
+    return id;
+}
+
+static AstNode* try_match(AstNode* op, int line, int col) {
+    char okb[32], errb[32];
+    AstNode* m;
+    AstNode* arm;
+    AstNode* ret;
+    AstNode* call;
+    int seq = g_try_seq++;
+    snprintf(okb, sizeof okb, "ok$%d", seq);
+    snprintf(errb, sizeof errb, "err$%d", seq);
+    m = ast_new(AST_MATCH);
+    m->flags |= AF_TRY;
+    m->line = line;
+    m->col = col;
+    m->value = (g_cur_fn && g_cur_fn->value) ? strdup(g_cur_fn->value) : strdup("");
+    ast_add(m, op);
+    arm = ast_new(AST_MATCH_ARM);
+    arm->name = strdup("Ok");
+    arm->flags |= AF_ENUM_PAREN;
+    arm->line = line;
+    arm->col = col;
+    ast_add(arm, try_ident(okb, line, col));
+    arm->array_size = 1;
+    ast_add(arm, try_ident(okb, line, col));
+    ast_add(m, arm);
+    arm = ast_new(AST_MATCH_ARM);
+    arm->name = strdup("Err");
+    arm->flags |= AF_ENUM_PAREN;
+    arm->line = line;
+    arm->col = col;
+    ast_add(arm, try_ident(errb, line, col));
+    arm->array_size = 1;
+    ret = ast_new(AST_RETURN);
+    ret->line = line;
+    ret->col = col;
+    call = ast_new(AST_CALL);
+    /* Same spelling the parser gives `Result<i64, i64>::Err`: qual is the
+     * mangled enum and the name is qual__Err. */
+    {
+        const char* q = (g_cur_fn && g_cur_fn->value) ? g_cur_fn->value : "";
+        const char* ln = link_sym(q, "Err");
+        call->qual = strdup(q);
+        call->name = strdup(ln ? ln : "Err");
+    }
+    call->line = line;
+    call->col = col;
+    ast_add(call, try_ident(errb, line, col));
+    ast_add(ret, call);
+    /* A block, so this is the arm a programmer writes:
+     *     Err(e) => { return Result<T, E>::Err(e); } */
+    {
+        AstNode* blk = ast_new(AST_BLOCK);
+        blk->line = line;
+        blk->col = col;
+        ast_add(blk, ret);
+        ast_add(arm, blk);
+    }
+    ast_add(m, arm);
+    return m;
+}
+
+static AstNode* lower_node(AstNode* n, AstNode** lifts, int* nl, int allow);
+static void lower_arm_body_expr(AstNode* parent, int idx);
+
+static void try_push(AstNode* at, AstNode** lifts, int* nl, AstNode* let) {
+    if (!lifts || !nl) return;
+    if (*nl >= 64) {
+        diag_error(at ? at->line : 0, at ? at->col : 0, "too many '?' in one statement");
+        return;
+    }
+    lifts[(*nl)++] = let;
+}
+
+static void lower_block(AstNode* b) {
+    int i;
+    if (!b || b->type != AST_BLOCK) return;
+    for (i = 0; i < b->child_count; ) {
+        AstNode* lifts[64];
+        int nl = 0;
+        int k;
+        b->children[i] = lower_node(b->children[i], lifts, &nl, 1);
+        for (k = 0; k < nl; k++) {
+            ast_insert(b, i, lifts[k]);
+            i++;
+        }
+        i++;
+    }
+}
+
+static void lower_arm_body(AstNode* arm) {
+    AstNode* body;
+    AstNode* lifts[64];
+    int nl = 0;
+    int k;
+    if (!arm || arm->child_count <= arm->array_size) return;
+    body = arm->children[arm->child_count - 1];
+    if (body && body->type == AST_BLOCK) {
+        lower_block(body);
+        return;
+    }
+    body = lower_node(body, lifts, &nl, 1);
+    if (nl > 0) {
+        AstNode* blk = ast_new(AST_BLOCK);
+        blk->line = body ? body->line : arm->line;
+        blk->col = body ? body->col : arm->col;
+        for (k = 0; k < nl; k++) ast_add(blk, lifts[k]);
+        ast_add(blk, body);
+        body = blk;
+    }
+    arm->children[arm->child_count - 1] = body;
+}
+
+static AstNode* lower_node(AstNode* n, AstNode** lifts, int* nl, int allow) {
+    int i;
+    if (!n) return n;
+    if (n->type == AST_BLOCK) {
+        lower_block(n);
+        return n;
+    }
+    if (n->type == AST_WHILE) {
+        if (n->child_count > 0)
+            n->children[0] = lower_node(n->children[0], NULL, NULL, 0);
+        for (i = 1; i < n->child_count; i++) {
+            if (n->children[i] && n->children[i]->type == AST_BLOCK)
+                lower_block(n->children[i]);
+            else
+                n->children[i] = lower_node(n->children[i], NULL, NULL, 0);
+        }
+        return n;
+    }
+    if (n->type == AST_IF) {
+        if (n->child_count > 0)
+            n->children[0] = lower_node(n->children[0], lifts, nl, allow);
+        for (i = 1; i < n->child_count; i++) {
+            if (n->children[i] && n->children[i]->type == AST_BLOCK)
+                lower_block(n->children[i]);
+            else
+                lower_arm_body_expr(n, i);
+        }
+        return n;
+    }
+    if (n->type == AST_MATCH) {
+        if (n->child_count > 0)
+            n->children[0] = lower_node(n->children[0], lifts, nl, allow);
+        for (i = 1; i < n->child_count; i++)
+            if (n->children[i] && n->children[i]->type == AST_MATCH_ARM)
+                lower_arm_body(n->children[i]);
+        return n;
+    }
+    if (n->type == AST_TRY) {
+        AstNode* op = n->child_count > 0 ? n->children[0] : NULL;
+        op = lower_node(op, lifts, nl, allow);
+        if (g_try_bad[0]) {
+            diag_error(n->line, n->col, "%s", g_try_bad);
+            return try_num(n->line, n->col);
+        }
+        if (!try_is_place(op)) {
+            AstNode* let;
+            char buf[32];
+            if (!allow) {
+                diag_error(n->line, n->col, "'?' in a while condition needs a local Result");
+                return try_num(n->line, n->col);
+            }
+            snprintf(buf, sizeof buf, "q$%d", g_try_seq++);
+            let = ast_new(AST_LET);
+            let->name = strdup(buf);
+            let->line = n->line;
+            let->col = n->col;
+            ast_add(let, op);
+            try_push(n, lifts, nl, let);
+            op = try_ident(buf, n->line, n->col);
+        }
+        return try_match(op, n->line, n->col);
+    }
+    if (n->type == AST_FUNCTION) return n;
+    for (i = 0; i < n->child_count; i++)
+        n->children[i] = lower_node(n->children[i], lifts, nl, allow);
+    return n;
+}
+
+static void lower_arm_body_expr(AstNode* parent, int idx) {
+    AstNode* body;
+    AstNode* lifts[64];
+    int nl = 0;
+    int k;
+    body = parent->children[idx];
+    body = lower_node(body, lifts, &nl, 1);
+    if (nl > 0) {
+        AstNode* blk = ast_new(AST_BLOCK);
+        blk->line = body ? body->line : parent->line;
+        blk->col = body ? body->col : parent->col;
+        for (k = 0; k < nl; k++) ast_add(blk, lifts[k]);
+        ast_add(blk, body);
+        body = blk;
+    }
+    parent->children[idx] = body;
+}
+
+static void lower_tries(AstNode* fn) {
+    EnumType* e;
+    Variant* er;
+    AstNode* body;
+    char* shown;
+    g_try_seq = 0;
+    g_try_bad[0] = 0;
+    if (!fn || fn->child_count < 1) return;
+    body = fn->children[fn->child_count - 1];
+    if (!body || body->type != AST_BLOCK) return;
+    e = fn->value ? enum_lookup(fn->value) : NULL;
+    er = e ? variant_by_name(e, "Err") : NULL;
+    if (!e)
+        snprintf(g_try_bad, sizeof g_try_bad, "'?' needs a Result return");
+    else if (!er || er->field_count != 1) {
+        shown = demangle_disp(e->name);
+        snprintf(g_try_bad, sizeof g_try_bad, "'?' needs variant 'Err' on '%s'", shown);
+        free(shown);
+    }
+    lower_block(body);
+}
+
 void gen_func(Codegen* cg, AstNode* n) {
     g_eret_off = 0;
     g_enum_dst_kind = 0;
@@ -18037,6 +18385,10 @@ void gen_func(Codegen* cg, AstNode* n) {
     g_fn_flags = n->flags;
     g_fn_bits = bits;
     g_cur_fn = n;
+    /* `?` becomes a match before the frame, the register plan, and -O2
+     * while shapes look at the body. A nested call generates its own
+     * function later; the return enum is already stored on the match. */
+    lower_tries(n);
     if (!(n->is_pointer & 1) && n->value && enum_lookup(n->value) && !enum_ret_allowed(n))
         diag_error(n->line, n->col, "an enum cannot be returned");
     if (n->flags & AF_OWN)
