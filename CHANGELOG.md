@@ -2,6 +2,34 @@
 
 Todos los cambios importantes del proyecto.
 
+## [0.38.0] - 2026-10-26
+
+### Added
+- `enum Name { None, Some(i64), ... }` is a sum type. A variant has zero or more fields. A field is an integer or a pointer. The value is an `i64` tag at offset 0 and a payload from offset 8, aligned to each field and rounded up to 8. `sizeof` is that size. `Option` is not a compiler type: the program writes the enum. `enum` and `match` are contextual, not keywords, so `let enum = 1` and `match(1)` stay a name and a call.
+- `Option::Some(7)` and `Option::None` write a local: the slot is zeroed, then the tag and the fields. `x = y` copies the bytes when both sides are the same enum. A parameter is passed by address and copied, the same way a struct is. A constructor argument fills a temporary of that size.
+- `match e { None => 0, Some(n) => n }` is an expression. `e` is a local or a parameter. Every variant is required (`match does not cover 'None'`). A duplicate arm is `variant 'Some' is already matched`. A field of the wrong type is `expected i64, found *u8`. The wrong arity is `variant 'Some' takes 1 field, not 0`. The lowering is `cmp qword [slot], tag` / `jne`. A tag that matches nothing is `ud2`. There is no heap and no libc. `--freestanding` and `--flat` use the same code when the enum does not need `malloc`.
+- Hosted `-O2` keeps the enum on the stack and builds a normal `rbp` frame for a function with an enum parameter. The short `push`/`pop` frame has no `rbp`. Copying the tag through that frame wrote the caller's slots: `take` of an `Option` that was not the first local returned the wrong value. `tests/lang/enum_opt.lap` prints 2 and then 40 for that call. The `i64` beside the enum stays 40.
+
+### Left out
+- Returning an enum. `rax` holds one scalar, and a struct declared `-> T` already comes back only in `rax`. `-> Option` and `return o` are `an enum cannot be returned`.
+- An enum global (`an enum must be a local or a parameter`), a struct field, a slice element, an array element, and a `vec` element.
+- An enum inside a `module`. `pub enum` outside a module is the existing `pub is only valid inside a module`.
+- `bits 16`, `bits 32`, and `naked`, including 64-bit `naked` (`an enum is a 64-bit value`).
+- `match` of a pointer, of `*p`, or of a constructor that is not stored in a local (`match needs a local enum`). `&o` is the address of the bytes.
+- `_`, `|` patterns, guards, block arms, named fields, and an enum nested as a field. An `own *T` field is rejected, so a variant does not drop. Reassignment copies the bytes.
+- A `match` of only literals is `i64`, so `let x: i8 = match ... => 1` is `expected i8, found i64`. An arm that is itself an enum is `an enum is not a scalar; match it`.
+
+### Changed
+- Language version is 0.38.0, on top of 0.37.2. The 0.37.2 note rejected aligning `.text` to 16 or 32, and 0.37.1 rejected a direct `arr[i].field` store. Neither is emitted here. The 0.37.0 `vec` of structs, owning move, and slice view are unchanged.
+
+### Measured
+- No timed bench was added to `make test`. `bench/slice` and `bench/lowlat` were not run again. The sources of this comparison stayed in `/tmp`.
+- NASM listing (`nasm -f elf64 -l`), `-O0`, of `pick`. The enum `pick` copies an `Option` parameter, matches `None => 0` and `Some(v) => v`, stores that in a local, and returns it. Bytes from `pick` through the first `ret`: 70. The same shape on `struct Opt { tag: i64, val: i64 }`, with `if (o.tag == 0) n = 0; else n = o.val; return n`: 76. A difference of 6. The match compare is `cmp qword [rbp-16], imm`. The `if` compare is `push` / `mov rbx` / `pop` / `cmp rax, rbx`. The 70 includes `ud2` (2 bytes), which a tag of 0 or 1 does not execute. After that `ret` both functions have the unreachable `xor rax` / `leave` / `ret` (5 bytes).
+- Hosted `-O2`, `taskset -c 0`, one warmup and seven runs. The value is built once, outside the loop. The loop adds the payload `1`, 80000000 times. Both programs print `80000000` and then `1`. The `-O2` loop is not the `-O0` `pick`: `match` compares the tag in memory twice, spills the `Some` field into a slot, and `push`/`pop`s the sum. The `if` compares the tag once from a register and adds the field. Neither loop is unrolled.
+- Window 2026-10-26T06:09:47Z — 2026-10-26T06:09:48Z, `match` then `if` on each round. `match`: 63.3, 63.0, 62.9, 62.9, 63.1, 62.9, 63.2 ms, median 63.0 (62.9–63.3). `if`: 62.3, 58.3, 55.5, 56.0, 55.8, 54.4, 56.1 ms, median 56.0 (54.4–62.3). The ranges do not overlap. The edges are 0.6 ms apart (62.3 against 62.9). The ratio of the medians is 1.13.
+- Window 2026-10-26T06:10:09Z — 2026-10-26T06:10:10Z, `if` then `match` on each round. `match`: 63.1, 63.0, 63.1, 63.7, 63.2, 63.8, 62.9 ms, median 63.1 (62.9–63.8). `if`: 51.4, 48.8, 56.9, 50.9, 54.3, 54.5, 51.6 ms, median 51.6 (48.8–56.9). The ranges do not overlap. The edges are 6.0 ms apart. The ratio of the medians is 1.22.
+- The `if` median moves between those windows (56.0 and 51.6). The `match` median does not (63.0 and 63.1). The fourteen `if` samples still top out at 62.3, which is under the `match` minimum of 62.9. The gap is small, and the ratio is not stable. `match` is the slower of the two in both windows.
+
 ## [0.37.2] - 2026-10-26
 
 ### Changed

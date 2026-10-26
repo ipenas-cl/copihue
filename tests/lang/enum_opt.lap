@@ -1,0 +1,91 @@
+enum Option { None, Some(i64) }
+enum Color { Red, Green, Blue }
+enum Pair { Empty, Both(i64, i32), Byte(u8) }
+enum Ptr { No, Yes(*u8) }
+
+fn take(o: Option) -> i64 {
+    return match o {
+        Option::None => 0,
+        Some(n) => n
+    };
+}
+
+fn color_of(c: Color) -> i64 {
+    return match c {
+        Red => 0,
+        Color::Green => 1,
+        Blue => 2
+    };
+}
+
+fn pair_of(p: Pair) -> i64 {
+    return match p {
+        Empty => 0,
+        Both(x, y) => x + y,
+        Byte(b) => b
+    };
+}
+
+fn byte_of(p: Ptr) -> i64 {
+    return match p {
+        No => 0,
+        Yes(q) => q[0]
+    };
+}
+
+fn main() -> i64 {
+    let a = Option::Some(7);
+    let b = Option::None;
+    let c: Option = Option::Some(3);
+    let both = Pair::Both(10, 4);
+    let byte = Pair::Byte(9);
+    let green = Color::Green;
+    let z = Option::Some(1);
+    let hi = Ptr::Yes("hi");
+    print_int(take(a));
+    println("");
+    print_int(take(b));
+    println("");
+    print_int(match c { None => 1, Option::Some(n) => n + 1 });
+    println("");
+    print_int(pair_of(both));
+    println("");
+    print_int(pair_of(byte));
+    println("");
+    print_int(color_of(green));
+    println("");
+    print_int(sizeof(Option));
+    println("");
+    print_int(sizeof(Pair));
+    println("");
+    print_int(sizeof(Color));
+    println("");
+    z = Option::None;
+    print_int(take(z));
+    println("");
+    z = Option::Some(5);
+    print_int(take(z));
+    println("");
+    print_int(take(Option::Some(8)));
+    println("");
+    print_int(take(Option::None));
+    println("");
+    print_int(byte_of(hi));
+    println("");
+    let keep = 40;
+    let later = Option::Some(2);
+    let a2 = Option::Some(7);
+    print_int(take(later));
+    println("");
+    print_int(keep);
+    println("");
+    print_int(take(a2));
+    println("");
+    print_int(keep);
+    println("");
+    let enum = 1;
+    let match = enum;
+    print_int(match);
+    println("");
+    return 0;
+}

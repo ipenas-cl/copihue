@@ -1,0 +1,9 @@
+// also-o2
+enum Option { None, Some(i64) }
+
+fn pick(o: Option) -> i64 {
+    return match o {
+        None => 0,
+        Some(n) => n
+    };
+}

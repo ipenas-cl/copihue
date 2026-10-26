@@ -1,0 +1,4 @@
+tests/errors/enum_bits.lap:4:9: error: an enum is a 64-bit value
+      4 |     let o: Option = Option::None;
+        |         ^
+1 error, compilation failed

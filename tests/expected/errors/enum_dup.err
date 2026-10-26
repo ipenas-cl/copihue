@@ -1,0 +1,4 @@
+tests/errors/enum_dup.lap:7:9: error: variant 'Some' is already matched
+      7 |         Some(m) => m,
+        |         ^
+1 error, compilation failed

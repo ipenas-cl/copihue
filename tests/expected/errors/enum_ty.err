@@ -1,0 +1,4 @@
+tests/errors/enum_ty.lap:5:26: error: expected i64, found *u8
+      5 |     let o = Option::Some(p);
+        |                          ^
+1 error, compilation failed
