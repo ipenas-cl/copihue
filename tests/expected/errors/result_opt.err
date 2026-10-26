@@ -1,0 +1,4 @@
+tests/errors/result_opt.lap:5:14: error: '?' needs variants Ok(T) and Err(E) on 'Option'
+      5 |     let x = a?;
+        |              ^
+1 error, compilation failed

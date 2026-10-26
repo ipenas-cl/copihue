@@ -375,6 +375,35 @@ elif grep -q "^COMPILE ERROR" "$WORK/glink0"; then
 else
   check "generic link" "tests/expected/tests/link/generic.out" "$WORK/glink0"
 fi
+# `?` is ordinary code. The defining object exports `add1`. The enum is not
+# an ELF symbol; both objects write the same `enum Result`.
+reslink_run() {
+  local opt=$1
+  ( cd "$WORK" && rm -f res_prog res_def.o res_use.o &&
+    "$CC" "$opt" -c -o res_def.o "$ROOT/tests/link/parts/result_def.lap" &&
+    "$CC" "$opt" -c -o res_use.o "$ROOT/tests/link/parts/result_use.lap" &&
+    ld res_def.o res_use.o -o res_prog ) >/dev/null 2>err.txt || {
+      echo "COMPILE ERROR"; sed "s|$ROOT/||g" "$WORK/err.txt"; return; }
+  ( cd "$WORK" && ./res_prog </dev/null; echo "exit=$?" ) | mask
+}
+reslink_run -O0 > "$WORK/rlink0"
+if ! nm "$WORK/res_def.o" | grep -q ' T add1$' || \
+   nm "$WORK/res_def.o" | grep -q ' _start$' || \
+   ! nm -u "$WORK/res_use.o" | grep -q ' add1$' || \
+   ! nm "$WORK/res_use.o" | grep -q ' T main' || \
+   ! nm "$WORK/res_use.o" | grep -q ' T _start'; then
+  fail=$((fail+1)); failed+=("result link symbols"); echo "FAIL result link symbols"; nm "$WORK/res_def.o"; nm "$WORK/res_use.o"
+else
+  pass=$((pass+1))
+fi
+reslink_run -O2 > "$WORK/rlink2"
+if ! cmp -s "$WORK/rlink0" "$WORK/rlink2"; then
+  fail=$((fail+1)); failed+=("result link (-O0 vs -O2)"); echo "FAIL result link: -O0 and -O2 differ"; diff "$WORK/rlink0" "$WORK/rlink2" | head -10
+elif grep -q "^COMPILE ERROR" "$WORK/rlink0"; then
+  fail=$((fail+1)); failed+=("result link"); echo "FAIL result link:"; cat "$WORK/rlink0"
+else
+  check "result link" "tests/expected/tests/link/result.out" "$WORK/rlink0"
+fi
 # The same instantiation inside a module is `mem__max$1$i32`.
 mgenlink_run() {
   local opt=$1

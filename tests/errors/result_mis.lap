@@ -1,0 +1,12 @@
+enum Result<T, E> { Ok(T), Err(E) }
+
+fn src(a: i64) -> Result<i64, *u8> {
+    return Result<i64, *u8>::Err(0 as *u8);
+}
+
+fn f() -> Result<i64, i64> {
+    let x = src(1)?;
+    return Result<i64, i64>::Ok(x);
+}
+
+fn main() -> i64 { return 0; }

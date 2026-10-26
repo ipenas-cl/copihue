@@ -2,6 +2,8 @@
 
 **Esto es una propuesta. No está implementado.** El compilador de este árbol, cuando se escribió la propuesta, era Copihue 0.19.0 (`compiler/bootstrap-c/copihue.c`).
 
+**Corte 0.42.0.** `enum Result<T, E> { Ok(T), Err(E) }` lo escribe el programa. `expr?` devuelve `Err` temprano y es el mismo `match`. No hay excepciones ni libc. El detalle está en [`DESIGN_ERRORS.md`](DESIGN_ERRORS.md).
+
 **Corte 0.41.0.** Un trait (`trait Ord`, `impl Ord for i64`, `fn max<T: Ord>`) se monomorfiza: la copia llama al símbolo del impl. `x.f()` es `f(x)`. `enum Option<T>` existe si el campo es un entero o un puntero. El detalle está en [`DESIGN_TRAITS.md`](DESIGN_TRAITS.md).
 
 **Corte 0.40.0.** Una función o un struct puede ser genérico (`fn max<T>`, `struct Par<A, B>`). El compilador emite una copia por combinación usada. El detalle está en [`DESIGN_GENERICS.md`](DESIGN_GENERICS.md).

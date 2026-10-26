@@ -1,0 +1,4 @@
+tests/errors/result_miss.lap:5:12: error: match does not cover 'Err'
+      5 |     return match r {
+        |            ^
+1 error, compilation failed

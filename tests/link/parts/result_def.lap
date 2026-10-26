@@ -1,0 +1,6 @@
+enum Result<T, E> { Ok(T), Err(E) }
+
+fn add1(a: Result<i64, i64>) -> Result<i64, i64> {
+    let x = a?;
+    return Result<i64, i64>::Ok(x + 1);
+}

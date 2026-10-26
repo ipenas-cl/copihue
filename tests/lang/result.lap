@@ -1,0 +1,48 @@
+enum Result<T, E> { Ok(T), Err(E) }
+
+fn add1(a: Result<i64, i64>) -> Result<i64, i64> {
+    let x = a?;
+    return Result<i64, i64>::Ok(x + 1);
+}
+
+fn ok_i(n: i64) -> Result<i64, i64> {
+    return Result<i64, i64>::Ok(n);
+}
+
+fn bump(n: i64) -> Result<i64, i64> {
+    let x = ok_i(n)?;
+    return Result<i64, i64>::Ok(x + 1);
+}
+
+fn show(r: Result<i64, i64>) -> i64 {
+    return match r {
+        Ok(v) => v,
+        Err(e) => 0 - e,
+    };
+}
+
+fn first(p: Result<*u8, i64>) -> Result<i64, i64> {
+    let q = p?;
+    return Result<i64, i64>::Ok(q[0]);
+}
+
+fn main() -> i64 {
+    let a = Result<i64, i64>::Ok(7);
+    let b = Result<i64, i64>::Err(3);
+    let s = "hi";
+    let p = Result<*u8, i64>::Ok(s);
+    let bad = Result<*u8, i64>::Err(4);
+    print_int(show(add1(a)));
+    println("");
+    print_int(show(add1(b)));
+    println("");
+    print_int(show(bump(8)));
+    println("");
+    print_int(show(first(p)));
+    println("");
+    print_int(show(first(bad)));
+    println("");
+    print_int(sizeof(Result<i64, i64>));
+    println("");
+    return 0;
+}

@@ -1,0 +1,4 @@
+tests/errors/result_ret.lap:3:14: error: '?' needs a Result return
+      3 |     let x = a?;
+        |              ^
+1 error, compilation failed
