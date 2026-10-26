@@ -1,0 +1,99 @@
+// Hosted -O2 moves a cold `if (x == k)` out of a while so the miss path
+// falls through. When that arm returns and the tail reads another field of
+// the same element, the address is computed once. -O0 prints the same lines.
+// A `let` in the tail stays on the ordinary layout.
+
+struct Node { k: i32, v: i32, nxt: i32 }
+let nodes: [Node; 4];
+let recs_k: [i64; 4];
+
+fn link(id: i64) -> i64 {
+    let prev = -1;
+    let cur = 0;
+    while (cur >= 0) {
+        if (nodes[cur].k == id) {
+            return nodes[cur].v;
+        }
+        prev = cur;
+        cur = nodes[cur].nxt;
+    }
+    return prev;
+}
+
+fn rows(key: i64) -> i64 {
+    let i = 0;
+    let acc = 0;
+    while (i < 4) {
+        if (nodes[i].k == key) {
+            return acc + nodes[i].v;
+        }
+        acc = nodes[i].v;
+        i = i + 1;
+    }
+    return acc;
+}
+
+fn wide(k: i64) -> i64 {
+    let i = 0;
+    let n = 0;
+    while (i < 4) {
+        if (recs_k[i] == k) {
+            let a = i;
+            if (a > 0) { a = a + 3; }
+            if (a > 2) { a = a + 5; }
+            return a;
+        }
+        n = n + 1;
+        i = i + 1;
+    }
+    return n;
+}
+
+fn with_let() -> i64 {
+    let i = 0;
+    let s = 0;
+    while (i < 3) {
+        if (i == 1) {
+            return s;
+        }
+        let p: own *i64 = malloc(8);
+        *p = i + 1;
+        s = s + *p;
+        i = i + 1;
+    }
+    return s;
+}
+
+fn main() -> i32 {
+    nodes[0].k = 10;
+    nodes[0].v = 7;
+    nodes[0].nxt = 1;
+    nodes[1].k = 20;
+    nodes[1].v = 8;
+    nodes[1].nxt = 2;
+    nodes[2].k = 30;
+    nodes[2].v = 9;
+    nodes[2].nxt = -1;
+    nodes[3].k = 0;
+    nodes[3].v = 0;
+    nodes[3].nxt = -1;
+    print_int(link(20));
+    print(" ");
+    print_int(link(99));
+    println("");
+    print_int(rows(30));
+    print(" ");
+    print_int(rows(0));
+    println("");
+    recs_k[0] = 4;
+    recs_k[1] = 5;
+    recs_k[2] = 6;
+    recs_k[3] = 7;
+    print_int(wide(6));
+    print(" ");
+    print_int(wide(1));
+    println("");
+    print_int(with_let());
+    println("");
+    return 0;
+}
