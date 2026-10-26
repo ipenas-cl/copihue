@@ -16,7 +16,7 @@
 
 // ==== NAMING (single place to change when the language is renamed) ====
 #define LANG_NAME     "Copihue"
-#define LANG_VERSION  "0.33.0"
+#define LANG_VERSION  "0.33.1"
 #define COMPILER_BIN  "copihue"
 #define SRC_EXT       ".lap"   /* Lapageria rosea, the copihue */
 #define OLD_SRC_EXT   ".cph"   /* v0.18.x extension, still accepted with a warning */
@@ -706,8 +706,12 @@ char* strtab_add(StringTable* st, char* value, int len) {
 
 // Hosted -O2. The first four names are callee-saved and survive a call.
 // r10 and r11 are caller-saved: only a local whose live range contains no
-// call goes there. malloc uses r10 as a syscall argument, so a local in r10
-// must not be live across that call. rbx stays scratch.
+// call goes there, and only after r12–r15 are full. Filling r10/r11 first
+// was measured on the order book and slowed the leaf loops, so it is not
+// the plan. A scalar or a pointer fits. An array, a struct, a volatile
+// local, or a name whose address is taken stays in its slot. malloc uses
+// r10 as a syscall argument, so a local in r10 must not be live across
+// that call. rbx stays scratch.
 #define MAX_REG_CALLEE 4
 #define MAX_REG_LOCAL 6
 static const char *g_reg_local_name[MAX_REG_LOCAL] = {
@@ -720,7 +724,10 @@ static int g_reg_callee_n = 0;
 static void symbol_assign_reg(Symbol *s) {
     s->reg = -1;
     if (!s->name || g_reg_local_n <= 0) return;
-    if (s->is_array || s->is_pointer || s->is_volatile || s->size != 1) return;
+    // A pointer symbol stores its width in bytes (8). A scalar stores a slot
+    // count of 1. Both can live in a register. An array or a struct cannot.
+    if (s->is_array || s->is_volatile) return;
+    if (!s->is_pointer && s->size != 1) return;
     for (int i = 0; i < g_reg_local_n; i++) {
         if (!strcmp(s->name, g_reg_local_var[i])) { s->reg = i; return; }
     }
@@ -5496,6 +5503,7 @@ static const char* addr_data_label(Codegen* cg, AstNode* e) {
     return NULL;
 }
 
+static void emit_mov_ptr(Codegen* cg, Symbol* sym, const char* dest);
 static int gen_field_addr(Codegen* cg, AstNode* obj, const char* field);
 
 // Helper: Generate address-of operator (&)
@@ -5516,9 +5524,7 @@ void gen_addr_of(Codegen* cg, AstNode* n) {
             Symbol* sym = symtab_lookup_symbol(cg->symtab, var->name);
             if (sym && sym->is_pointer) {
                 // Variable is already a pointer - just load it
-                if (sym->mem && legacy_bits()) emit(cg, "    mov eax, [%s]\n", sym->mem);
-                else if (sym->mem) emit(cg, "    mov rax, [%s]\n", sym->mem);
-                else emit(cg, "    mov rax, [rbp%d]\n", off);
+                emit_mov_ptr(cg, sym, "rax");
             } else if (sym && sym->mem && legacy_bits()) {
                 emit(cg, "    mov eax, %s\n", sym->mem);
             } else if (sym && sym->mem) {
@@ -5715,7 +5721,7 @@ void gen_array_index(Codegen* cg, AstNode* n) {
 
                 // Load the pointer from struct field
                 if (is_pointer) {
-                    emit(cg, "    mov rbx, [rbp%d]\n", sym->offset);  // Load struct pointer
+                    emit_mov_ptr(cg, sym, "rbx");  // Load struct pointer
                     if (field_off == 0) {
                         emit(cg, "    mov rbx, [rbx]\n");  // Load field (pointer)
                     } else {
@@ -5841,7 +5847,7 @@ void gen_array_index(Codegen* cg, AstNode* n) {
                 }
             }
 
-            emit(cg, "    mov rbx, [rbp%d]\n", sym->offset);  // Load pointer
+            emit_mov_ptr(cg, sym, "rbx");  // Load pointer
 
             // Scale index by element size
             if (elem_size > 1) {
@@ -6189,6 +6195,22 @@ static char* obj_record_type(Codegen* cg, AstNode* obj) {
 static int gen_struct_addr(Codegen* cg, AstNode* n);
 
 // Address of `obj.field` (the field itself, which may be an embedded struct).
+static void emit_mov_ptr(Codegen* cg, Symbol* sym, const char* dest) {
+    const char* r = local_reg(sym);
+    if (!sym || !dest) return;
+    if (r) {
+        if (strcmp(dest, r)) emit(cg, "    mov %s, %s\n", dest, r);
+        return;
+    }
+    if (sym->mem) {
+        if (legacy_bits() && !strcmp(dest, "rax")) emit(cg, "    mov eax, [%s]\n", sym->mem);
+        else if (legacy_bits() && !strcmp(dest, "rbx")) emit(cg, "    mov ebx, [%s]\n", sym->mem);
+        else emit(cg, "    mov %s, [%s]\n", dest, sym->mem);
+        return;
+    }
+    emit(cg, "    mov %s, [rbp%d]\n", dest, sym->offset);
+}
+
 static int gen_field_addr(Codegen* cg, AstNode* obj, const char* field) {
     char* rec = obj_record_type(cg, obj);
     if (!rec || !field) return 0;
@@ -6201,8 +6223,14 @@ static int gen_field_addr(Codegen* cg, AstNode* obj, const char* field) {
             return 1;
         }
         if (s && s->is_pointer) {
-            emit(cg, "    mov rax, [rbp%d]\n", s->offset);
-            if (off) emit(cg, "    add rax, %d\n", off);
+            const char* r = local_reg(s);
+            if (r) {
+                if (off) emit(cg, "    lea rax, [%s+%d]\n", r, off);
+                else emit(cg, "    mov rax, %s\n", r);
+            } else {
+                emit_mov_ptr(cg, s, "rax");
+                if (off) emit(cg, "    add rax, %d\n", off);
+            }
             return 1;
         }
         GlobalVar* g = global_symtab_lookup(cg->global_symtab, obj->name);
@@ -6774,6 +6802,20 @@ static int can_place(Codegen* cg, AstNode* n, const char* dest) {
     return can_place_k(cg, n, dest, 1);
 }
 
+// `a[i].field` when the field is a scalar. The load leaves the value in rax
+// and does not call, so it can feed `sum = sum + a[i].field` in place.
+static int scalar_index_field(Codegen* cg, AstNode* n) {
+    StructField* f;
+    if (!n || n->type != AST_FIELD_ACCESS || !n->name || n->child_count != 1) return 0;
+    if (!n->children[0] || n->children[0]->type != AST_INDEX || node_has_call(n)) return 0;
+    f = access_field(cg, n);
+    if (!f || f->array_len > 0) return 0;
+    if (f->is_pointer) return 1;
+    if (!f->type_name) return 0;
+    if (cg->types && typetab_lookup(cg->types, f->type_name)) return 0;
+    return 1;
+}
+
 static void place_in(Codegen* cg, AstNode* n, const char* dest) {
     place_k(cg, n, dest, 1);
 }
@@ -6818,11 +6860,12 @@ static int can_place_k(Codegen* cg, AstNode* n, const char* dest, int allow) {
     if (ident_is_dest(cg, L, dest) && ident_is_dest(cg, R, dest)) return 1;
     if (can_ordered_k(cg, L, R, dest, allow)) return 1;
     if (is_comm_op(n->op) && can_ordered_k(cg, R, L, dest, allow)) return 1;
-    // `sum = sum + buf[i]` keeps sum in its register. The index load uses
-    // rax and does not call, so a callee-saved sum is still the old value.
+    // `sum = sum + buf[i]` and `sum = sum + rec[i].field` keep sum in its
+    // register. The load uses rax and does not call, so a callee-saved sum
+    // is still the old value.
     if ((n->op[0] == '+' || (n->op[0] == '-' && !n->op[1])) && !is_shift_op(n->op) &&
-        ident_is_dest(cg, L, dest) && R->type == AST_INDEX && !node_has_call(R) &&
-        callee_saved_reg(dest))
+        ident_is_dest(cg, L, dest) && !node_has_call(R) && callee_saved_reg(dest) &&
+        (R->type == AST_INDEX || scalar_index_field(cg, R)))
         return 1;
     return 0;
 }
@@ -6901,9 +6944,10 @@ static void place_k_raw(Codegen* cg, AstNode* n, const char* dest, int allow) {
     AstNode* R = n->children[1];
     const char* op = n->op;
     if ((op[0] == '+' || (op[0] == '-' && !op[1])) && !is_shift_op(op) &&
-        ident_is_dest(cg, L, dest) && R->type == AST_INDEX && !node_has_call(R) &&
-        callee_saved_reg(dest)) {
-        gen_array_index(cg, R);
+        ident_is_dest(cg, L, dest) && !node_has_call(R) && callee_saved_reg(dest) &&
+        (R->type == AST_INDEX || scalar_index_field(cg, R))) {
+        if (R->type == AST_INDEX) gen_array_index(cg, R);
+        else gen_expr(cg, R);
         if (op[0] == '+') emit(cg, "    add %s, rax\n", dest);
         else emit(cg, "    sub %s, rax\n", dest);
         return;
@@ -7362,6 +7406,60 @@ static int emit_imm_store(Codegen* cg, AstNode* value, const char* mem, int el) 
 static int try_emit_byte_add(Codegen* cg, AstNode* value, const char* dst_mem,
                              const char* dst_name, const char* idx_name, const char* ireg);
 
+// Hosted -O2: p->field when p is already in a register is one memory operand.
+// A constant store is an immediate. A volatile pointee or a volatile field
+// keeps the "; volatile" mark and is not an immediate (those stores must stay).
+static int o2_ptr_field(Codegen* cg, AstNode* obj, const char* field,
+                        const char** reg_out, const char** stype_out,
+                        int* off, int* sz, int* sg, int* vol) {
+    AstNode* id = NULL;
+    Symbol* s;
+    const char* r;
+    if (!o2_hosted() || !obj || !field) return 0;
+    if (obj->type == AST_DEREF && obj->child_count == 1) id = obj->children[0];
+    else if (obj->type == AST_IDENT) id = obj;
+    if (!id || id->type != AST_IDENT || !id->name) return 0;
+    s = symtab_lookup_symbol(cg->symtab, id->name);
+    r = local_reg(s);
+    if (!s || !r || !s->is_pointer || !s->type_name || s->type_name[0] != '*') return 0;
+    *off = 0;
+    *sz = 8;
+    *sg = 0;
+    *vol = 0;
+    if (!field_mem_info(cg, s->type_name + 1, field, off, sz, sg, vol)) return 0;
+    if (s->volatile_pointee) *vol = 1;
+    *reg_out = r;
+    *stype_out = s->type_name + 1;
+    return 1;
+}
+
+static int try_ptr_field_load(Codegen* cg, AstNode* obj, const char* field) {
+    const char* r;
+    const char* st;
+    int off, sz, sg, vol;
+    char mem[64];
+    if (!o2_ptr_field(cg, obj, field, &r, &st, &off, &sz, &sg, &vol)) return 0;
+    mem_base_disp(mem, 64, r, off);
+    emit_sized_load_mark(cg, mem, sz, sg, vol);
+    return 1;
+}
+
+static int try_ptr_field_store(Codegen* cg, AstNode* obj, const char* field, AstNode* value) {
+    const char* r;
+    const char* st;
+    int off, sz, sg, vol;
+    char mem[64];
+    AstNode* peeled;
+    if (!o2_ptr_field(cg, obj, field, &r, &st, &off, &sz, &sg, &vol)) return 0;
+    mem_base_disp(mem, 64, r, off);
+    peeled = peel_store_cast(value, sz >= 8 ? 64 : sz * 8);
+    if (!vol && emit_imm_store(cg, peeled, mem, sz)) return 1;
+    gen_expr(cg, peeled);
+    trunc_rax_field(cg, st, field);
+    emit_sized_store_mark(cg, mem, sz, 0, vol);
+    return 1;
+}
+
 void gen_expr(Codegen* cg, AstNode* n) {
     if (!n) return;  // Null safety guard
     if (n->line) { g_use_line = n->line; g_use_col = n->col; }
@@ -7751,6 +7849,8 @@ void gen_expr(Codegen* cg, AstNode* n) {
             }
         }
 
+        if (try_ptr_field_load(cg, obj, field_name)) return;
+
         // Check if object is a dereference (pointer access)
         if (obj->type == AST_DEREF) {
             // ptr->field case (already desugared)
@@ -7792,7 +7892,7 @@ void gen_expr(Codegen* cg, AstNode* n) {
                     int packed = field_mem_info(cg, struct_type, field_name, &poff, &psz, &psg, &pvol);
                     if (is_pointer) {
                         // For pointers: load pointer, then load field
-                        emit(cg, "    mov rax, [rbp%d]\n", sym->offset);  // Load pointer
+                        emit_mov_ptr(cg, sym, "rax");  // Load pointer
                         if (packed) {
                             char mem[64];
                             mem_base_disp(mem, 64, "rax", poff);
@@ -8175,7 +8275,7 @@ void gen_expr(Codegen* cg, AstNode* n) {
                 }
 
                 // Load pointer and add offset
-                emit(cg, "    mov rbx, [rbp%d]\n", sym->offset);  // Load pointer
+                emit_mov_ptr(cg, sym, "rbx");  // Load pointer
                 emit(cg, "    add rbx, rax\n");  // Add scaled index
                 emit(cg, "    pop rax\n");  // Restore value
 
@@ -8319,6 +8419,8 @@ void gen_expr(Codegen* cg, AstNode* n) {
                 return;
             }
         }
+
+        if (try_ptr_field_store(cg, obj, field_name, value_expr)) return;
 
         // Evaluate value expression. The field store writes `ft`'s width.
         {
@@ -8484,7 +8586,7 @@ void gen_expr(Codegen* cg, AstNode* n) {
 
                     if (is_pointer) {
                         // For pointers: load pointer, add offset, store
-                        emit(cg, "    mov rbx, [rbp%d]\n", sym->offset);  // Load pointer
+                        emit_mov_ptr(cg, sym, "rbx");  // Load pointer
                         if (packed) {
                             char mem[64];
                             mem_base_disp(mem, 64, "rbx", poff);
@@ -8595,7 +8697,7 @@ static void reg_walk(Codegen* cg, AstNode* n) {
     if (n->type == AST_CALL && n->name && !strcmp(n->name, "asm")) g_reg_asm = 1;
     if (n->type == AST_LET && n->name) {
         for (int i = 0; i < n->child_count; i++) reg_walk(cg, n->children[i]);
-        int bad = (n->flags & AF_VOLATILE) || n->is_pointer;
+        int bad = (n->flags & AF_VOLATILE) != 0;
         if (n->struct_type && !strcmp(n->struct_type, "__array__")) bad = 1;
         else if (n->struct_type && typetab_lookup(cg->types, n->struct_type)) bad = 1;
         if (n->child_count > 0 && n->children[0] &&
@@ -8610,9 +8712,24 @@ static void reg_walk(Codegen* cg, AstNode* n) {
         n->children[0]->type == AST_IDENT)
         reg_note_decl(n->children[0]->name, 1);
     if ((n->type == AST_ASSIGN || n->type == AST_ARRAY_ASSIGN) && n->name) {
-        for (int i = 0; i < n->child_count; i++) reg_walk(cg, n->children[i]);
+        // The store evaluates the value, then the index, then the base.
+        if (n->type == AST_ARRAY_ASSIGN && n->child_count >= 3) {
+            reg_walk(cg, n->children[2]);
+            reg_walk(cg, n->children[1]);
+            reg_walk(cg, n->children[0]);
+        } else {
+            for (int i = 0; i < n->child_count; i++) reg_walk(cg, n->children[i]);
+        }
         reg_note_use(n->name);
         reg_touch(n->name);
+        return;
+    }
+    if (n->type == AST_FIELD_ASSIGN) {
+        // Codegen evaluates the value before the object. A call in the value
+        // has to sit inside the pointer's live range, or the pointer lands
+        // in r10 and the call clobbers it.
+        if (n->child_count > 1) reg_walk(cg, n->children[1]);
+        if (n->child_count > 0) reg_walk(cg, n->children[0]);
         return;
     }
     if (n->type == AST_IDENT && n->name) {
@@ -8655,10 +8772,14 @@ static int reg_pick(int* taken, int cross_mode) {
     return best;
 }
 
-// Callee-saved r12-r15 first, preferring names that cross a call. r10 and r11
-// only for names that do not. A fifth crosser stays on the stack: there is
-// no spill around the call. asm() disables the whole plan. Too many calls
-// to remember is treated as every name crossing.
+// Callee-saved r12-r15 first, preferring names that cross a call, then any
+// other name. r10 and r11 only for names that still do not cross a call.
+// A fifth crosser stays on the stack: there is no spill around the call.
+// asm() disables the whole plan. Too many calls to remember is treated as
+// every name crossing. Sharing one register across non-overlapping ranges
+// was tried and miscompiled the order book: a name used in a loop condition
+// stays live through the body, and a straight walk records that use before
+// the body.
 static void plan_reg_locals(Codegen* cg, AstNode* fn) {
     g_reg_local_n = 0;
     g_reg_callee_n = 0;
@@ -8673,8 +8794,8 @@ static void plan_reg_locals(Codegen* cg, AstNode* fn) {
     for (int i = 0; i < pc; i++) {
         AstNode* par = fn->children[i];
         if (!par || !par->name) continue;
-        int bad = par->is_pointer != 0;
-        if (par->value && typetab_lookup(cg->types, par->value)) bad = 1;
+        int bad = (par->flags & AF_VOLATILE) != 0;
+        if (!(par->is_pointer & 1) && par->value && typetab_lookup(cg->types, par->value)) bad = 1;
         reg_note_decl(par->name, bad);
         reg_touch(par->name);
     }
@@ -9011,7 +9132,7 @@ static int slim_stmt_ok(Codegen* cg, AstNode* n) {
         return !expr_pushes(cg, n->children[0]);
     }
     if (n->type == AST_LET) {
-        if ((n->flags & AF_VOLATILE) || n->is_pointer || n->struct_type) return 0;
+        if ((n->flags & AF_VOLATILE) || n->struct_type) return 0;
         if (!regplan_has(n->name)) return 0;
         if (n->child_count > 0 && expr_pushes(cg, n->children[0])) return 0;
         return 1;
@@ -9054,8 +9175,8 @@ static void prepare_frame(Codegen* cg, AstNode* fn) {
     if (pc > 6) return;
     for (int i = 0; i < pc; i++) {
         AstNode* p = fn->children[i];
-        if (!p || !p->name || p->is_pointer) return;
-        if (p->value && typetab_lookup(cg->types, p->value)) return;
+        if (!p || !p->name) return;
+        if (!(p->is_pointer & 1) && p->value && typetab_lookup(cg->types, p->value)) return;
         if (!regplan_has(p->name)) return;
     }
     if (depth > 1 || (depth >= 1 && !g_expr_tmp)) return;
@@ -10990,11 +11111,14 @@ void gen_stmt(Codegen* cg, AstNode* n) {
                 VTy dst_ty = ty_decl(cg, 0, n->is_pointer, n->value);
                 check_types(n->children[0], "", dst_ty, expr_ty(cg, n->children[0]));
                 gen_expr(cg, n->children[0]);
-                if (cg->symtab->symbols[cg->symtab->count - 1].mem && legacy_bits())
-                    emit(cg, "    mov [%s], eax\n", cg->symtab->symbols[cg->symtab->count - 1].mem);
-                else if (cg->symtab->symbols[cg->symtab->count - 1].mem)
-                    emit(cg, "    mov [%s], rax\n", cg->symtab->symbols[cg->symtab->count - 1].mem);
-                else emit(cg, "    mov [rbp%d], rax\n", off);
+                {
+                    Symbol* ps = &cg->symtab->symbols[cg->symtab->count - 1];
+                    const char* rr = local_reg(ps);
+                    if (rr) emit(cg, "    mov %s, rax\n", rr);
+                    else if (ps->mem && legacy_bits()) emit(cg, "    mov [%s], eax\n", ps->mem);
+                    else if (ps->mem) emit(cg, "    mov [%s], rax\n", ps->mem);
+                    else emit(cg, "    mov [rbp%d], rax\n", off);
+                }
             }
             return;
         }
@@ -11981,6 +12105,11 @@ static void emit_bound_ends(Codegen* cg) {
         s->ended = 1;
     }
 }
+
+// A hosted -O2 leaf inliner was measured against this register plan and not
+// kept: the order book got slower and the pointer pool did not beat the
+// alloc/release calls. A call in a while condition and the right-hand side
+// of && / || are not hoisted.
 
 void codegen(AstNode* ast, const char* file, StringTable* strtab, TypeTable* types) {
     Codegen cg;
