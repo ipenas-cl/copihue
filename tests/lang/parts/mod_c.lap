@@ -1,0 +1,9 @@
+module c;
+
+pub struct Cell { n: i64 }
+pub let extra: i64 = 5;
+
+pub fn part() -> i64 {
+    let cell: Cell = Cell { n: 7 };
+    return cell.n + extra;
+}

@@ -1,0 +1,7 @@
+module b;
+
+import "mod_c.lap";
+
+pub fn part() -> i64 {
+    return c::part() + 20;
+}

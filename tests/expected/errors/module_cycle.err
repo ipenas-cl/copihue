@@ -1,0 +1,4 @@
+b:tests/errors/parts/mcycle_b.lap:2:8: error: import of 'tests/errors/parts/mcycle_a.lap' (module a) is a cycle
+      2 | import "mcycle_a.lap";
+        |        ^
+1 error, compilation failed

@@ -2,6 +2,17 @@
 
 Todos los cambios importantes del proyecto.
 
+## [0.33.0] - 2026-10-26
+
+### Added
+- `module name;`, `pub`, and `name::item` for several `.lap` files. A file with no `module` stays in the flat namespace, so existing `import`, duplicate, and `-c`/`extern` programs keep their names and their diagnostics. The design is `docs/DESIGN_MODULES.md`.
+- Inside a module, an item is private unless `pub`. An unqualified name sees that module and the builtins. `mem::alloc` names a public item of a module loaded in the same compilation. The link symbol is `mem__alloc`. A flat name stays as written. `fn main` and `fn _start` are entries only in the flat namespace. One `copihue` invocation is still one ELF, or one `-c` object. `pub` does not change the NASM `global` or `extern`. Inside `module mem`, `extern fn alloc` is `extern mem__alloc`. The caller object declares the same module and the same `extern`, and `ld` links the objects. `--freestanding`, `--flat`, and `--boot` use the same rules.
+- A file that declared `module` reports `module:file:line:col: error: message`. A cycle in that file is `import of 'path' (module a) is a cycle`. A cycle in a file with no module stays `import of 'path' is a cycle`.
+- `tests/lang/modules.lap` imports `a`, `b`, and `c` and prints 42, 32, and 12 at `-O0` and `-O2`. `tests/errors/module_cycle.lap` is the cycle. `tests/errors/module_private.lap` is `item 'hidden' of module 'secret' is private`. `tests/freestanding/module.lap` assembles `mfs__answer` and is not booted. `tests/link` links `module mem` across two `-c` objects (`T mem__add`, `D mem__bias`, `U mem__add`, `U mem__bias`, `T mem__use_it`, `T main`, `T _start`) and the program prints 42 at `-O0` and `-O2`.
+
+### Changed
+- Language version is 0.33.0, on top of 0.32.2.
+
 ## [0.32.2] - 2026-10-26
 
 ### Added
