@@ -8,6 +8,8 @@ Todos los cambios importantes del proyecto.
 - Hosted `-O2` emits a discarded `fetch_add` or `atomic_add` as `lock add`. An addend that fits in a signed 32-bit immediate is immediate (`lock add qword [cell], 1`). When the caller uses the old value or the new value, the instruction stays `lock xadd`. `-O0`, `--freestanding`, `--flat`, and `--boot` keep `lock xadd`.
 - The same mode addresses `&name` and `&name.field` as one memory operand when `name` is a global or a stack slot and not a pointer or an array. A field of a field adds the offsets. A pointer variable and an indexed element still compute the address.
 - `tests/lang/o2_atomic.lap` prints 0, 6, 10, 2, 9 at `-O0` and `-O2`. The `-O2` assembly contains `lock add qword [cell], 1`, `lock add qword [pair], 1`, `lock add qword [pair+8], 2`, and `lock xadd`.
+- `examples/lowlat/vec.lap` pushes `0..99` into an empty `vec i64` and sums the walk. It prints `100 4950 128` (length, sum, capacity). The first growth allocates 4 and later growth doubles.
+- `examples/lowlat/bench/vec.lap`, `vec.cpp`, and `vec.rs` push `0..999999` with no reserve and sum the elements. The line is `499999 500000 1000000`: the sum 499999500000 split into two fields under 9 digits, then the length. C++ is `std::vector`. Rust is `Vec`.
 
 ### Changed
 - Language version is 0.36.1, on top of 0.36.0. The 0.36.0 parameter and return inference, `vec`, and `own` are unchanged.
@@ -21,7 +23,8 @@ Todos los cambios importantes del proyecto.
 - `pin` 35.0 (34.7–45.9) to 20.6 (20.3–27.6). The ranges do not overlap. C++ 21.5 (21.4–21.6) and Rust 21.1 (20.7–21.4) overlap the new range.
 - `share` 160.0 (149.8–184.5) to 147.0 (121.9–155.3). The ranges overlap, and the new range overlaps C++ 137.4 (131.2–151.6) and Rust 154.3 (137.5–159.5). The shared line still dominates. The same `lock add` stays, because `split`, `free`, `same`, and `pin` got faster.
 - `examples/lowlat/bench/pool`, `book`, and `match`, and `bench/lowlat` `spsc`, `pool`, `spmc`, `mpmc`, and `tpool`, are the same bytes as 0.36.0, and 0.36.0 is the same bytes as 0.35.2. `watch` is the same bytes too. They were not retimed. The five atomic benches compiled by 0.36.0 are also the same bytes as 0.35.2, and this tree's binaries match the after side of the paired window.
-- `examples/lowlat/RESULTS.md` is the 2026-10-26T04:51:05Z — 2026-10-26T04:51:17Z window. The header prints Copihue 0.36.1. It is not the paired window above. Pool, book, match, and watch are unchanged bytes, so those rows are a new window of the same code. In this window `split` is below C++ and overlaps Rust, `free` is below both, `same` overlaps both because one sample is 40.3 ms, and `share`, `pin`, and `watch` overlap both.
+- `examples/lowlat/RESULTS.md` is the 2026-10-26T04:56:51Z — 2026-10-26T04:57:04Z window. The header prints Copihue 0.36.1. It is not the paired window above. Pool, book, match, and watch are unchanged bytes, so those rows are a new window of the same code. In this window `split`, `same`, and `free` are below both C++ and Rust. `share`, `pin`, and `watch` overlap both.
+- `vec` in that window is 8.1 (7.7–8.4). C++ `std::vector` is 7.7 (7.5–8.3) and the ranges overlap. Rust `Vec` is 5.1 (4.7–5.4). Copihue's minimum is above Rust's maximum. The line is `499999 500000 1000000`. `taskset -c 0`. No reserve on any of the three.
 
 ## [0.36.0] - 2026-10-26
 

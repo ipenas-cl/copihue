@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Mide pool, libro y motor con taskset -c 0, contra C y Rust.
+# Mide vec (acumular y recorrer) con taskset -c 0, contra C++ y Rust.
 # Mide false sharing, afinidad y watchdog sin taskset, contra C++ y Rust.
 # Una calentamiento y siete corridas. La mediana es la 4.ª.
 # Escribe examples/lowlat/RESULTS.md.
@@ -106,6 +107,12 @@ for name in pool book match; do
     measure "$WORK/$name.c" "$WORK/$name.c.ns" 0
     measure "$WORK/$name.rs" "$WORK/$name.rs.ns" 0
 done
+for name in vec; do
+    compile_cpp "$name"
+    measure "$WORK/$name.lap" "$WORK/$name.lap.ns" 0
+    measure "$WORK/$name.cpp" "$WORK/$name.cpp.ns" 0
+    measure "$WORK/$name.rs" "$WORK/$name.rs.ns" 0
+done
 for name in share split pin same free watch; do
     compile_cpp "$name"
     measure "$WORK/$name.lap" "$WORK/$name.lap.ns" ""
@@ -116,11 +123,12 @@ END=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
 OUT=$ROOT/examples/lowlat/RESULTS.md
 {
-    echo "# Baja latencia: pool, libro, motor, false sharing, afinidad y watchdog"
+    echo "# Baja latencia: pool, libro, motor, vec, false sharing, afinidad y watchdog"
     echo
     echo "Generado por \`examples/lowlat/bench/run.sh\`. Muestras $START — $END."
     echo "Una pasada de calentamiento y siete corridas. La mediana es la 4.ª. stdout se descarta al medir, después de comparar las tres salidas."
     echo "Copihue \`$($CC --version)\` \`-O2\`. Pool, libro y motor: gcc \`-O2 -Wall -Werror\`, rustc \`-O\`, \`taskset -c 0\`."
+    echo "\`vec\`: g++ \`-O2 -std=c++17 -Wall -Werror\`, rustc \`-O\`, \`taskset -c 0\`. Empuja \`0..999999\` sin reservar y suma el recorrido."
     echo "False sharing, afinidad y watchdog: g++ \`-O2 -std=c++17 -Wall -Werror -pthread\`, rustc \`-O\`, sin \`taskset\`. Esta máquina reporta $NCPU CPU."
     echo "El anillo no se mide aquí. La cola SPSC de un millón de mensajes está en \`bench/lowlat\` (0.32.0)."
     echo
@@ -135,6 +143,19 @@ OUT=$ROOT/examples/lowlat/RESULTS.md
     echo
     echo "\`por debajo\` quiere decir que el máximo de Copihue es menor que el mínimo del otro. \`se solapan\` quiere decir que no se puede afirmar un orden. Un empate de un extremo cuenta como solape."
     echo "Rust del pool usa \`unsafe\` porque la lista libre es de punteros. El libro y el motor son índices, sin \`unsafe\`."
+    echo
+    echo "## vec"
+    echo
+    echo "Un \`vec i64\` vacío recibe \`vec_push\` de \`0..999999\`. El primero reserva 4 y después la capacidad dobla. Luego \`for x in\` suma los elementos. C++ es \`std::vector\` sin \`reserve\`. Rust es \`Vec\` sin \`with_capacity\`. La suma 499999500000 se imprime en dos campos y después va la longitud."
+    echo
+    echo "| Programa | Salida | Copihue | C++ | Rust | frente a C++ | frente a Rust |"
+    echo "|---|---:|---:|---:|---:|---|---|"
+    for name in vec; do
+        out=$(cat "$WORK/$name.lap.out")
+        echo "| \`$name\` | $out | $(cell "$WORK/$name.lap.ns") | $(cell "$WORK/$name.cpp.ns") | $(cell "$WORK/$name.rs.ns") | pendiente | pendiente |"
+    done
+    echo
+    echo "Esta fila va bajo \`taskset -c 0\`. El índice de Copihue en \`v[i]\` comprueba la longitud; este banco recorre con \`for x in\`, que copia puntero y longitud al entrar."
     echo
     echo "## False sharing, afinidad y watchdog"
     echo
