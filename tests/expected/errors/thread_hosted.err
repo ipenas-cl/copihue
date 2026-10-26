@@ -1,0 +1,4 @@
+tests/errors/thread_hosted.lap:7:5: error: 'thread_spawn' needs the hosted runtime (Linux syscalls) and is not available with --freestanding
+      7 |     thread_spawn(&worker, 0, 0);
+        |     ^
+1 error, compilation failed

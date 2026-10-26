@@ -1,0 +1,10 @@
+tests/errors/align_pow2.lap:1:7: error: align() takes a power of two from 1 to 4096
+      1 | align(3) let bad: u64;
+        |       ^
+tests/errors/align_pow2.lap:2:7: error: align() takes a power of two from 1 to 4096
+      2 | align(8192) let worse: u64;
+        |       ^
+tests/errors/align_pow2.lap:5:5: error: align() applies to a struct, a field, or a global
+      5 |     align(64) let local: u64;
+        |     ^
+3 errors, compilation failed

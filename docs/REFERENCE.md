@@ -1,4 +1,4 @@
-# Copihue Language Reference (v0.31.0)
+# Copihue Language Reference (v0.32.0)
 
 This document describes the language that `copihue` accepts today. Anything not listed here is not supported.
 Planned features are in the README roadmap.
@@ -19,7 +19,7 @@ Planned features are in the README roadmap.
 - Comments: `// to end of line`.
 - Identifiers: `[A-Za-z_][A-Za-z0-9_]*`.
 - Keywords: `fn let mut if else while for return struct`. `break` and `continue` are statements.
-- `packed`, `interrupt`, `syscall`, `volatile`, `bits`, `naked`, `data`, `import`, `section`, and `extern` are contextual words, not keywords. `packed struct`, `interrupt fn`, `syscall fn`, `let volatile`, `*volatile`, `bits 16 naked fn`, `data name { ... }`, `import "path.lap";`, `section "name" { ... }`, `extern name;`, and `extern fn` use them. A function or variable may still be named `syscall`, `volatile`, `data`, `import`, `section`, or `extern`.
+- `packed`, `interrupt`, `syscall`, `volatile`, `align`, `bits`, `naked`, `data`, `import`, `section`, and `extern` are contextual words, not keywords. `packed struct`, `interrupt fn`, `syscall fn`, `let volatile`, `*volatile`, `align(64) struct`, `align(64) field: T`, `align(64) let`, `bits 16 naked fn`, `data name { ... }`, `import "path.lap";`, `section "name" { ... }`, `extern name;`, and `extern fn` use them. A function or variable may still be named `syscall`, `volatile`, `align`, `data`, `import`, `section`, or `extern`. `align(N)` as a statement is an error.
 - Integer literals: decimal `42`, hex `0xFF`, binary `0b1010`, with optional `_` separators (`1_000_000`).
 - Character literals: `'A'`, and escapes `'\n' '\t' '\r' '\0' '\\' '\''`. Their value is an integer.
 - String literals: `"..."` with the escapes `\n \t \r \0 \\ \" \'`. A string literal's value is a pointer to NUL-terminated bytes in the data section.
@@ -96,6 +96,14 @@ is 56 bytes: `name` at 0, `size` at 16, `nblocks` at 20, `blocks` at 24. The sam
 
 `sizeof(FsEnt)` and `sizeof(e)` are that size. `sizeof(u32)` is 4. `offsetof(FsEnt, size)` is 16. Both are integers known at compile time. `sizeof()` takes one argument; anything it cannot size is `sizeof() has no size for this type`. `offsetof(Struct, field)` takes a struct name and a field name. `offsetof() unknown struct 'Nope'` and `struct 'FsEnt' has no field 'nope'` are the errors. A scalar local is still an 8-byte slot; `sizeof` of its type is the type width.
 
+### Alignment
+
+`align(N)` before `struct`, `packed struct`, a field, or a global `let` sets that alignment. `N` is a power of two from 1 to 4096. Anything else is `align() takes a power of two from 1 to 4096`. `align(64) let` inside a function is `align() applies to a struct, a field, or a global`.
+
+A field's `align(N)` replaces its natural alignment, including inside `packed struct`. The struct's alignment becomes the strictest of its fields and of `align(N)` on the struct itself. The size is rounded up to that alignment, so `sizeof` and `offsetof` count the padding. `struct Lines { align(64) a: u64, align(64) b: u64 }` is 128 bytes, with `b` at 64. `align(64) struct One { x: u64 }` is 64 bytes. A packed struct with no `align` stays contiguous.
+
+A global is placed with NASM `align` when it says `align(N)` or when its type's alignment is stricter than 8. In `.bss` the pad is `resb`. Two `align(64)` globals do not share a 64-byte line: their addresses differ by at least 64 and each is 0 mod 64. A local stays an 8-byte slot. `tests/lang/align64.lap` prints the offsets, the sizes, the gap, and the low 6 bits of the addresses.
+
 `a = b` copies one struct value onto another of the same type. The copy is exactly the struct's size: whole qwords, then a byte tail, so a packed record does not spill into the next field or array element. It works for locals, globals, array elements (`table[i] = other`), and nested fields (`box.point = p`). A different struct type is a compile error. Nested scalar access (`box.point.x`) addresses that field, not the first eight bytes of the parent.
 
 Passing a struct to a function is still a copy into the callee's frame. There is no move, and the two objects are independent after the assignment.
@@ -112,7 +120,26 @@ Every read and every write of a volatile global is a memory operand. The compile
 
 `volatile` is part of the pointer type. `*volatile mut T` and `*mut volatile T` are both `*volatile T`. `mut` is not part of the type, so `*mut u8` and `*u8` still match. Assigning `*volatile T` to a non-volatile pointer is `expected *u8, found *volatile u8`. The other direction is allowed: `*u8` may initialize `*volatile u8`, and so may an array of `u8`. `*volatile i8` and `*volatile u8` are the same byte pointer. An integer literal still converts to any pointer, including `*volatile u32`. `as` is the explicit drop (`p as *u8`) and emits no instruction.
 
-What is guaranteed: each source-level read or write of a volatile global, a `*volatile` pointee, or a volatile field emits a memory instruction of that width, and the compiler does not reorder those accesses with each other. `-O2` does not delete one, fold one, or lift one out of a loop. What is not guaranteed: this is not a C memory model. There are no atomics and no fence stronger than the instruction itself. A non-volatile access next to a volatile one can still be simplified. `let volatile` on a local scalar keeps that local in its stack slot when hosted `-O2` puts other scalars in registers. At `-O0`, and with `--freestanding`, `--flat`, or `--boot`, every local is already on the stack.
+What is guaranteed: each source-level read or write of a volatile global, a `*volatile` pointee, or a volatile field emits a memory instruction of that width, and the compiler does not reorder those accesses with each other. `-O2` does not delete one, fold one, or lift one out of a loop. What is not guaranteed: `volatile` alone is not a C memory model. Use the atomic builtins below for a protocol. A non-volatile access next to a volatile one can still be simplified. `let volatile` on a local scalar keeps that local in its stack slot when hosted `-O2` puts other scalars in registers. At `-O0`, and with `--freestanding`, `--flat`, or `--boot`, every local is already on the stack. The address of a volatile scalar or a volatile field is `*volatile T`, so `fetch_add(&cell, 1)` type-checks when `cell` is `let volatile cell: u64`.
+
+### Atomics
+
+These builtins work in hosted code and in `--freestanding`, `--flat`, and 64-bit `--boot` code. They are rejected in `bits 16` and `bits 32` (`is a 64-bit operation`). The pointer must be `*volatile u32`, `*volatile i32`, `*volatile u64`, or `*volatile i64`. A non-volatile pointer is `fetch_add() takes a *volatile u32 or *volatile u64, found *u64`. A `*volatile u8` is the same error with `found *volatile u8`. The width is the pointee. A 32-bit operation zero-extends into `rax` (`mov eax`). The returned type is that pointee (`u32`, `i32`, or `i64` for a 64-bit pointee).
+
+| Built-in | x86-64 | Returns |
+|---|---|---|
+| `atomic_load_acquire(p)` | `mov` | the value |
+| `atomic_load_seq_cst(p)` | `mov` then `mfence` | the value |
+| `atomic_store_release(p, v)` | `mov` | 0 |
+| `atomic_store_seq_cst(p, v)` | `xchg` (locked by itself) | 0 |
+| `fetch_add(p, v)` | `lock xadd` | the old value |
+| `atomic_add(p, v)` | `lock xadd`, then add the addend | the new value |
+| `swap(p, v)` | `xchg` | the old value |
+| `compare_exchange(p, expected, desired)` | `lock cmpxchg` | the old value, whether or not it matched |
+| `fence()` | `mfence` | 0 |
+| `cpu_pause()` | `pause` | 0 |
+
+On x86 a plain load already has acquire semantics and a plain store already has release semantics. `seq_cst` is the stronger one: the load is followed by `mfence`, and the store is `xchg`. `compare_exchange` does not return a boolean. The caller compares the old value with `expected`. `r10` and `r11` hold the pointer and the addend; they are caller-saved. `tests/lang/atomics.lap` runs the sequence on one thread at `-O0` and `-O2`. `tests/freestanding/atomics.lap` is the instruction stream, assembled and not booted.
 
 ### Function pointers
 
@@ -334,6 +361,10 @@ Not checked: indirect calls, comparisons as a type error, bitwise mixes of point
 | `open(path, flags[, mode])`, `read(fd, buf, n)`, `write(fd, buf, n)`, `close(fd)` | Linux syscalls; default mode is `0644` |
 | `syscall6(nr, a1, ..., a6)` | any Linux syscall |
 | `exit(code)` | terminate the process |
+| `thread_spawn(fn, stack_top, tid)` | Linux `clone` (syscall 56). See Hosted threads |
+| `thread_join(tid)` | wait until the kernel stores 0 in that word |
+| `sched_setaffinity(cpu)` | syscall 203 for the current thread. `cpu >= 1024` returns -1 |
+| `cpu_pause()` | `pause`, returns 0. Also available in freestanding code |
 
 ## Freestanding mode
 
@@ -364,6 +395,20 @@ Hosted built-ins are a compile error. These built-ins are available:
 | `int(n)` | `int N`, one integer literal. `int(0x10)` emits `int 16`, which encodes `CD 10` |
 | `bss_start()`, `bss_end()` | address of the first / one past the last zero-initialized global (`--flat` only). `*u8`. The symbols are `__bss_start` and `__bss_end` |
 | `section_start("name")`, `section_end("name")` | `i64` load address of the first byte, and one past the last byte. See Named sections |
+
+### Hosted threads
+
+`thread_spawn`, `thread_join`, and `sched_setaffinity` need the hosted runtime. In `--freestanding` they are `'thread_spawn' needs the hosted runtime (Linux syscalls) and is not available with --freestanding`.
+
+`thread_spawn(fn, stack_top, tid)` is `clone` with flags `CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD | CLONE_SYSVSEM | CLONE_PARENT_SETTID | CLONE_CHILD_CLEARTID` (`0x350F00`). `fn` is a function address (`&worker`). The child calls it with no arguments and then `exit` (syscall 60), which ends that thread. `stack_top` is the high end of a stack the caller owns; the builtin aligns it down to 16 bytes so the `call` enters `fn` with `rsp ≡ 8 (mod 16)`. `tid` is the address of a 32-bit word. The kernel writes the thread id there and, when the child exits, stores 0 and wakes a futex. The parent return value is that id, or a negative errno.
+
+`thread_join(tid)` loads that word. While it is not 0 it calls `futex` (syscall 202, `FUTEX_WAIT`) with the value just read, then loads again. The pointer is kept in `rbx` because `syscall` overwrites `r11`. It returns 0.
+
+`sched_setaffinity(cpu)` builds a 128-byte mask on the stack (1024 bits), sets bit `cpu`, and calls syscall 203 with pid 0. `cpu >= 1024` returns -1 and does not call the kernel. A successful call returns 0.
+
+`cpu_pause()` is `pause`. It is the spin hint and does not require the hosted runtime. The older `pause()` builtin is the same instruction and does not define `rax`.
+
+`tests/lang/threads.lap` starts two threads. Each calls `sched_setaffinity(0)` and `cpu_pause`, then `fetch_add`s a shared `u64` 1000000 times. The sum is 2000000. The stacks are two global `[u8; 65536]` arrays. There is no libc.
 
 `read_cr*` and `write_cr*` are a compile error without `--freestanding` or `--flat`. `ljmp`, `int`, `ltr`, `iretq`, and `sysretq` are a compile error without `--freestanding`, `--flat`, or `--boot`. A non-literal `int(n)` is `int(n) takes one integer literal`. `ltr()` with no argument is `ltr(selector) takes 1 argument`. The hosted regression suite assembles the privileged instructions with `nasm` and does not execute them.
 
@@ -490,7 +535,7 @@ The regression suite compares the hexdump at `-O0` and `-O2`. When `qemu-system-
 
 - `i64` and `u64` arithmetic is 64-bit two's complement and wraps. `u8`, `u16`, `u32`, `i8`, `i16`, and `i32` truncate after the operator, as described under Type checking. There is no bounds checking on pointer indexing.
 - Direct calls check the function name, the argument count, and argument types. Assignments and integer or pointer returns are checked. Indirect calls are not. `*i8` and `*u8` match. An integer literal converts to any pointer; a variable does not, without `as`.
-- Struct fields use their real width. Ordinary structs add natural alignment; `packed struct` does not. An array field is `N * sizeof(T)` or a compile error. `sizeof` and `offsetof` are compile-time integers. A narrow integer operator truncates to that type; `i64` and `u64` stay 64-bit. Scalar locals and globals still occupy 8-byte slots. Struct assignment copies the whole value; it does not assign field by field in the source. Nested fields (`r.b.x`) use the real offset.
+- Struct fields use their real width. Ordinary structs add natural alignment; `packed struct` does not, unless `align(N)` says so. `align(N)` is a power of two from 1 to 4096 on a struct, a field, or a global. Locals are not aligned that way. An array field is `N * sizeof(T)` or a compile error. `sizeof` and `offsetof` are compile-time integers. A narrow integer operator truncates to that type; `i64` and `u64` stay 64-bit. Scalar locals and globals still occupy 8-byte slots. Struct assignment copies the whole value; it does not assign field by field in the source. Nested fields (`r.b.x`) use the real offset.
 - Indexing a local array in hosted mode inserts a bounds check that exits the process. `--freestanding` and `--flat` omit that check. Pointer indexing is never checked.
 - Several files on one command, and `import`, are one assembly unit and one namespace. `-c` writes one relocatable object for that unit; `ld` links objects and there is no libc. There is no module namespace and no visibility. `bits 16` and `bits 32` exist only as naked functions. A scalar or pointer `let` there is a slot in the image; an array or a struct local is rejected. Named registers are readable and writable only inside `naked`. `bx`, `bp`, `ebx`, `ebp`, `esi`, and `edi` are naked lvalues in `bits 16` and `bits 32`, and rejected in 64-bit code. An `interrupt fn` cannot name `rbp`; it receives a pointer to the CPU frame instead. `save_context` / `restore_context` capture `rsp`, `rbp`, the callee-saved registers, and a resume address without naming those registers. Integer expressions in `bits 16` and `bits 32` use `eax`. A call in those modes uses the naked parameter registers (`ax`/`cx`/`dx`/`si` or `eax`/`ecx`/`edx`/`esi`), at most four, and only a callee of the same bits mode. `jmp reg` and `jmp [name]` are naked-only. The hosted suite assembles `iretq`, `sysret`, `ltr`, and the 64-bit control-register moves and does not execute them; it does execute `cpuid` and `int_carry`. The multi-file tests run as a Linux process. `tests/lang/context.lap` runs the framed switch as a Linux process. `tests/ctx` runs a `#PF` handler and an IRQ handler that rewrite the frame, under QEMU. The boot-sector tests execute real mode and protected mode under QEMU, including `lgdt(&gdtr)`, `write_cr0`, `if carry`, and `outb` on `tests/boot/realmode_builtins.lap`, `ds = 0` plus a local on `tests/boot/seg_local.lap`, and `sp` plus `jmp` on `tests/boot/jmp_sp.lap`. `tests/boot/call16.lap` and `tests/boot/call32.lap` call another function and jump through memory. `tests/boot/rax_keep.lap` executes the `ax` compare and the immediate store under QEMU. `tests/freestanding/rax_branch.lap` assembles `syscall`, `while (rax == 0)`, and `let r = syscall(8)`, and is not booted. `tests/freestanding/bits32_regs.lap` assembles `write_cr4`, `rdmsr` / `wrmsr`, and `cpuid` in `bits 32` and is not booted. `tests/freestanding/naked_local.lap` assembles the slot and the segment write and is not booted. `tests/freestanding/naked_regs.lap` assembles the named registers, the sized store, `jmp 0x8200`, and `far_jump` / `retfq`, and is not booted. `tests/freestanding/insns.lap` assembles `lodsb`, `rep stos`, `push`/`pop`, `syscall`, and a load of `__syscall_rsp`, and is not booted. `tests/freestanding/jmp_call.lap` assembles the indirect jump, the bits 16/32 call, and `syscall` with arguments, and is not booted. `tests/freestanding/sections.lap` assembles a named section, `vstart`, and `section_start` / `section_end`, and is not booted. `tests/boot/stc_carry.lap` executes `stc` and `if carry` under QEMU. `tests/boot/section.lap` executes one named section at `0x7C00` under QEMU. `tests/lang/naked_param.lap` runs the 64-bit register parameters. `tests/lang/extern_data.lap` runs a load of an `extern` qword. `tests/link` links two hosted `-c` objects and runs them, and links two freestanding `bits 32` objects that QEMU boots. `tests/usermode` executes long mode, `ltr`, the syscall MSRs, `iretq` to ring 3, `syscall`/`sysret`, and `iretq` from an interrupt, also under QEMU.
-- `syscall fn` does not program `STAR`, `LSTAR`, `SFMASK`, or `EFER`, and it does not emit `swapgs`. The kernel does that with `wrmsr` and `asm`. The `syscall` stack is `set_syscall_stack`, not `TSS.rsp0`. `volatile` is per access, as described above. It is not a memory model. `let volatile` on a local scalar keeps the stack slot at hosted `-O2`.
+- `syscall fn` does not program `STAR`, `LSTAR`, `SFMASK`, or `EFER`, and it does not emit `swapgs`. The kernel does that with `wrmsr` and `asm`. The `syscall` stack is `set_syscall_stack`, not `TSS.rsp0`. `volatile` is per access, as described above. It is not a memory model by itself; the atomic builtins are the protocol, and they are 64-bit only. `thread_spawn` is a Linux `clone` of one function with a caller-provided stack. It is not a pool, and it is not available in freestanding code. `let volatile` on a local scalar keeps the stack slot at hosted `-O2`.

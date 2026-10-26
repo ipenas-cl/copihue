@@ -2,6 +2,18 @@
 
 Todos los cambios importantes del proyecto.
 
+## [0.32.0] - 2026-10-26
+
+### Added
+- Atomic builtins for `*volatile u32`, `*volatile i32`, `*volatile u64`, and `*volatile i64`. `atomic_load_acquire` is a `mov`. `atomic_load_seq_cst` is a `mov` and then `mfence`. `atomic_store_release` is a `mov` and returns 0. `atomic_store_seq_cst` is `xchg` and returns 0. `fetch_add` is `lock xadd` and returns the old value. `atomic_add` is `lock xadd` plus the addend and returns the new value. `swap` is `xchg` and returns the old value. `compare_exchange` is `lock cmpxchg` and returns the old value. `fence` is `mfence` and returns 0. A 32-bit operation uses `eax` and zero-extends. A non-volatile pointer is `fetch_add() takes a *volatile u32 or *volatile u64, found *u64`. A `*volatile u8` is the same error. They are rejected in `bits 16` and `bits 32`. They compile in hosted code and with `--freestanding`.
+- `align(N)` on a struct, a field, or a global. `N` is a power of two from 1 to 4096. A field's `align` replaces its natural alignment, including in a `packed struct`. The struct size rounds up, so `sizeof` and `offsetof` count the padding. A global stricter than 8 bytes is a NASM `align` (`resb` in `.bss`). `align(64) struct Lines { align(64) a: u64, align(64) b: u64 }` is 128 bytes with `b` at 64. A local cannot carry `align`.
+- Hosted threads without libc. `thread_spawn(fn, stack_top, tid)` is `clone` (syscall 56) with `CLONE_VM|FS|FILES|SIGHAND|THREAD|SYSVSEM|PARENT_SETTID|CHILD_CLEARTID` (`0x350F00`). The child calls `fn` with no arguments and exits that thread (syscall 60). The stack top is aligned down to 16 bytes. `tid` is a 32-bit word the kernel fills and then clears. `thread_join` waits on that word with `futex` (syscall 202, `FUTEX_WAIT`). The pointer stays in `rbx` because `syscall` overwrites `r11`. `sched_setaffinity(cpu)` is syscall 203 with a 128-byte mask; `cpu >= 1024` returns -1. `cpu_pause()` is `pause` and returns 0, including in freestanding code.
+- `tests/lang/atomics.lap` prints the single-thread sequence at `-O0` and `-O2`. `tests/lang/align64.lap` prints the offsets, the sizes, a gap of 64, and the low 6 bits of the addresses. `tests/lang/threads.lap` runs two threads, each adding 1000000 with `fetch_add`; the total is 2000000. `tests/freestanding/atomics.lap` is the instruction stream at `-O0` and `-O2` (`lock xadd`, `xchg`, `lock cmpxchg`, `mfence`) and is assembled, not booted. `tests/errors/atomic_ptr.lap`, `atomic_width.lap`, `align_pow2.lap`, and `thread_hosted.lap` are the rejections.
+- `bench/lowlat/` is the same SPSC ring and the same Treiber pool in Copihue, C++, and Rust. It is not part of `make test`. On this machine, 2026-10-26T00:18:42Z, one warmup and seven runs. The SPSC process was `taskset -c 0,1` (two CPUs). The pool was `taskset -c 0`. Copihue `-O2`, `g++ -O2`, `rustc -O`. Milliseconds, median (min–max): SPSC Copihue 45.0 (18.4–76.1), C++ 34.1 (11.2–44.4), Rust 15.8 (10.5–30.6). Those three ranges overlap. Pool Copihue 21.7 (21.3–22.0), C++ 21.4 (21.2–23.6), Rust 20.4 (20.2–21.4). Those three ranges overlap. The checksums were 500000500000 and 1000000. Pinning both SPSC threads to one CPU made the same programs take about 7.8 seconds each, because the producer and the consumer then wait inside `pause`; that figure is not the table.
+
+### Changed
+- Language version is 0.32.0, on top of 0.31.0. The address of a volatile scalar or a volatile field is `*volatile T`, so `fetch_add(&cell, 1)` matches when `cell` is `let volatile cell: u64`.
+
 ## [0.31.0] - 2026-10-25
 
 ### Added
