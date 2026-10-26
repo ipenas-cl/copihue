@@ -1,0 +1,22 @@
+// BENCH: vec N=1000000
+// Empuja 0..999999 en un vec vacío (crece desde 4, doblando) y suma el recorrido.
+// La suma 499999500000 se parte en dos campos de menos de 9 dígitos, y después va la longitud.
+fn main() -> i32 {
+    let v: vec i64;
+    let i = 0;
+    let s = 0;
+    while (i < 1000000) {
+        vec_push(v, i);
+        i = i + 1;
+    }
+    for x in v {
+        s = s + x;
+    }
+    print_int(s / 1000000);
+    print(" ");
+    print_int(s % 1000000);
+    print(" ");
+    print_int(v.len);
+    println("");
+    return 0;
+}
