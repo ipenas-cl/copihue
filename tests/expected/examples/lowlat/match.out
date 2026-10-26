@@ -1,0 +1,20 @@
+size 12 16
+rest 9 90 1
+rest 1 100 5
+rest 2 101 4
+rest 3 100 3
+trade 4 1 100 5
+trade 4 3 100 1
+trade 5 3 100 2
+trade 5 2 101 4
+rest 5 101 4
+trade 6 5 101 3
+mkt 6 0
+mkt 7 5
+miss 1
+bid 101
+ask 0
+cancel 0
+bid 90
+ask 0
+exit=0

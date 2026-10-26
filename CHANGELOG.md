@@ -2,6 +2,19 @@
 
 Todos los cambios importantes del proyecto.
 
+## [0.32.1] - 2026-10-26
+
+### Added
+- `examples/lowlat/` is four hosted programs on top of 0.32.0. The pool, the order book, and the matching engine are the same as before: a pointer free list (`alloc` / `free` are O(1); a full pool returns a null pointer), price levels with FIFO orders (insert, cancel, best bid/ask; an unknown id prints `miss`), and limit and market orders with price-time priority and a partial cross. The ring is a two-thread SPSC. Capacity 8, free-running `u64` indices, `align(64)` so the two indices do not share a cache line. Full when their difference is 8; empty when they are equal. Every slot is usable. The slot store is a statement before `atomic_store_release`. The other side uses `atomic_load_acquire`. `cpu_pause` waits. A single-thread prelude checks empty, full, and a drain (sum 44). A producer thread then sends 1 through 24. Main checks the order (`bad 0`) and the sum (`300`). `-O0` and `-O2` print the same lines.
+- Each program still has a note on the capability it shows: real field widths (`Block` is 24 bytes, `Order` 12, `Level` 16), pointers, `as`, and, for the ring, `align(64)`, acquire/release, and `thread_spawn` without libc. The golden files are `tests/expected/examples/lowlat/`.
+- `examples/lowlat/bench/` is still the pool, the book, and the engine in Copihue, C, and Rust. It is not a second copy of `bench/lowlat`. That directory, from 0.32.0, is the timed SPSC (one million messages, capacity 1024) and the Treiber pool, against C++ and Rust. This release does not run that bench again. In the 2026-10-26T00:18:42Z window those SPSC ranges overlap, and those pool ranges overlap.
+
+### Changed
+- Language version is 0.32.1, on top of 0.32.0. The code generator is the 0.32.0 code generator. The 0.31.1 rewrites (`psadbw` and `add byte`) stay.
+
+### Measured
+- On this machine, `examples/lowlat/RESULTS.md` is the 2026-10-26T00:51:15Z — 2026-10-26T00:51:19Z window (the binary prints 0.32.1). Copihue is above C and Rust on all three rows. The ranges do not overlap. Pool 20.8 ms (20.6–20.9) against C 8.9 (8.6–9.2) and Rust 8.9 (8.7–9.2). Book 49.3 (49.2–49.8) against C 38.7 (38.4–38.9) and Rust 33.3 (33.0–33.5). Match 47.1 (46.8–47.4) against C 32.9 (32.7–33.4) and Rust 33.6 (33.4–34.3). Nothing here is faster. Against the previous examples window (2026-10-26T00:27:12Z — 00:27:15Z, binary 0.31.2) each Copihue range overlaps the earlier one, so this release does not move the pool, the book, or the engine. The timed SPSC was not measured again.
+
 ## [0.32.0] - 2026-10-26
 
 ### Added

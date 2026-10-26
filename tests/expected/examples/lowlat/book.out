@@ -1,0 +1,12 @@
+size 12 16
+book 101 103
+cancel 2
+book 101 103
+miss 99
+cancel 1
+book 101 103
+cancel 3
+book 0 103
+cancel 4
+book 0 103
+exit=0
