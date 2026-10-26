@@ -1,0 +1,11 @@
+enum Result<T, E> { Ok(T), Err(E) }
+
+extern fn add1(a: Result<i64, i64>) -> Result<i64, i64>;
+
+fn main() -> i64 {
+    let a = Result<i64, i64>::Ok(8);
+    let b = add1(a);
+    print_int(match b { Ok(v) => v, Err(e) => 0 - e });
+    println("");
+    return 0;
+}

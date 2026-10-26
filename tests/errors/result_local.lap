@@ -1,0 +1,8 @@
+enum Result<T, E> { Ok(T), Err(E) }
+
+fn f(a: i64) -> Result<i64, i64> {
+    let x = a?;
+    return Result<i64, i64>::Ok(x);
+}
+
+fn main() -> i64 { return 0; }

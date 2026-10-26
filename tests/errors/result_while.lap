@@ -1,0 +1,13 @@
+enum Result<T, E> { Ok(T), Err(E) }
+
+fn tick() -> Result<i64, i64> {
+    return Result<i64, i64>::Ok(1);
+}
+
+fn f() -> Result<i64, i64> {
+    while (tick()?) {
+    }
+    return Result<i64, i64>::Ok(0);
+}
+
+fn main() -> i64 { return 0; }

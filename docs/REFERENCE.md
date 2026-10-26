@@ -1,4 +1,4 @@
-# Copihue Language Reference (v0.41.0)
+# Copihue Language Reference (v0.42.0)
 
 This document describes the language that `copihue` accepts today. Anything not listed here is not supported.
 Planned features are in the README roadmap.
@@ -165,7 +165,7 @@ Arm results are scalars. Integer arms use the widest width. A literal arm is `i6
 
 ## Generics
 
-A function or a struct may take type parameters. The compiler emits one ordinary copy for each combination the program uses. There is no dictionary and no runtime lookup. The design note is `docs/DESIGN_GENERICS.md`. `vec` is not rewritten. A generic `enum Option<T>` is described under Traits. The concrete `enum Option` tests are unchanged.
+A function or a struct may take type parameters. The compiler emits one ordinary copy for each combination the program uses. There is no dictionary and no runtime lookup. The design note is `docs/DESIGN_GENERICS.md`. `vec` is not rewritten. A generic `enum Option<T>` is described under Traits. `enum Result<T, E>` and `?` are described under Errors. The concrete `enum Option` tests are unchanged.
 
 ```copihue
 fn max<T>(a: T, b: T) -> T {
@@ -226,6 +226,40 @@ The impl type is an integer, a pointer, or a struct. Anything else is `type 'Foo
 `enum Option<T> { None, Some(T) }` is a generic enum when the substituted field is an integer or a pointer. It is one proof. It does not rewrite the concrete `enum Option { None, Some(i64) }`, and it does not rewrite `vec`. `Option<i64>::Some(7)` and `Option<i64>::None` construct the copy `Option$1$i64`. `<...>` closes before `::` for that spelling. `sizeof(Option<i64>)` is 16: tag 8 and an `i64` payload. `fn wrap<T>(v: T) -> Option<T>` returns through the hidden pointer in `rdi`, and `let a = wrap(4)` sees the instantiated enum. `match` of a call still needs a local. A field that substitutes to a struct is `an enum field must be an integer or a pointer`, and that copy is not registered. The bare name is `enum 'Option' needs type arguments`. The wrong count is `enum 'Option' takes 1 type argument, not 2`. An enum is still not a legal type argument. Enum copies share the monomorphization cap (`too many monomorphized copies`, 64).
 
 `tests/lang/trait.lap` prints 1, 0, 1, 9, 9, 9, and 3 at `-O0` and `-O2`: `a.lt(b)`, `b.lt(a)`, `lt(a, b)`, `max(a, b)`, `max<i64>(b, a)`, a field sum, and the names `trait` and `impl` used as variables. `tests/lang/option_gen.lap` prints 7, 0, 104, 4, and 16: `Some(7)`, `None`, the first byte of `"hi"`, `unwrap` of `wrap(4)`, and `sizeof(Option<i64>)`. `tests/freestanding/trait.lap` assembles `call max$1$i64` and `call lt$Ord$i64` with no `syscall` at both levels and is not booted. `tests/flat/trait.lap` is the same image at both levels and is not booted. `_start` is still the first label: a symbol that contains `$` does not take the entry.
+
+## Errors (`Result` and `?`)
+
+There is no exception and no libc. The program writes the enum. `?` is the `match` below, lowered before the frame is chosen, so the bytes are the bytes of that match. The design note is `docs/DESIGN_ERRORS.md`.
+
+```copihue
+enum Result<T, E> { Ok(T), Err(E) }
+
+fn add1(a: Result<i64, i64>) -> Result<i64, i64> {
+    let x = a?;
+    return Result<i64, i64>::Ok(x + 1);
+}
+```
+
+`Result` is not a compiler type. `?` does not look at the enum's name. The operand must have variants `Ok` and `Err`, each with one field, and the function's `Err` field must be that same type. There is no conversion. `sizeof(Result<i64, i64>)` is 16. The return uses the hidden pointer in `rdi`. An enum field still cannot be an enum, so `Ok` cannot carry a `Result`.
+
+`?` is postfix, tighter than `+` and `*`. Prefix `*` and `&` wrap that postfix, so `*p?` is `*(p?)`. `a??` is `(a?)?`. The operand is replaced by:
+
+```copihue
+match a {
+    Ok(v) => v,
+    Err(e) => {
+        return Result<i64, i64>::Err(e);
+    }
+}
+```
+
+`Ok` is tested first. A call is not a place (`a`, `s.o`, and `p->o` are). The compiler inserts `let` immediately before the statement and matches that local. A handwritten `match` of a call still needs a local. `?` in a `while` condition is not hoisted: `'?' in a while condition needs a local Result`. A `while` body is an ordinary statement.
+
+The arm that returns has no value, so the match type is the `Ok` payload. `let q = p?` on `Result<*u8, i64>` leaves `q` as `*u8`. A block arm that neither returns nor ends in an expression is still `match arm block needs a result`.
+
+A function that does not return an enum is `'?' needs a Result return`. A local that is not an enum is `'?' needs a local Result`. An operand without those two variants is `'?' needs variants Ok(T) and Err(E) on 'Option'`. A different `Err` field is `error type '*u8' does not match 'i64' in '?'`. `bits 16`, `bits 32`, and `naked` stay `an enum is a 64-bit value`. `match` is still exhaustive: omitting `Err` is `match does not cover 'Err'`.
+
+`tests/lang/result.lap` prints 8, -3, 9, 104, -4, and 16 at `-O0` and `-O2`. `tests/flat/result.lap` is the same image at both levels and is not booted. Two `-c` objects link `add1` (`T add1` on the definition, `U add1` on the use) and print 9. `examples/parse_result.lap` returns `Result` from a small sum parser instead of a magic integer: `12+3` is 0 then 15, `7` is 0 then 7, `12+` is 1 then 3, `12a` is 1 then 2, and an empty string is 1 then 0.
 
 ## Declarations
 
@@ -734,8 +768,8 @@ The regression suite compares the hexdump at `-O0` and `-O2`. When `qemu-system-
 ## Known limitations
 
 - `i64` and `u64` arithmetic is 64-bit two's complement and wraps. `u8`, `u16`, `u32`, `i8`, `i16`, and `i32` truncate after the operator, as described under Type checking. Pointer indexing is not bounds-checked. A `[]T` index is, in hosted code; `s.ptr[i]` and `unsafe` are not. A `vec` index checks the length the same way. `vec T` is a hosted local, not a parameter, a return, a global, or a struct field. Its element is an integer, a pointer, or a struct. An enum is not a `vec` element. `let s: []T = v` and `for x in v` copy the pointer and the length and do not own the buffer. `own *T` is a hosted local, a hosted parameter, or a hosted return. It is not copied or reassigned. Returning it from `-> own *T`, or passing it to an `own *T` parameter, moves it and stores null. Passing it to `*T` does not. An untyped parameter is not inferred from an index or a dereference. A drop placed after an explicit `return` is still emitted and is not executed.
-- An `enum` is a tag `i64` and a payload of integers and pointers. It can be returned (hidden pointer in `rdi`), passed by value, stored in a global or a struct field, and matched with `_` or a block arm. It is not an element of a slice, an array, or a `vec`. `match` of a call, a constructor, or `*p` of the enum still needs a local. There is no `|` pattern, no guard, and no named field. `bits 16`, `bits 32`, `naked`, and a `module` reject the value. A literal arm is `i64`. Without `_`, the corrupt-tag path is `ud2`. Hosted `-O2` compares the tag once from `rbx`. A generic enum whose substituted field stays an integer or a pointer is `enum Option<T>` (see Traits). A field that becomes a struct is rejected. See Enums.
-- A generic function or struct is one monomorphized copy per used combination of integer, pointer, or struct arguments. The copy is an ordinary function or struct. A trait bound (`T: Ord`) is checked on that copy and the call is the impl symbol. There is no vtable (see Traits). An operation with no trait is still `cannot apply '+' to 'Point' in 'add<Point>'`. A type argument cannot be an enum, a slice, an array, a `vec`, or `own *T`. Two `-c` objects that emit the same copy still collide at `ld`. `vec` is not a generic type. `enum Option<T>` is one test, not a rewrite of every `Option`. See Generics and Traits.
+- An `enum` is a tag `i64` and a payload of integers and pointers. It can be returned (hidden pointer in `rdi`), passed by value, stored in a global or a struct field, and matched with `_` or a block arm. It is not an element of a slice, an array, or a `vec`. `match` of a call, a constructor, or `*p` of the enum still needs a local. There is no `|` pattern, no guard, and no named field. `bits 16`, `bits 32`, `naked`, and a `module` reject the value. A literal arm is `i64`. Without `_`, the corrupt-tag path is `ud2`. Hosted `-O2` compares the tag once from `rbx`. A generic enum whose substituted field stays an integer or a pointer is `enum Option<T>` (see Traits). A field that becomes a struct is rejected. `enum Result<T, E> { Ok(T), Err(E) }` is that enum, written by the program. `expr?` is the match that returns `Err` early (see Errors). An arm block may `return` instead of yielding a value. See Enums.
+- A generic function or struct is one monomorphized copy per used combination of integer, pointer, or struct arguments. The copy is an ordinary function or struct. A trait bound (`T: Ord`) is checked on that copy and the call is the impl symbol. There is no vtable (see Traits). An operation with no trait is still `cannot apply '+' to 'Point' in 'add<Point>'`. A type argument cannot be an enum, a slice, an array, a `vec`, or `own *T`. Two `-c` objects that emit the same copy still collide at `ld`. `vec` is not a generic type. `enum Option<T>` is one test, not a rewrite of every `Option`. `Result<T, E>` is a user enum on the same copy, and `?` does not convert `E`. See Generics, Traits, and Errors.
 - Direct calls check the function name, the argument count, and argument types. Assignments and integer or pointer returns are checked. Indirect calls are not. `*i8` and `*u8` match. An integer literal converts to any pointer; a variable does not, without `as`.
 - Struct fields use their real width. Ordinary structs add natural alignment; `packed struct` does not, unless `align(N)` says so. `align(N)` is a power of two from 1 to 4096 on a struct, a field, or a global. Locals are not aligned that way. An array field is `N * sizeof(T)` or a compile error. `sizeof` and `offsetof` are compile-time integers. A narrow integer operator truncates to that type; `i64` and `u64` stay 64-bit. Scalar locals and globals still occupy 8-byte slots. Struct assignment copies the whole value; it does not assign field by field in the source. Nested fields (`r.b.x`) use the real offset.
 - Indexing a local array in hosted mode inserts a bounds check that exits the process. `--freestanding`, `--flat`, and `--boot` omit that check unless `--checked`. `unsafe { a[i] }` omits it. `for i in 0..N` omits it when the array has at least `N` elements, including under `--checked`. `bits 16` and `bits 32` do not insert it. Pointer indexing is never checked. A slice `s[i]` is checked in hosted code and writes `index out of range` before exiting with code 1. `--freestanding`, `--flat`, and `--boot` omit that check unless `--checked`. `unsafe { s[i] }` and `s.ptr[i]` omit it in every mode. `for x in s` and `for i in 0..s.len` omit it when the bound is the loop itself.

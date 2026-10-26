@@ -1,0 +1,9 @@
+enum Option { Some(i64), None }
+enum Result<T, E> { Ok(T), Err(E) }
+
+fn f(a: Option) -> Result<i64, i64> {
+    let x = a?;
+    return Result<i64, i64>::Ok(x);
+}
+
+fn main() -> i64 { return 0; }

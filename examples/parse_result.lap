@@ -1,0 +1,68 @@
+enum Result<T, E> { Ok(T), Err(E) }
+
+fn parse_int(s: *u8, n: i64, ip: *i64) -> Result<i64, i64> {
+    let i = ip[0];
+    if (i >= n) {
+        return Result<i64, i64>::Err(i);
+    }
+    let c = s[i];
+    if (c < 48 || c > 57) {
+        return Result<i64, i64>::Err(i);
+    }
+    let v = 0;
+    while (i < n && s[i] >= 48 && s[i] <= 57) {
+        v = v * 10 + (s[i] - 48);
+        i = i + 1;
+    }
+    ip[0] = i;
+    return Result<i64, i64>::Ok(v);
+}
+
+fn parse_sum(s: *u8, n: i64) -> Result<i64, i64> {
+    let i = 0;
+    let acc = parse_int(s, n, &i)?;
+    while (i < n && s[i] == 43) {
+        i = i + 1;
+        let t = parse_int(s, n, &i)?;
+        acc = acc + t;
+    }
+    if (i < n) {
+        return Result<i64, i64>::Err(i);
+    }
+    return Result<i64, i64>::Ok(acc);
+}
+
+fn report(r: Result<i64, i64>) -> i64 {
+    match r {
+        Ok(v) => {
+            print_int(0);
+            println("");
+            print_int(v);
+        },
+        Err(e) => {
+            print_int(1);
+            println("");
+            print_int(e);
+        }
+    };
+    return 0;
+}
+
+fn main() -> i64 {
+    let a = "12+3";
+    let b = "7";
+    let c = "12+";
+    let d = "12a";
+    let e = "";
+    report(parse_sum(a, 4));
+    println("");
+    report(parse_sum(b, 1));
+    println("");
+    report(parse_sum(c, 3));
+    println("");
+    report(parse_sum(d, 3));
+    println("");
+    report(parse_sum(e, 0));
+    println("");
+    return 0;
+}

@@ -1,5 +1,7 @@
 # Traits por monomorfización (corte 0.41.0)
 
+**Corte 0.42.0.** `Result<T, E>` y `?` no son un trait. Son el enum genérico y un `match`. El detalle está en [`DESIGN_ERRORS.md`](DESIGN_ERRORS.md).
+
 Un trait es una lista de firmas. El compilador no genera código para el trait. Genera la función del `impl` como una función común, y la copia de un genérico la llama por su símbolo. En ejecución no hay tabla virtual, ni diccionario, ni una búsqueda. El detalle de la copia está en [`DESIGN_GENERICS.md`](DESIGN_GENERICS.md). `vec` interno no se toca.
 
 ```copihue

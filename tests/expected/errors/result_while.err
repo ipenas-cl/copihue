@@ -1,0 +1,4 @@
+tests/errors/result_while.lap:8:18: error: '?' in a while condition needs a local Result
+      8 |     while (tick()?) {
+        |                  ^
+1 error, compilation failed

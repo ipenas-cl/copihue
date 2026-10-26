@@ -1,5 +1,7 @@
 # Genéricos por monomorfización (corte 0.40.0)
 
+**Corte 0.42.0.** `enum Result<T, E>` es una copia más, y `?` es el `match` de esa copia. El detalle está en [`DESIGN_ERRORS.md`](DESIGN_ERRORS.md).
+
 **Corte 0.41.0.** Un trait se resuelve al generar la copia, y `enum Option<T>` existe cuando el campo sigue siendo un entero o un puntero. El detalle está en [`DESIGN_TRAITS.md`](DESIGN_TRAITS.md). Lo de abajo es este corte: no hay traits.
 
 Una función o un struct puede llevar parámetros de tipo. El compilador genera una copia por cada combinación que el programa usa. Esa copia es una función o un struct normal: en ejecución no hay un diccionario ni una búsqueda. `vec` y `Option` siguen como están; este corte es lo que haría falta para escribirlos en el lenguaje más adelante, y no los reescribe.
