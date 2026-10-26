@@ -1,0 +1,7 @@
+fn main() -> i64 {
+    let v: vec i64;
+    vec_push(v, 1);
+    print_int(v[3]);
+    println("");
+    return 0;
+}

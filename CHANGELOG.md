@@ -20,8 +20,27 @@ Todos los cambios importantes del proyecto.
 - `same` 60.4 (60.2–60.4) to 39.1 (38.8–39.3). C++ 39.7 (39.7–39.8), Rust 39.6 (39.4–39.7). The new maximum is below both minimums. Pinning both threads to cpu 0 is still slower than pinning them apart: `same` stays above `pin` and `free`.
 - `pin` 35.0 (34.7–45.9) to 20.6 (20.3–27.6). The ranges do not overlap. C++ 21.5 (21.4–21.6) and Rust 21.1 (20.7–21.4) overlap the new range.
 - `share` 160.0 (149.8–184.5) to 147.0 (121.9–155.3). The ranges overlap, and the new range overlaps C++ 137.4 (131.2–151.6) and Rust 154.3 (137.5–159.5). The shared line still dominates. The same `lock add` stays, because `split`, `free`, `same`, and `pin` got faster.
-- `examples/lowlat/bench/pool`, `book`, and `match`, and `bench/lowlat` `spsc`, `pool`, `spmc`, `mpmc`, and `tpool`, are the same bytes as 0.35.2. `watch` is the same bytes too. They were not retimed.
-- `examples/lowlat/RESULTS.md` is the 2026-10-26T04:45:25Z — 2026-10-26T04:45:37Z window of this codegen. The header names the compiler that produced it.
+- `examples/lowlat/bench/pool`, `book`, and `match`, and `bench/lowlat` `spsc`, `pool`, `spmc`, `mpmc`, and `tpool`, are the same bytes as 0.36.0, and 0.36.0 is the same bytes as 0.35.2. `watch` is the same bytes too. They were not retimed. The five atomic benches compiled by 0.36.0 are also the same bytes as 0.35.2, and this tree's binaries match the after side of the paired window.
+- `examples/lowlat/RESULTS.md` is the 2026-10-26T04:51:05Z — 2026-10-26T04:51:17Z window. The header prints Copihue 0.36.1. It is not the paired window above. Pool, book, match, and watch are unchanged bytes, so those rows are a new window of the same code. In this window `split` is below C++ and overlaps Rust, `free` is below both, `same` overlaps both because one sample is 40.3 ms, and `share`, `pin`, and `watch` overlap both.
+
+## [0.36.0] - 2026-10-26
+
+### Added
+- An omitted parameter type and an omitted `->` are `i64`. An explicit `: T` or `-> T` still wins. `let x = e` is unchanged: an integer, including a narrow load, is `i64`; a pointer is that pointer; a struct is not inferred. Indexing does not turn an untyped parameter into `*i64`. `fn sumar(datos, n) { return datos[0]; }` is `cannot index 'datos'`. `for x in` on a slice was already 0.34.0.
+- `let v: vec T` is a hosted local of 24 bytes: a pointer, an `i64` length, and an `i64` capacity, starting empty. `T` is an integer or a pointer. `vec_push(v, x)` appends one element and returns the new length. The first growth allocates 4 elements and later growth doubles, using the existing `malloc` and `free` (`mmap` / `munmap`, no libc). `v[i]` checks the length and writes `index out of range` (exit 1). `v.ptr`, `v.len`, and `v.cap` are readable. `mmap` failure writes `out of memory` and exits 1. `for x in v` copies the pointer and the length at entry and does not own the buffer.
+- `let p: own *T = e` is a hosted pointer local. It is `free`d when its block ends, and on `return`, `break`, and `continue`. `free` of null does nothing, and the slot is then set to null. An uninitialized owner is null. Passing it to a `*T` parameter borrows it: the callee must not free it, and the owner still does.
+
+### Left out
+- Inferring `*i64` from a later index. Move, free-on-reassign, returning or copying an owner, a `vec` of structs, and `let s: []T = v` (`a vec cannot be copied`). `vec` and `own *T` are not parameters, returns, globals, or struct fields. A second drop after an explicit `return` is still emitted and is not executed. `vec` and `own` stay contextual, so a parameter named `vec` still compiles.
+
+### Changed
+- Language version is 0.36.0, on top of 0.35.2.
+
+### Measured
+- No timed bench was added to `make test`. `bench/slice` and `bench/lowlat` were not run again.
+- `fn fib(n)` and `fn fib(n: i64) -> i64` assemble to the same bytes at `-O0` and at `-O2` (`diff -q` empty). `let x = 5` and `let x: i64 = 5` match at `-O0`. The type default adds 0 bytes.
+- NASM listing (`nasm -f elf64 -l`) of `let p: own *i64 = malloc(8); *p = 1; return *p;` against `let p: *i64 = malloc(8); *p = 1; let r = *p; free(p); return r;`. Live bytes of `go` until the first `ret`: 155 versus 149, a difference of 6. That is `push r11` / `pop r11` (2 + 2) and `mov qword [rbp-8], 0` (8), against the explicit function's second local (`mov [rbp-16], rax` and `mov rax, [rbp-16]`, 4 + 4) replaced by `push rax` / `pop rax` (1 + 1). After that `ret` the owner still has an unreachable drop. The owner function is 207 bytes and the dead tail is 52; the explicit function's dead epilogue is 5 (`xor rax` / `leave` / `ret`). The unreachable drop is 47 bytes. It is not removed: a function that returns and also falls off the end would need the later drop, and zeroing the slot makes a second `free` a no-op when it does run.
+- Hosted `-O2`, `taskset -c 0`, one warmup and seven runs, summing `0 .. 999999` by growing a buffer from capacity 4 and doubling. Window 2026-10-26T04:24:56Z. `vec_push` samples were 7.8, 7.5, 7.5, 7.6, 7.7, 7.4, 7.5 ms, median 7.5 (7.4–7.8). The same growth written with `malloc`, a copy, and `free` was 7.1, 6.7, 7.4, 7.1, 7.2, 7.0, 6.9 ms, median 7.1 (6.7–7.4). Both printed 499999500000. The ranges meet at 7.4 ms, so this is not a stable speedup or slowdown. An earlier window of 100000 elements (2026-10-26T04:24:37Z) overlapped more: `vec` median 1.9 (1.8–2.2), manual median 1.8 (1.5–2.0).
 
 ## [0.35.2] - 2026-10-26
 

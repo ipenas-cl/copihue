@@ -1,0 +1,4 @@
+tests/errors/own_ret.lap:3:5: error: an owning pointer cannot be returned
+      3 |     return p;
+        |     ^
+1 error, compilation failed

@@ -90,7 +90,35 @@ A parameter `s: []T` is the address of those 16 bytes. The callee copies them, t
 
 The check of `s[i]` is omitted when `start` is the literal `0`, `end` is `s.len`, and the body does not assign `i` or the slice. `a[i]` in `for i in 0..N` is omitted when `N` is a literal, the array has at least `N` elements, and the body does not assign `i`. Another index, a shorter array, or an assignment of `i` keeps the check. This holds at `-O0` and at `-O2`. It does not use the hosted `-O2` `while` proof.
 
-There is no capacity, no `append`, no slice nested in a struct, no returning a slice, and no check of a pointer that is not a slice.
+There is no capacity, no `append`, no slice nested in a struct, no returning a slice, and no check of a pointer that is not a slice. A `vec` (below) is a different value: it has a capacity, and it is not a slice.
+
+## Vectors and owning pointers
+
+`vec` and `own` are contextual, not keywords. `vec` is a type only when the next token starts a type (`*`, `[`, or a name). `own` is a type only when the next token is `*`. A parameter or a local named `vec` stays a name. Both forms are hosted locals. `--freestanding`, `--flat`, `--boot`, `bits 16`, `bits 32`, `naked`, `interrupt fn`, and `syscall fn` reject them (`vec is hosted-only`, `an owning pointer is hosted-only`).
+
+```copihue
+let v: vec i64;
+vec_push(v, 7);          // returns the new length, 1
+let n = v.len;           // 1
+let c = v.cap;           // 4 after the first growth
+let p: *i64 = v.ptr;
+let q: own *i64 = malloc(8);
+*q = 1;
+```
+
+`let v: vec T` is 24 bytes: a pointer at offset 0, an `i64` length at 8, and an `i64` capacity at 16. It starts empty (a null pointer, length 0, capacity 0). An initializer is `a vec starts empty`. `T` is an integer (`i8`/`u8`/`i16`/`u16`/`i32`/`u32`/`i64`/`u64`) or a pointer. A struct, a slice, an array, another `vec`, or `own *T` is `a vec element must be an integer or a pointer`.
+
+`vec_push(v, x)` appends one element and returns the new length as `i64`. The first growth allocates 4 elements. Later growth doubles the capacity, copies the old bytes, and `free`s the old buffer. Allocation is the existing `malloc` (`mmap`, no libc). If `mmap` fails, the program writes `out of memory` and a newline to file descriptor 2 and exits with code 1. `v` must be a local `vec` (`vec_push() takes a local vec`). The value is checked against `T`.
+
+`v[i]` and `v[i] = x` use the slice rule: the index is compared as an unsigned integer with the length, and failure writes `index out of range` and exits 1. `v.ptr[i]` is a pointer index and is not checked. `v.ptr` is `*T`, `v.len` is `i64`, and `v.cap` is `i64`. Assigning any of them is `vec field '...' is read-only`. A slice has no `cap` (`slice has no field 'cap'`). Using the `vec` itself as a scalar is `a vec is not a scalar; read an element, .ptr, .len, or .cap`. `v = e` is `a vec cannot be assigned`. `&v` is `a vec has no address`.
+
+`for x in v` copies the pointer and the length into a temporary slice at the start of the loop. That temporary does not own the buffer. The `vec` still frees it. A `vec_push` inside the loop is not visible to that copy. `let s: []T = v` is `a vec cannot be copied`.
+
+`let p: own *T = e` is a pointer local. The block that declares it calls `free` on it when the block ends. `return`, `break`, and `continue` do the same before they leave. `free` of a null pointer does nothing. A `let` with no initializer stores null, so its drop is that no-op. After a drop the slot is set to null, so a second drop of the same slot is also a no-op. The pointer stays on the stack: the register planner does not keep it in a register across the hidden `free`.
+
+Copying one owning pointer into another is `an owning pointer cannot be copied`. `p = e` is `an owning pointer cannot be reassigned` (it does not free the old pointer and install a new one). `return p` is `an owning pointer cannot be returned`. `&p` is `an owning pointer has no address`. Passing `p` to a `*T` parameter borrows it: the callee must not `free` it, and the owner still does. Storing a raw `*T` into a new `own *T` is allowed; only the owner frees that pointer.
+
+A parameter, a return type, a global, or a struct field is `a vec must be a local` or `an owning pointer must be a local`. `-> vec T` is `a vec cannot be returned`. `-> own *T` is `an owning pointer cannot be returned`. `own` not followed by a pointer is `own applies to a pointer`.
 
 ## Declarations
 
@@ -105,10 +133,13 @@ struct Point { x: i64, y: i64 }
 struct Rect { a: Point, b: Point }        // nested structs are embedded
 
 fn add(a: i64, b: i64) -> i64 { return a + b; }
+fn fib(n) { return n; }             // n is i64, and so is the result
+fn sum(a, b) { return a + b; }      // both parameters and the result are i64
 ```
 
 - Functions take up to 16 parameters. The first six are passed in `rdi, rsi, rdx, rcx, r8, r9`. The seventh is at `[rbp+16]`, then one 8-byte slot each. The return value comes back in `rax`.
-- The type after `->` may be any type: a name (`i64`, `Point`), a pointer (`*u8`, `*mut u8`, `*volatile mut u8`, `**u8`), or an array (`[u8; 4]`, `[*u8; 2]`). `volatile` and `mut` may appear in either order after `*`. A missing piece is `expected a type, found '...'`. An integer or pointer `return` is checked against that type (see Type checking). An array or struct return type is parsed and is not checked. `-> []T` is rejected (`a slice cannot be returned`). The value still comes back in `rax`. The same form compiles in hosted, `--freestanding`, and `--flat` code.
+- The type after `->` may be any type: a name (`i64`, `Point`), a pointer (`*u8`, `*mut u8`, `*volatile mut u8`, `**u8`), or an array (`[u8; 4]`, `[*u8; 2]`). `volatile` and `mut` may appear in either order after `*`. A missing piece is `expected a type, found '...'`. An integer or pointer `return` is checked against that type (see Type checking). An array or struct return type is parsed and is not checked. `-> []T` is rejected (`a slice cannot be returned`). `-> vec T` and `-> own *T` are rejected (see Vectors and owning pointers). The value still comes back in `rax`. The same form compiles in hosted, `--freestanding`, and `--flat` code.
+- A parameter with no `: T` is `i64`. A function with no `->` returns `i64`. An explicit annotation still wins. This is the same default as an untyped integer `let`, not a guess from later uses. `fn sumar(datos, n)` does not make `datos` a pointer because the body indexes it: `datos[0]` is `cannot index 'datos': it is not an array or a pointer`. `let x = e` still infers `i64` from an integer, including a narrow load, and the pointer type from a pointer. It does not infer a struct.
 - A name is visible from its `let` to the end of the block that contains it. `{ ... }` is a block, and so is the body of `if`, `while`, and `for`. A nested block may declare the same name again (the inner one hides the outer one until the inner block ends). Declaring it twice in the same block is `redeclaration of 'name' in the same block`. Parameters belong to the function body, so `fn f(b: i64) { let b = 1; ... }` is that error. `for (let i = 0; ...)` scopes `i` to the loop. Using a name after its block, with no outer declaration, is `use of undeclared variable 'name'`.
 - A struct parameter (`r: Rect`) is passed by value: the callee gets its own copy. A pointer parameter (`r: *Rect`) refers to the caller's struct; use `r->field`.
 - Using an undeclared variable, or assigning to one, is a compile error.
@@ -401,7 +432,7 @@ A `u8`, `u16`, `u32`, `i8`, `i16`, or `i32` operator still truncates to that typ
 
 Scalar locals and globals still occupy 8-byte slots when they live in memory. Struct fields occupy their real width. Hosted `-O2` may keep a scalar local in `r12`–`r15`, or in `r10`/`r11` when no call is in its live range; the mask or sign-extend is applied before the value is written to that register or to the slot, and again after a narrow operator. That truncation uses the destination register's own low half, including a call argument in `rdi`, `rsi`, `rdx`, `rcx`, `r8`, or `r9` (`movsxd rdi, edi`, not `eax`). A struct field, a store through a pointer, and an array element write only the real width. A load of a `u8`/`u16`/`u32` field zero-extends. A load of an `i8`/`i16`/`i32` field sign-extends.
 
-Not checked: indirect calls, comparisons as a type error, bitwise mixes of pointers, `mut` used as a permission, and array or struct return types. An untyped `let x = e` infers `i64` from an integer, including a narrow load, the pointer type from a pointer, and an address from `malloc`. It does not infer a struct onto that slot: write `let p: Point = ...` or a struct literal. An expression the compiler cannot type is accepted.
+Not checked: indirect calls, comparisons as a type error, bitwise mixes of pointers, `mut` used as a permission, and array or struct return types. An untyped `let x = e` infers `i64` from an integer, including a narrow load, the pointer type from a pointer, and an address from `malloc`. It does not infer a struct onto that slot: write `let p: Point = ...` or a struct literal. An omitted parameter type and an omitted `->` are `i64`. That default is not inferred from a use: indexing an untyped parameter does not make it `*i64`. An expression the compiler cannot type is accepted.
 
 ## Built-ins (hosted mode)
 
@@ -410,9 +441,10 @@ Not checked: indirect calls, comparisons as a type error, bitwise mixes of point
 | `print(s)`, `println(s)` | write a string literal or a NUL-terminated buffer to stdout (`println` adds `\n`) |
 | `print_int(n)` | write a signed decimal integer |
 | `strlen(s)`, `strcmp(a, b)`, `strcpy(dst, src)` | C-style string helpers |
-| `malloc(n)`, `free(p)` | memory from `mmap`/`munmap` |
+| `malloc(n)`, `free(p)` | memory from `mmap`/`munmap`. `free` of a null pointer returns 0 |
 | `open(path, flags[, mode])`, `read(fd, buf, n)`, `write(fd, buf, n)`, `close(fd)` | Linux syscalls; default mode is `0644` |
 | `syscall6(nr, a1, ..., a6)` | any Linux syscall |
+| `vec_push(v, x)` | append one element to a local `vec` and return the new length. See Vectors and owning pointers |
 | `exit(code)` | terminate the process |
 | `thread_spawn(fn, stack_top, tid)` | Linux `clone` (syscall 56). See Hosted threads |
 | `thread_join(tid)` | wait until the kernel stores 0 in that word |
@@ -594,7 +626,7 @@ The regression suite compares the hexdump at `-O0` and `-O2`. When `qemu-system-
 
 ## Known limitations
 
-- `i64` and `u64` arithmetic is 64-bit two's complement and wraps. `u8`, `u16`, `u32`, `i8`, `i16`, and `i32` truncate after the operator, as described under Type checking. Pointer indexing is not bounds-checked. A `[]T` index is, in hosted code; `s.ptr[i]` and `unsafe` are not.
+- `i64` and `u64` arithmetic is 64-bit two's complement and wraps. `u8`, `u16`, `u32`, `i8`, `i16`, and `i32` truncate after the operator, as described under Type checking. Pointer indexing is not bounds-checked. A `[]T` index is, in hosted code; `s.ptr[i]` and `unsafe` are not. A `vec` index checks the length the same way. `vec T` and `own *T` are hosted locals. They are not parameters, returns, globals, or struct fields. An owning pointer is not copied, reassigned, or returned. A `vec` is not copied into a `[]T` except by `for x in`, which copies the pointer and the length at entry. A `vec` element is an integer or a pointer. A drop placed after an explicit `return` is still emitted and is not executed. Passing an owning pointer to `*T` does not move it.
 - Direct calls check the function name, the argument count, and argument types. Assignments and integer or pointer returns are checked. Indirect calls are not. `*i8` and `*u8` match. An integer literal converts to any pointer; a variable does not, without `as`.
 - Struct fields use their real width. Ordinary structs add natural alignment; `packed struct` does not, unless `align(N)` says so. `align(N)` is a power of two from 1 to 4096 on a struct, a field, or a global. Locals are not aligned that way. An array field is `N * sizeof(T)` or a compile error. `sizeof` and `offsetof` are compile-time integers. A narrow integer operator truncates to that type; `i64` and `u64` stay 64-bit. Scalar locals and globals still occupy 8-byte slots. Struct assignment copies the whole value; it does not assign field by field in the source. Nested fields (`r.b.x`) use the real offset.
 - Indexing a local array in hosted mode inserts a bounds check that exits the process. `--freestanding`, `--flat`, and `--boot` omit that check unless `--checked`. `unsafe { a[i] }` omits it. `for i in 0..N` omits it when the array has at least `N` elements, including under `--checked`. `bits 16` and `bits 32` do not insert it. Pointer indexing is never checked. A slice `s[i]` is checked in hosted code and writes `index out of range` before exiting with code 1. `--freestanding`, `--flat`, and `--boot` omit that check unless `--checked`. `unsafe { s[i] }` and `s.ptr[i]` omit it in every mode. `for x in s` and `for i in 0..s.len` omit it when the bound is the loop itself.

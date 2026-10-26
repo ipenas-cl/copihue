@@ -1,0 +1,4 @@
+tests/errors/easy_ret.lap:4:12: error: return value: expected i64, found *u8
+      4 |     return p;
+        |            ^
+1 error, compilation failed
