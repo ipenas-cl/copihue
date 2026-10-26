@@ -1,0 +1,7 @@
+trait Ord { fn lt(a: Self, b: Self) -> bool }
+
+impl Ord for i64 {
+    fn lt(a: Self, b: i32) -> bool { return a < b; }
+}
+
+fn main() -> i64 { return 0; }

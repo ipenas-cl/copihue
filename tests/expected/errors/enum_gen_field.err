@@ -1,0 +1,4 @@
+tests/errors/enum_gen_field.lap:4:6: error: an enum field must be an integer or a pointer
+      4 | fn f(x: Option<Point>) -> i64 { return 0; }
+        |      ^
+1 error, compilation failed

@@ -1,0 +1,5 @@
+enum Option<T> { None, Some(T) }
+
+fn f(x: Option) -> i64 { return 0; }
+
+fn main() -> i64 { return 0; }

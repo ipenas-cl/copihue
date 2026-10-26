@@ -1,0 +1,4 @@
+tests/errors/trait_unknown.lap:1:4: error: unknown trait 'Nope'
+      1 | fn max<T: Nope>(a: T, b: T) -> T {
+        |    ^
+1 error, compilation failed

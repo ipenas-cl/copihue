@@ -1,0 +1,4 @@
+tests/errors/trait_bound.lap:17:12: error: type 'Point' does not implement 'Ord'
+     17 |     return max(p, q);
+        |            ^
+1 error, compilation failed

@@ -2,6 +2,8 @@
 
 **Esto es una propuesta. No está implementado.** El compilador de este árbol, cuando se escribió la propuesta, era Copihue 0.19.0 (`compiler/bootstrap-c/copihue.c`).
 
+**Corte 0.41.0.** Un trait (`trait Ord`, `impl Ord for i64`, `fn max<T: Ord>`) se monomorfiza: la copia llama al símbolo del impl. `x.f()` es `f(x)`. `enum Option<T>` existe si el campo es un entero o un puntero. El detalle está en [`DESIGN_TRAITS.md`](DESIGN_TRAITS.md).
+
 **Corte 0.40.0.** Una función o un struct puede ser genérico (`fn max<T>`, `struct Par<A, B>`). El compilador emite una copia por combinación usada. El detalle está en [`DESIGN_GENERICS.md`](DESIGN_GENERICS.md).
 
 **Corte 0.39.0.** Un enum se devuelve por un puntero oculto en `rdi` (no por `rax:rdx`: `Pair` mide 24) y se pasa por valor. `match` acepta `_`, un bloque, un global y un campo (`s.o` y `p->o`). En hosted `-O2` la etiqueta se carga una vez en `rbx`. El detalle está en [`DESIGN_ENUMS.md`](DESIGN_ENUMS.md).
