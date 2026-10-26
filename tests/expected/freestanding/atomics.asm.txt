@@ -1,0 +1,62 @@
+section .data
+cell: dq 0
+section .text
+bump:
+    push rbp
+    mov rbp, rsp
+    sub rsp, __frame_bump
+    lea rax, [cell]
+    mov [rbp-8], rax
+    mov rax, [rbp-8]
+    push rax
+    mov rax, 1
+    pop r11
+    mov qword [r11], rax
+    xor eax, eax
+    mov rax, [rbp-8]
+    push rax
+    mov rax, 2
+    pop r11
+    lock xadd qword [r11], rax
+    mov rax, [rbp-8]
+    push rax
+    mov rax, 3
+    pop r11
+    mov r10, rax
+    lock xadd qword [r11], rax
+    add rax, r10
+    mov rax, [rbp-8]
+    push rax
+    mov rax, 4
+    pop r11
+    xchg qword [r11], rax
+    mov rax, [rbp-8]
+    push rax
+    mov rax, 4
+    push rax
+    mov rax, 5
+    mov r10, rax
+    pop rax
+    pop r11
+    lock cmpxchg qword [r11], r10
+    mov rax, [rbp-8]
+    push rax
+    mov rax, 6
+    pop r11
+    xchg qword [r11], rax
+    xor eax, eax
+    mfence
+    xor eax, eax
+    pause
+    xor eax, eax
+    mov rax, [rbp-8]
+    push rax
+    pop r11
+    mov rax, qword [r11]
+    mfence
+    leave
+    ret
+    xor rax, rax
+    leave
+    ret
+__frame_bump equ 80

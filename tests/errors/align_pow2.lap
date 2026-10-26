@@ -1,0 +1,7 @@
+align(3) let bad: u64;
+align(8192) let worse: u64;
+
+fn main() -> i64 {
+    align(64) let local: u64;
+    return 0;
+}

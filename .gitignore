@@ -60,6 +60,7 @@ a.out
 
 # Benchmark binaries and assembler leftovers
 bench/out/
+bench/lowlat/out/
 bench/src/*.cmi
 bench/src/*.cmx
 bench/src/*.s

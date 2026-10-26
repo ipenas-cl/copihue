@@ -1,0 +1,45 @@
+// Two counters on distinct 64-byte lines. sizeof and offsetof follow the padding.
+struct Lines {
+    align(64) a: u64,
+    align(64) b: u64,
+}
+
+align(64) struct One {
+    x: u64,
+}
+
+packed struct Mix {
+    a: u8,
+    align(64) b: u64,
+}
+
+align(64) let ga: u64;
+align(64) let gb: u64;
+let box: Lines;
+
+fn main() -> i64 {
+    let pa: *u64 = &ga;
+    let pb: *u64 = &gb;
+    let gap = pb - pa;
+    print_int(offsetof(Lines, a));
+    println("");
+    print_int(offsetof(Lines, b));
+    println("");
+    print_int(sizeof(Lines));
+    println("");
+    print_int(sizeof(One));
+    println("");
+    print_int(offsetof(Mix, b));
+    println("");
+    print_int(sizeof(Mix));
+    println("");
+    print_int(gap);
+    println("");
+    print_int(pa & 63);
+    println("");
+    print_int(pb & 63);
+    println("");
+    print_int((&box) & 63);
+    println("");
+    return 0;
+}
