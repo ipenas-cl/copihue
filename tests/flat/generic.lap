@@ -1,0 +1,14 @@
+// also-o2
+fn max<T>(a: T, b: T) -> T {
+    if (a > b) { return a; }
+    return b;
+}
+
+fn _start() -> i64 {
+    let n: i32 = max<i32>(3, 1);
+    while (1) {
+        cli();
+        hlt();
+    }
+    return n;
+}

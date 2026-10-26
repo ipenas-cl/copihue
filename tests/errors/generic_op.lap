@@ -1,0 +1,12 @@
+struct Point { x: i64, y: i64 }
+
+fn add<T>(a: T, b: T) -> T {
+    return a + b;
+}
+
+fn main() -> i64 {
+    let a = Point { x: 1, y: 2 };
+    let b = Point { x: 3, y: 4 };
+    let c = add(a, b);
+    return c.x;
+}

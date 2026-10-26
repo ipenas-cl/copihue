@@ -1,0 +1,4 @@
+tests/errors/generic_none.lap:6:12: error: cannot infer type argument 'T' for 'make'
+      6 |     return make();
+        |            ^
+1 error, compilation failed

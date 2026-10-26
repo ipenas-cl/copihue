@@ -345,6 +345,66 @@ elif grep -q "^COMPILE ERROR" "$WORK/mlink0"; then
 else
   check "module link" "tests/expected/tests/link/module.out" "$WORK/mlink0"
 fi
+# A generic function is one strong symbol per instantiation (`max$1$i32`).
+# The template is not a symbol. The caller object externs that spelling.
+genlink_run() {
+  local opt=$1
+  ( cd "$WORK" && rm -f gen_prog gen_max.o gen_main.o &&
+    "$CC" "$opt" -c -o gen_max.o "$ROOT/tests/link/parts/gen_max.lap" &&
+    "$CC" "$opt" -c -o gen_main.o "$ROOT/tests/link/parts/gen_main.lap" &&
+    ld gen_max.o gen_main.o -o gen_prog ) >/dev/null 2>err.txt || {
+      echo "COMPILE ERROR"; sed "s|$ROOT/||g" "$WORK/err.txt"; return; }
+  ( cd "$WORK" && ./gen_prog </dev/null; echo "exit=$?" ) | mask
+}
+genlink_run -O0 > "$WORK/glink0"
+if ! nm "$WORK/gen_max.o" | grep -F -q ' T max$1$i32' || \
+   nm "$WORK/gen_max.o" | awk '$3=="max"{found=1} END{exit !found}' || \
+   nm "$WORK/gen_max.o" | grep -q ' _start$' || \
+   ! nm -u "$WORK/gen_main.o" | grep -F -q ' max$1$i32' || \
+   ! nm "$WORK/gen_main.o" | grep -q ' T main' || \
+   ! nm "$WORK/gen_main.o" | grep -q ' T _start'; then
+  fail=$((fail+1)); failed+=("generic link symbols"); echo "FAIL generic link symbols"; nm "$WORK/gen_max.o"; nm "$WORK/gen_main.o"
+else
+  pass=$((pass+1))
+fi
+genlink_run -O2 > "$WORK/glink2"
+if ! cmp -s "$WORK/glink0" "$WORK/glink2"; then
+  fail=$((fail+1)); failed+=("generic link (-O0 vs -O2)"); echo "FAIL generic link: -O0 and -O2 differ"; diff "$WORK/glink0" "$WORK/glink2" | head -10
+elif grep -q "^COMPILE ERROR" "$WORK/glink0"; then
+  fail=$((fail+1)); failed+=("generic link"); echo "FAIL generic link:"; cat "$WORK/glink0"
+else
+  check "generic link" "tests/expected/tests/link/generic.out" "$WORK/glink0"
+fi
+# The same instantiation inside a module is `mem__max$1$i32`.
+mgenlink_run() {
+  local opt=$1
+  ( cd "$WORK" && rm -f mgen_prog mgen_def.o mgen_use.o &&
+    "$CC" "$opt" -c -o mgen_def.o "$ROOT/tests/link/parts/gen_mem.lap" &&
+    "$CC" "$opt" -c -o mgen_use.o \
+      "$ROOT/tests/link/parts/gen_mem_use.lap" "$ROOT/tests/link/parts/gen_mem_main.lap" &&
+    ld mgen_def.o mgen_use.o -o mgen_prog ) >/dev/null 2>err.txt || {
+      echo "COMPILE ERROR"; sed "s|$ROOT/||g" "$WORK/err.txt"; return; }
+  ( cd "$WORK" && ./mgen_prog </dev/null; echo "exit=$?" ) | mask
+}
+mgenlink_run -O0 > "$WORK/mglink0"
+if ! nm "$WORK/mgen_def.o" | grep -F -q ' T mem__max$1$i32' || \
+   nm "$WORK/mgen_def.o" | grep -q ' _start$' || \
+   ! nm -u "$WORK/mgen_use.o" | grep -F -q ' mem__max$1$i32' || \
+   ! nm "$WORK/mgen_use.o" | grep -q ' T mem__call_it' || \
+   ! nm "$WORK/mgen_use.o" | grep -q ' T main' || \
+   ! nm "$WORK/mgen_use.o" | grep -q ' T _start'; then
+  fail=$((fail+1)); failed+=("generic module link symbols"); echo "FAIL generic module link symbols"; nm "$WORK/mgen_def.o"; nm "$WORK/mgen_use.o"
+else
+  pass=$((pass+1))
+fi
+mgenlink_run -O2 > "$WORK/mglink2"
+if ! cmp -s "$WORK/mglink0" "$WORK/mglink2"; then
+  fail=$((fail+1)); failed+=("generic module link (-O0 vs -O2)"); echo "FAIL generic module link: -O0 and -O2 differ"; diff "$WORK/mglink0" "$WORK/mglink2" | head -10
+elif grep -q "^COMPILE ERROR" "$WORK/mglink0"; then
+  fail=$((fail+1)); failed+=("generic module link"); echo "FAIL generic module link:"; cat "$WORK/mglink0"
+else
+  check "generic module link" "tests/expected/tests/link/generic_mod.out" "$WORK/mglink0"
+fi
 if ( cd "$WORK" && "$CC" -c --flat 0x10000 -o flat_bad.o "$ROOT/tests/link/parts/mod_add.lap" >/dev/null 2>err.txt ); then
   fail=$((fail+1)); failed+=("link -c --flat"); echo "FAIL link -c --flat: compiled"
 elif ! grep -q "cannot be combined with --flat or --boot" "$WORK/err.txt"; then

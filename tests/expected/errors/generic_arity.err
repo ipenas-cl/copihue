@@ -1,0 +1,4 @@
+tests/errors/generic_arity.lap:4:9: error: struct 'Par' takes 2 type arguments, not 1
+      4 |     let x: Par<i32>;
+        |         ^
+1 error, compilation failed

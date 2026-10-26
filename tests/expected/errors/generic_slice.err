@@ -1,0 +1,4 @@
+tests/errors/generic_slice.lap:6:16: error: a type argument cannot be a slice, an array, a vec, or an owning pointer
+      6 |     let x = id<[]i32>(0);
+        |                ^
+1 error, compilation failed

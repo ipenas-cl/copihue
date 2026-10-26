@@ -1,0 +1,8 @@
+module mem;
+
+pub struct Cell<T> { v: T }
+
+pub fn pick<T>(a: T, b: T) -> T {
+    if (a > b) { return a; }
+    return b;
+}

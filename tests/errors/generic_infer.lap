@@ -1,0 +1,10 @@
+fn max<T>(a: T, b: T) -> T {
+    if (a > b) { return a; }
+    return b;
+}
+
+fn main() -> i64 {
+    let a: i32 = 1;
+    let b: i64 = 2;
+    return max(a, b);
+}
