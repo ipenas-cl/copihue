@@ -1,0 +1,47 @@
+// La hebra publicadora escribe el latido y después se detiene.
+// Main espera ese alto y luego exige 100 lecturas iguales.
+// El alto es una cuenta, no un reloj, para que la salida no dependa
+// del planificador. phase publica el alto y el acuse.
+let volatile hb: u64 = 0;
+let volatile phase: u64 = 0;
+let volatile tid: u32 = 0;
+let stack: [u8; 65536];
+
+fn worker() -> i64 {
+    let i = 1;
+    while (i <= 1000) {
+        atomic_store_release(&hb, i);
+        i = i + 1;
+    }
+    atomic_store_release(&phase, 1);
+    while (atomic_load_acquire(&phase) != 2) { cpu_pause(); }
+    return 0;
+}
+
+fn main() -> i32 {
+    let miss = 0;
+    let quiet = 0;
+    let cur = 0;
+    thread_spawn(&worker, stack + 65536, &tid);
+    while (atomic_load_acquire(&phase) == 0) { cpu_pause(); }
+    cur = atomic_load_acquire(&hb);
+    while (quiet < 100) {
+        let c2 = atomic_load_acquire(&hb);
+        if (c2 == cur) {
+            quiet = quiet + 1;
+        } else {
+            miss = miss + 1;
+            cur = c2;
+            quiet = 0;
+        }
+    }
+    atomic_store_release(&phase, 2);
+    thread_join(&tid);
+    print("beat ");
+    print_int(cur);
+    println("");
+    print("miss ");
+    print_int(miss);
+    println("");
+    return 0;
+}
