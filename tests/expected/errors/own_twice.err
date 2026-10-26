@@ -1,0 +1,4 @@
+tests/errors/own_twice.lap:7:10: error: an owning pointer cannot be moved twice
+      7 |     take(p, p);
+        |          ^
+1 error, compilation failed

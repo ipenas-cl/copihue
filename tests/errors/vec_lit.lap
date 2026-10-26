@@ -1,0 +1,7 @@
+struct Point { x: i64 }
+
+fn main() -> i64 {
+    let v: vec Point;
+    vec_push(v, Point { x: 1 });
+    return 0;
+}

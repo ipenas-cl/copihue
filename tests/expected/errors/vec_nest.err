@@ -1,0 +1,4 @@
+tests/errors/vec_nest.lap:2:12: error: a vec element cannot be a slice, an array, a vec, or an owning pointer
+      2 |     let v: vec []i64;
+        |            ^
+1 error, compilation failed

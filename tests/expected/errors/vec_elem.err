@@ -1,4 +1,4 @@
-tests/errors/vec_elem.lap:4:9: error: a vec element must be an integer or a pointer
-      4 |     let v: vec Point;
+tests/errors/vec_elem.lap:2:9: error: a vec element must be an integer, a pointer, or a struct
+      2 |     let v: vec NoSuch;
         |         ^
 1 error, compilation failed

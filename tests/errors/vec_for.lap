@@ -1,0 +1,9 @@
+packed struct Cell { a: i64, b: i32 }
+
+fn main() -> i64 {
+    let v: vec Cell;
+    for x in v {
+        return 0;
+    }
+    return 0;
+}
