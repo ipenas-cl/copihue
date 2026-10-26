@@ -1,0 +1,113 @@
+// -O2 turns `return expr + self(args)` into an accumulator and a jump.
+// `return self(args) + expr` does too when expr cannot observe the call.
+// `*` stays a call. -O0 and -O2 print the same lines, in the same order.
+
+fn fib(n: i64) -> i64 {
+    if (n < 2) { return n; }
+    return fib(n - 1) + fib(n - 2);
+}
+
+fn sumto(n: i64) -> i64 {
+    if (n <= 0) { return 0; }
+    return n + sumto(n - 1);
+}
+
+fn sumr(n: i64) -> i64 {
+    if (n <= 0) { return 0; }
+    return sumr(n - 1) + n;
+}
+
+fn sumk(n: i64) -> i64 {
+    let k = n;
+    if (n <= 0) { return 0; }
+    return sumk(n - 1) + k;
+}
+
+fn pair(a: i64, b: i64) -> i64 {
+    if (a <= 0) { return b; }
+    return b + pair(a - 1, a);
+}
+
+fn wrap2(n: i64) -> i64 {
+    if (n <= 0) { return 0; }
+    return 9223372036854775807 + wrap2(n - 1);
+}
+
+fn bump(n: i64) -> i64 {
+    print_int(n);
+    println("");
+    return n;
+}
+
+fn down(n: i64) -> i64 {
+    if (n <= 0) { return 0; }
+    return bump(n) + down(n - 1);
+}
+
+fn up(n: i64) -> i64 {
+    if (n <= 0) { return 0; }
+    return up(n - 1) + bump(n);
+}
+
+let g: i64 = 0;
+
+fn see(n: i64) -> i64 {
+    if (n <= 0) { return 0; }
+    g = g + 1;
+    return see(n - 1) + g;
+}
+
+fn fact(n: i64) -> i64 {
+    if (n <= 1) { return 1; }
+    return n * fact(n - 1);
+}
+
+fn factb(n: i64) -> i64 {
+    if (n <= 1) { return 1; }
+    return factb(n - 1) * bump(n);
+}
+
+fn narrow(n: i32) -> i32 {
+    if (n <= 0) { return 0; }
+    return n + narrow(n - 1);
+}
+
+fn main() -> i64 {
+    print_int(fib(10));
+    println("");
+    print_int(fib(0));
+    println("");
+    print_int(fib(1));
+    println("");
+    print_int(sumto(10));
+    println("");
+    print_int(sumto(0));
+    println("");
+    print_int(sumr(10));
+    println("");
+    print_int(sumk(4));
+    println("");
+    print_int(pair(3, 10));
+    println("");
+    print_int(wrap2(1) == 9223372036854775807);
+    println("");
+    print_int(wrap2(2) == -2);
+    println("");
+    print_int(wrap2(3) == 9223372036854775805);
+    println("");
+    print_int(down(3));
+    println("");
+    print_int(up(3));
+    println("");
+    print_int(see(3));
+    println("");
+    print_int(g);
+    println("");
+    print_int(fact(5));
+    println("");
+    print_int(factb(4));
+    println("");
+    print_int(narrow(10));
+    println("");
+    return 0;
+}
