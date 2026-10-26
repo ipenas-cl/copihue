@@ -1,0 +1,22 @@
+tests/errors/slice.lap:2:5: error: a slice cannot be a struct field
+      2 |     s: []i64
+        |     ^
+tests/errors/slice.lap:5:4: error: a slice cannot be returned
+      5 | fn give() -> []i64 {
+        |    ^
+tests/errors/slice.lap:9:9: error: an array parameter is a pointer or a slice; use *T or []T
+      9 | fn take(a: [i64; 2]) -> i64 {
+        |         ^
+tests/errors/slice.lap:15:20: error: expected []i64, found [u8; 4]
+     15 |     let s: []i64 = buf;
+        |                    ^
+tests/errors/slice.lap:16:11: error: slice field 'len' is read-only
+     16 |     s.len = 1;
+        |           ^
+tests/errors/slice.lap:18:29: error: negative slice length
+     18 |     let n: []i64 = slice(p, -1);
+        |                             ^
+tests/errors/slice.lap:19:9: error: a slice is initialized from an array, a slice, or slice()
+     19 |     let q: []i64 = 1;
+        |         ^
+7 errors, compilation failed

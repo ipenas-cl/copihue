@@ -2,6 +2,21 @@
 
 Todos los cambios importantes del proyecto.
 
+## [0.34.0] - 2026-10-26
+
+### Added
+- `[]T` is a slice: a pointer at offset 0 and an `i64` length at offset 8, 16 bytes. `T` is an integer, a pointer, or a struct. `sizeof` of a slice is 16. `let s: []T = arr` converts a local or global `[T; N]` of the same element. `let s: []T = slice(p, n)` builds one from a pointer and a length. `let s: []T;` is a null pointer and length 0. `s = t` copies the 16 bytes. `s.ptr` is `*T` and `s.len` is `i64`; assigning either is `slice field 'ptr' is read-only` (or `'len'`). A parameter is the address of those 16 bytes and the callee copies them. The design is `docs/DESIGN_SLICES.md`.
+- `s[i]` and `s[i] = v` compare the index as unsigned with the length. A negative index fails. On failure the program writes `index out of range` and a newline to fd 2 and exits with code 1. There is no libc. That is the hosted default at `-O0` and `-O2`. `--freestanding`, `--flat`, and `--boot` do not insert it. `--checked` asks for it in those modes and does not turn on the local-array check. `unsafe { ... }` skips the slice check and the hosted local-array check. `s.ptr[i]` is a pointer and never checks.
+- `for x in e` walks a slice or an array from 0 to its length and loads the element without a check. `for i in start..end` is exclusive. The check of `s[i]` is omitted when the range is `0..s.len` and the body does not assign `i` or the slice. `a[i]` in `for i in 0..N` is omitted when `N` is a literal, the array has at least `N` elements, and the body does not assign `i`. A shorter array, another index, or an assignment of `i` keeps the check. This holds at `-O0` and at `-O2`. `for (init; cond; step)` is unchanged.
+- A slice field, a slice return, a slice element that is a slice or an array, and `[]T` in `bits 16` or `bits 32` are compile errors (`a slice cannot be a struct field`, `a slice cannot be returned`, `a slice element must be an integer, a pointer, or a struct`, `[]T is a 64-bit value`). An array parameter is `an array parameter is a pointer or a slice; use *T or []T`. A negative literal length is `negative slice length`. A hosted non-literal negative length, and the same length with `--checked`, writes `negative slice length` and exits 1.
+- `tests/lang/slice.lap` prints 4, 10, 20, 100, 100, 100, 100, 4, 0, 30, 40, 1, 16 at `-O0` and `-O2`. `tests/lang/slice_oob.lap` prints `index out of range` and exits 1. `tests/lang/slice_neg.lap` prints `negative slice length` and exits 1. `tests/errors/slice.lap` is the seven diagnostics above that apply to a field, a return, an array parameter, a mismatched array, a write of `.len`, a negative literal, and a bad initializer. `tests/freestanding/slice.lap` assembles with no `syscall` and no slice trap, at `-O0` and `-O2`, and is not booted. `tests/link/parts/slice_chk.lap` is not a program test: hosted `-O0` and `-O2` each emit three `jae .Lslice_trap_`, `--freestanding` and `--flat` emit none and no `syscall`, and `--checked` brings the three traps back.
+
+### Changed
+- Language version is 0.34.0, on top of 0.33.1. The 0.33.1 pointer registers and immediate field stores stay.
+
+### Measured
+- `bench/slice/` is the same `while (j < n)` over 1024 `i64`s, 100000 times, with `s[j]` and with `s.ptr[j]`. It is not part of `make test`. The sum is 52377600000. On this machine, 2026-10-26T02:51:32Z, `taskset -c 0`, one warmup and seven runs, `python3` `time.perf_counter`. Milliseconds, median (min–max). `-O2` checked 59.9 (59.5–60.8), unchecked 53.1 (51.9–53.6). Those ranges do not overlap. `-O0` checked 134.7 (134.1–136.1), unchecked 134.7 (133.3–136.0). Those ranges overlap. The `-O2` checked loop reloads the length, `cmp`s, and `jae`s to the trap; the unchecked loop does not. Both still reload the pointer.
+
 ## [0.33.1] - 2026-10-26
 
 ### Added

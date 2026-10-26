@@ -1,0 +1,46 @@
+section .data
+section .text
+use:
+    push rbp
+    mov rbp, rsp
+    sub rsp, __frame_use
+    mov rax, [rdi+0]
+    mov [rbp-16], rax
+    mov rax, [rdi+8]
+    mov [rbp-8], rax
+    mov rax, 0
+    push rax
+    mov rbx, [rbp-16]
+    pop rax
+    imul rax, 8
+    add rbx, rax
+    mov rax, [rbx]
+    leave
+    ret
+    xor rax, rax
+    leave
+    ret
+__frame_use equ 80
+boot:
+    push rbp
+    mov rbp, rsp
+    sub rsp, __frame_boot
+    mov rax, 1
+    mov [rbp-16], rax
+    mov rax, 2
+    mov [rbp-8], rax
+    lea rax, [rbp-16]
+    lea rax, [rbp-16]
+    mov [rbp-32], rax
+    mov rax, 2
+    mov [rbp-24], rax
+    lea rax, [rbp-32]
+    push rax
+    pop rdi
+    call use
+    leave
+    ret
+    xor rax, rax
+    leave
+    ret
+__frame_boot equ 96

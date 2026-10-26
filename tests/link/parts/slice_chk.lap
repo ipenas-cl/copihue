@@ -1,0 +1,69 @@
+fn checked(s: []i64, i: i64) -> i64 {
+    return s[i];
+}
+
+fn via_ptr(s: []i64, i: i64) -> i64 {
+    return s.ptr[i];
+}
+
+fn via_unsafe(s: []i64, i: i64) -> i64 {
+    unsafe {
+        return s[i];
+    }
+}
+
+fn for_elem(s: []i64) -> i64 {
+    let t: i64 = 0;
+    for x in s {
+        t = t + x;
+    }
+    return t;
+}
+
+fn for_len(s: []i64) -> i64 {
+    let t: i64 = 0;
+    for i in 0..s.len {
+        t = t + s[i];
+    }
+    return t;
+}
+
+fn for_arr() -> i64 {
+    let a: [i64; 4] = [1, 2, 3, 4];
+    let t: i64 = 0;
+    for i in 0..4 {
+        t = t + a[i];
+    }
+    return t;
+}
+
+fn short_arr() -> i64 {
+    let a: [i64; 2] = [1, 2];
+    let t: i64 = 0;
+    for i in 0..4 {
+        t = t + a[i];
+    }
+    return t;
+}
+
+fn step_i(s: []i64) -> i64 {
+    let t: i64 = 0;
+    for i in 0..s.len {
+        t = t + s[i];
+        i = i + 1;
+    }
+    return t;
+}
+
+fn rebind(s: []i64, other: []i64) -> i64 {
+    let t: i64 = 0;
+    for i in 0..s.len {
+        t = t + s[i];
+        s = other;
+    }
+    return t;
+}
+
+fn _start() -> i64 {
+    return 0;
+}

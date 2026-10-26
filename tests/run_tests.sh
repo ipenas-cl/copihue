@@ -408,6 +408,40 @@ else
   pass=$((pass+1))
 fi
 
+# []T. Hosted checks s[i], a for that assigns the index, and a for that
+# assigns the slice (three jae .Lslice_trap_). for x in, for i in 0..s.len,
+# for i in 0..4 on an array of at least 4 elements, s.ptr[i], and unsafe
+# add none. One shorter array keeps the local-array trap (three mentions of
+# one .Lbounds_error_). --freestanding and --flat omit the slice trap, and
+# do not emit syscall, unless --checked.
+slice_traps() { grep -c 'jae \.Lslice_trap_' "$1" || true; }
+if ! ( cd "$WORK" &&
+       "$CC" -O0 -S -o slice0.asm "$ROOT/tests/link/parts/slice_chk.lap" >/dev/null 2>err.txt &&
+       "$CC" -O2 -S -o slice2.asm "$ROOT/tests/link/parts/slice_chk.lap" >/dev/null 2>>err.txt &&
+       "$CC" --freestanding -S -o slicefs.asm "$ROOT/tests/link/parts/slice_chk.lap" >/dev/null 2>>err.txt &&
+       "$CC" --freestanding --checked -S -o slicefsc.asm "$ROOT/tests/link/parts/slice_chk.lap" >/dev/null 2>>err.txt &&
+       "$CC" --flat 0x10000 -S -o sliceflat.asm "$ROOT/tests/link/parts/slice_chk.lap" >/dev/null 2>>err.txt &&
+       "$CC" --flat 0x10000 --checked -S -o sliceflatc.asm "$ROOT/tests/link/parts/slice_chk.lap" >/dev/null 2>>err.txt ); then
+  fail=$((fail+1)); failed+=("slice bounds asm"); echo "FAIL slice bounds asm:"; cat "$WORK/err.txt"
+else
+  b0=$(grep -c 'Lbounds_error_' "$WORK/slice0.asm" || true)
+  b2=$(grep -c 'Lbounds_error_' "$WORK/slice2.asm" || true)
+  bfs=$(grep -c 'Lbounds_error_' "$WORK/slicefs.asm" || true)
+  if [ "$(slice_traps "$WORK/slice0.asm")" != 3 ] || [ "$(slice_traps "$WORK/slice2.asm")" != 3 ] || \
+     [ "$b0" != 3 ] || [ "$b2" != 3 ] || [ "$bfs" != 0 ] || \
+     [ "$(slice_traps "$WORK/slicefs.asm")" != 0 ] || \
+     [ "$(slice_traps "$WORK/sliceflat.asm")" != 0 ] || \
+     grep -qE '^[[:space:]]*syscall' "$WORK/slicefs.asm" || \
+     grep -qE '^[[:space:]]*syscall' "$WORK/sliceflat.asm" || \
+     [ "$(slice_traps "$WORK/slicefsc.asm")" != 3 ] || \
+     [ "$(slice_traps "$WORK/sliceflatc.asm")" != 3 ]; then
+    fail=$((fail+1)); failed+=("slice bounds asm"); echo "FAIL slice bounds asm: trap counts"
+    echo "o0=$(slice_traps "$WORK/slice0.asm") o2=$(slice_traps "$WORK/slice2.asm") bounds=$b0/$b2 fs=$(slice_traps "$WORK/slicefs.asm") fsc=$(slice_traps "$WORK/slicefsc.asm") flat=$(slice_traps "$WORK/sliceflat.asm") flatc=$(slice_traps "$WORK/sliceflatc.asm")"
+  else
+    pass=$((pass+1))
+  fi
+fi
+
 rm -f "$CC"
 echo
 echo "passed: $pass  failed: $fail"

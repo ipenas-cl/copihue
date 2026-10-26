@@ -1,0 +1,11 @@
+// also-o2
+// A slice index in --freestanding does not trap and does not emit syscall.
+fn use(s: []i64) -> i64 {
+    return s[0];
+}
+
+fn boot() -> i64 {
+    let buf: [i64; 2] = [1, 2];
+    let s: []i64 = buf;
+    return use(s);
+}
