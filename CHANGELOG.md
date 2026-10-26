@@ -2,6 +2,20 @@
 
 Todos los cambios importantes del proyecto.
 
+## [0.31.1] - 2026-10-26
+
+### Added
+- Hosted 64-bit `-O2` rewrites the loop `i = 0; while (i < lim) { sum = sum + a[i]; b[i] = (b[i] + imm) & 255; i = i + 1; }` when `lim` is a proved multiple of 16 inside both lengths and `a` is `u8`. The old bytes are summed with SSE2 `psadbw` and the addend's low byte is `paddb`. `i` becomes `lim`. An `i8` sum stays scalar. `(e) as u8` around the add is the same low byte. A byte store `a[i] = (a[i] + imm) & 255`, `a[i] = a[i] + imm`, or `dst[i] = src[i] + imm` that is not that loop is `add byte` when both sides are the same array, and `movzx` / `add al` / `mov byte` when they differ. The two `movzx` that follow a narrow add and a narrow mask are not emitted for that store.
+- `tests/lang/o2_mem.lap` adds a 16-byte sum-then-increment (same array and two arrays), a 15-byte `add byte`, a cross-array `dst[i] = src[i] + 1`, and `add byte` of 200. `-O0` and `-O2` print the same lines. The `-O2` assembly must also contain `psadbw` and `add byte`.
+- `bench/src/copy.lap`, `fill.lap`, `hash.lap`, and `parse.lap` store the byte with `as u8`. 0.31.0 rejected the wider integer. The bytes are the same.
+
+### Changed
+- Language version is 0.31.1, on top of 0.31.0. `-O0`, `--freestanding`, `--flat`, `--boot`, and `bits 16` / `bits 32` do not take the new rewrites. `fill`, `list`, `hash`, `sort`, `fold`, `chain`, `parse`, and `fib` keep the 0.31.0 instruction stream aside from the version line and, where a bench only needed `as u8` on the setup store, that cast.
+
+### Not shipped
+- The `fib` prologue stayed 16 instructions. Placing `fib(n - 2)` before reusing `r12` for `fib(n - 1)` removes the second callee-saved register and the alignment pad and still makes two calls. On this machine, one warmup and seven runs, `taskset -c 0`: 0.31.0 was 393, 393, 393, 393, 393, 393, 394 (median 393) and the reuse form was 393, 394, 394, 394, 394, 396, 397 (median 394). That overlaps 0.31.0 and the 0.30.1 window 392.7–394.0. gcc `-O2` still splits even and odd arguments and makes one recursive call; that changes the call count and is not emitted.
+- `parse` stays `imul`. Four programs with the same `n` and `reps`, same method: the real loop 22 ms (22–22); load, compare, and `v = v * 10 + 1` 22 ms (22–24); load, compare, and `v = v + 1` 22 ms (22–23); nine dependent `imul`s and a reset, with no byte load, 10 ms (10–14). Dropping the `imul` does not move the per-byte loop. The load and the compare are the cost that shows up, and no rewrite of that loop was shown faster on the official bench, so the code stays.
+
 ## [0.31.0] - 2026-10-25
 
 ### Added
