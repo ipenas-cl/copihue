@@ -13,7 +13,7 @@ Todos los cambios importantes del proyecto.
 - Inferring a pointer parameter from an index or a dereference. `fn sumar(datos, n) { return datos[0]; }` is still `cannot index 'datos'`. A load used as an integer does not fix the pointee: a narrower integer still type-checks in a wider destination, `*i8` and `*u8` are the same width, and `*p` of a non-volatile pointer is a 64-bit load. A field does not pick one struct. Declaring `: *T` is the type. `vec` and `own` are still not globals or struct fields. A `vec` is still not a parameter or a return. An indirect call does not move. A second drop after an explicit `return` is still emitted and is not executed. `let q: own *T = p` does not move; it is still a copy error. Reassignment still does not free and replace.
 
 ### Changed
-- Language version is 0.37.0, on top of 0.36.0.
+- Language version is 0.37.0, on top of 0.36.1. The 0.36.1 `lock add` and direct field address are unchanged.
 
 ### Measured
 - No timed bench was added to `make test`. `bench/slice` and `bench/lowlat` were not run again.
@@ -22,6 +22,30 @@ Todos los cambios importantes del proyecto.
 - `go` does `let p: own *i64 = give(1); return take(p)` against `let p: *i64 = give(1); let n = take(p); p = 0; return n`. Live bytes: 94 versus 54, a difference of 40. Eight of those are `mov qword [rbp-8], 0` after the pointer is in the argument register and before `call take`. The rest is the exit drop of that now-null local. The explicit `p = 0` is `mov rax, 0` and `mov [rbp-8], rax` and does not free.
 - Hosted `-O2`, `taskset -c 0`, one warmup and seven runs. Window 2026-10-26T05:05:54Z — 2026-10-26T05:05:59Z. Both struct programs print 20000100000. `vec_push` of a packed 12-byte `Cell` (`i64` plus `i32`), 200000 times, then a sum of the fields: samples 3.3, 3.8, 3.7, 3.9, 3.7, 4.0, 3.5 ms, median 3.7 (3.3–4.0). The same growth written with `malloc`, a copy of whole qwords and a byte tail, and `free`: 4.4, 4.1, 4.1, 4.3, 4.3, 4.2, 4.3 ms, median 4.3 (4.1–4.4). The ranges do not overlap. The ratio of the medians is 1.16. The explicit copy is a call; the vec growth is `rep movsb` and the element copy is inlined. The gap is one tenth of a millisecond at the edges (4.0 against 4.1), so this is not a large or stable advantage.
 - The same window, 100000 moves of `take(give(i))`. Both print 4999950000. Owning return and parameter: 354.5, 357.3, 356.0, 356.0, 358.9, 360.0, 360.2 ms, median 357.3 (354.5–360.2). The explicit `*i64` return and `free` in `take`: 361.4, 361.0, 360.4, 362.2, 361.0, 361.1, 349.6 ms, median 361.0 (349.6–362.2). The ranges overlap. The time is `mmap` and `munmap`. The null stores are not visible in the run time.
+
+## [0.36.1] - 2026-10-26
+
+### Added
+- Hosted `-O2` emits a discarded `fetch_add` or `atomic_add` as `lock add`. An addend that fits in a signed 32-bit immediate is immediate (`lock add qword [cell], 1`). When the caller uses the old value or the new value, the instruction stays `lock xadd`. `-O0`, `--freestanding`, `--flat`, and `--boot` keep `lock xadd`.
+- The same mode addresses `&name` and `&name.field` as one memory operand when `name` is a global or a stack slot and not a pointer or an array. A field of a field adds the offsets. A pointer variable and an indexed element still compute the address.
+- `tests/lang/o2_atomic.lap` prints 0, 6, 10, 2, 9 at `-O0` and `-O2`. The `-O2` assembly contains `lock add qword [cell], 1`, `lock add qword [pair], 1`, `lock add qword [pair+8], 2`, and `lock xadd`.
+- `examples/lowlat/vec.lap` pushes `0..99` into an empty `vec i64` and sums the walk. It prints `100 4950 128` (length, sum, capacity). The first growth allocates 4 and later growth doubles.
+- `examples/lowlat/bench/vec.lap`, `vec.cpp`, and `vec.rs` push `0..999999` with no reserve and sum the elements. The line is `499999 500000 1000000`: the sum 499999500000 split into two fields under 9 digits, then the length. C++ is `std::vector`. Rust is `Vec`.
+
+### Changed
+- Language version is 0.36.1, on top of 0.36.0. The 0.36.0 parameter and return inference, `vec`, and `own` are unchanged.
+
+### Measured
+- The counted `fetch_add` loop was reloading the cell (`lea`, `push`, `pop r11`) and doing `mov rax, 1` / `lock xadd`. `xadd` writes `rax`, so the next `mov rax, 1` waits on it. The index already lived in `r12` and the limit was an immediate `cmp`. Nothing in the loop spilled the counter. gcc `-O2` and rustc `-O` emit `lock add [rip], 1` (and unroll). This change does not unroll and does not align the loop.
+- Paired window 2026-10-26T04:44:36Z — 2026-10-26T04:44:44Z, same machine, no `taskset`, one warmup and seven runs, alternating which Copihue binary ran first. Milliseconds, median (min–max). The before binary is 0.35.2. The after binary is this `lock add`. Checksums stayed 8000000.
+- `split` 34.8 (34.6–34.9) to 20.4 (20.3–20.6). The ranges do not overlap. C++ in that window was 21.4 (20.9–21.7) and Rust 21.1 (20.8–21.4). The new maximum is below both minimums.
+- `free` 34.7 (30.1–34.9) to 20.4 (20.4–20.6). C++ 21.3 (21.1–21.4), Rust 21.2 (20.7–21.3). The new maximum is below both minimums.
+- `same` 60.4 (60.2–60.4) to 39.1 (38.8–39.3). C++ 39.7 (39.7–39.8), Rust 39.6 (39.4–39.7). The new maximum is below both minimums. Pinning both threads to cpu 0 is still slower than pinning them apart: `same` stays above `pin` and `free`.
+- `pin` 35.0 (34.7–45.9) to 20.6 (20.3–27.6). The ranges do not overlap. C++ 21.5 (21.4–21.6) and Rust 21.1 (20.7–21.4) overlap the new range.
+- `share` 160.0 (149.8–184.5) to 147.0 (121.9–155.3). The ranges overlap, and the new range overlaps C++ 137.4 (131.2–151.6) and Rust 154.3 (137.5–159.5). The shared line still dominates. The same `lock add` stays, because `split`, `free`, `same`, and `pin` got faster.
+- `examples/lowlat/bench/pool`, `book`, and `match`, and `bench/lowlat` `spsc`, `pool`, `spmc`, `mpmc`, and `tpool`, are the same bytes as 0.36.0, and 0.36.0 is the same bytes as 0.35.2. `watch` is the same bytes too. They were not retimed. The five atomic benches compiled by 0.36.0 are also the same bytes as 0.35.2, and this tree's binaries match the after side of the paired window.
+- `examples/lowlat/RESULTS.md` is the 2026-10-26T04:56:51Z — 2026-10-26T04:57:04Z window. The header prints Copihue 0.36.1. It is not the paired window above. Pool, book, match, and watch are unchanged bytes, so those rows are a new window of the same code. In this window `split`, `same`, and `free` are below both C++ and Rust. `share`, `pin`, and `watch` overlap both.
+- `vec` in that window is 8.1 (7.7–8.4). C++ `std::vector` is 7.7 (7.5–8.3) and the ranges overlap. Rust `Vec` is 5.1 (4.7–5.4). Copihue's minimum is above Rust's maximum. The line is `499999 500000 1000000`. `taskset -c 0`. No reserve on any of the three.
 
 ## [0.36.0] - 2026-10-26
 

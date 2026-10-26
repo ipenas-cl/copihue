@@ -5093,35 +5093,66 @@ static int gen_label_addr(Codegen* cg, AstNode* n) {
     return 1;
 }
 
+static int parse_i64(const char* s, long long* out);
+static int fits_imm32_val(long long v);
+
 // x86-64 atomics. A load is a mov (acquire on x86). seq_cst load adds mfence.
 // A release store is a mov. A seq_cst store is xchg, which locks by itself.
 // fetch_add / atomic_add are lock xadd. swap is xchg. compare_exchange is
 // lock cmpxchg and returns the old value, not a boolean. The pointer is in
 // r11 and the addend or the desired value is in r10. Both are caller-saved,
 // and a local lives there only when no call crosses its range.
-// `&name` of a scalar global or stack slot. Hosted -O2 then uses that
-// address as the memory operand, instead of lea / push / pop r11. A pointer
-// variable stays on the push path: the slot holds the address, not the cell.
-static int atomic_direct_mem(Codegen* cg, AstNode* e, char* buf, int n) {
-    AstNode* v;
-    if (!o2_hosted() || !e || e->type != AST_ADDR_OF || e->child_count < 1) return 0;
-    v = e->children[0];
-    if (!v || v->type != AST_IDENT || !v->name) return 0;
+// `&name` or `&name.field` of a global or a stack slot. Hosted -O2 then uses
+// that address as the memory operand, instead of lea / push / pop r11.
+// A pointer variable stays on the push path: the slot holds the address,
+// not the cell. An index stays there too.
+static int atomic_disp(Codegen* cg, AstNode* v, char* label, int labn, int* disp, int* is_rbp) {
+    if (!v) return 0;
+    if (v->type == AST_FIELD_ACCESS && v->name && v->child_count >= 1) {
+        char* rec;
+        int off;
+        if (!atomic_disp(cg, v->children[0], label, labn, disp, is_rbp)) return 0;
+        rec = obj_record_type(cg, v->children[0]);
+        if (!rec) return 0;
+        off = typetab_field_offset(cg->types, rec, v->name);
+        if (off < 0) return 0;
+        *disp += off;
+        return 1;
+    }
+    if (v->type != AST_IDENT || !v->name) return 0;
     {
         Symbol* sym = symtab_lookup_symbol(cg->symtab, v->name);
         if (sym) {
             if (sym->is_pointer || sym->is_array || sym->hwreg) return 0;
-            if (sym->mem) { snprintf(buf, n, "%s", sym->mem); return 1; }
-            snprintf(buf, n, "rbp%d", sym->offset);
+            if (sym->mem) {
+                snprintf(label, labn, "%s", sym->mem);
+                *is_rbp = 0;
+                return 1;
+            }
+            *is_rbp = 1;
+            *disp = sym->offset;
             return 1;
         }
     }
     {
         GlobalVar* gv = global_symtab_lookup(cg->global_symtab, v->name);
         if (!gv || gv->is_pointer || gv->is_array) return 0;
-        snprintf(buf, n, "%s", gv->name);
+        snprintf(label, labn, "%s", gv->name);
+        *is_rbp = 0;
         return 1;
     }
+}
+
+static int atomic_direct_mem(Codegen* cg, AstNode* e, char* buf, int n) {
+    char label[64];
+    int disp = 0, is_rbp = 0;
+    if (!o2_hosted() || !e || e->type != AST_ADDR_OF || e->child_count < 1) return 0;
+    label[0] = 0;
+    if (!atomic_disp(cg, e->children[0], label, (int)sizeof label, &disp, &is_rbp)) return 0;
+    if (is_rbp) snprintf(buf, n, "rbp%d", disp);
+    else if (disp) snprintf(buf, n, "%s+%d", label, disp);
+    else snprintf(buf, n, "%s", label);
+    return 1;
 }
 
 static int callee_saved_reg(const char* r) {
@@ -5202,6 +5233,24 @@ static int gen_atomic_builtin(Codegen* cg, AstNode* n) {
         emit(cg, "    pop %s\n", acc);
         if (!direct) emit(cg, "    pop r11\n");
         emit(cg, "    lock cmpxchg %s [%s], %s\n", width, direct ? mem : "r11", accd);
+        return 1;
+    }
+    // A discarded fetch_add / atomic_add does not need the old value.
+    // lock xadd reads and writes the addend register, so the next
+    // `mov rax, 1` waits on the previous xadd. lock add of an immediate
+    // has no register dependency. Freestanding and -O0 keep lock xadd.
+    if (o2_hosted() && n == g_stmt_expr &&
+        (!strcmp(f, "fetch_add") || !strcmp(f, "atomic_add"))) {
+        long long immv = 0;
+        int imm = n->child_count >= 2 && n->children[1] &&
+                  n->children[1]->type == AST_NUMBER && n->children[1]->value &&
+                  parse_i64(n->children[1]->value, &immv) && fits_imm32_val(immv);
+        if (!imm && n->child_count >= 2) gen_expr(cg, n->children[1]);
+        if (!direct) emit(cg, "    pop r11\n");
+        if (imm)
+            emit(cg, "    lock add %s [%s], %lld\n", width, direct ? mem : "r11", immv);
+        else
+            emit(cg, "    lock add %s [%s], %s\n", width, direct ? mem : "r11", acc);
         return 1;
     }
     if (n->child_count >= 2) gen_expr(cg, n->children[1]);
