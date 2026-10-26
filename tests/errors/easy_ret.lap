@@ -1,0 +1,9 @@
+fn f() {
+    let b: u8 = 1;
+    let p: *u8 = &b;
+    return p;
+}
+
+fn main() -> i64 {
+    return 0;
+}

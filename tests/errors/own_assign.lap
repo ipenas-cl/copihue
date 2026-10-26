@@ -1,0 +1,5 @@
+fn main() -> i64 {
+    let p: own *i64 = malloc(8);
+    p = malloc(8);
+    return 0;
+}

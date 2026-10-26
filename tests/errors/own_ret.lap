@@ -1,0 +1,8 @@
+fn give() -> i64 {
+    let p: own *i64 = malloc(8);
+    return p;
+}
+
+fn main() -> i64 {
+    return 0;
+}

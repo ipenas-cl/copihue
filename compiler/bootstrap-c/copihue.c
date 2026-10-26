@@ -16,7 +16,7 @@
 
 // ==== NAMING (single place to change when the language is renamed) ====
 #define LANG_NAME     "Copihue"
-#define LANG_VERSION  "0.35.2"
+#define LANG_VERSION  "0.36.0"
 #define COMPILER_BIN  "copihue"
 #define SRC_EXT       ".lap"   /* Lapageria rosea, the copihue */
 #define OLD_SRC_EXT   ".cph"   /* v0.18.x extension, still accepted with a warning */
@@ -32,6 +32,7 @@ static int g_no_eq = 0;    // deref operand must not swallow '=' (*p = v)
 static int g_no_brace = 0; // for-in operand must not swallow the body '{'
 #define MAX_LOOP_DEPTH 64
 static int g_loop_break[MAX_LOOP_DEPTH], g_loop_cont[MAX_LOOP_DEPTH], g_loop_depth = 0;
+static int g_loop_symbase[MAX_LOOP_DEPTH];
 int g_freestanding = 0;              // --freestanding: no OS, no syscalls, no _start
 int g_checked = 0;                   // --checked: slice and local-array traps in freestanding/flat/boot
 const char* g_flat_org = NULL;       // --flat ADDR: freestanding flat binary loaded at ADDR, entry _start
@@ -282,6 +283,8 @@ typedef struct AstNode {
 #define AF_UNSAFE    512   // `unsafe { }`: slice and local-array indexes do not trap
 #define AF_NOCHECK  1024   // index the for-in loop already proved
 #define AF_PROVEN   2048   // while lowered from `for i in 0..end` with an obvious bound
+#define AF_OWN      4096   // `own *T`: free the pointer when the block ends
+#define AF_BORROW   8192   // compiler `for in` may copy a vec's pointer and length
 
 // Symbol table
 typedef struct {
@@ -300,6 +303,8 @@ typedef struct {
     char* mem;            // Naked local: label of its slot. NULL means [rbp+offset]
     char* hwreg;          // Naked parameter: register that already holds it. NULL otherwise
     int hwbits;           // Width of hwreg in bits. 0 if hwreg is NULL
+    int is_vec;           // vec T: pointer, i64 length, i64 capacity. 24 bytes
+    int drop_kind;        // 0 none, 1 own *T (free the pointer), 2 vec (free the buffer)
 } Symbol;
 
 #define MAX_BLOCK_SCOPE 64
@@ -369,6 +374,8 @@ typedef struct {
     int is_pointer;
     int is_mutable;
     int is_volatile;    // *volatile T: the pointee is a memory-mapped register
+    int is_vec;         // vec T. base_type is the element
+    int is_own;         // own *T. The pointer is freed when its block ends
 } TypeSpec;
 
 typedef struct { Tok* tokens; int pos, count; } Parser;
@@ -385,6 +392,12 @@ typedef struct {
     AstNode* program;         // Whole program, so calls can resolve functions
     int need_syscall_data;    // Emit __syscall_rsp / __syscall_user_rsp
 } Codegen;
+
+static void emit_free_rax(Codegen* cg);
+static void emit_malloc_rax(Codegen* cg);
+static void emit_drops(Codegen* cg, int from, int to);
+static int scope_has_drop(Codegen* cg, int from, int to);
+static void gen_vec_push(Codegen* cg, AstNode* n);
 
 // Kind of the function currently being generated (for return/epilogue).
 static int g_fn_flags = 0;
@@ -895,6 +908,8 @@ int symtab_add(SymbolTable* st, char* name, int size) {
     st->symbols[st->count - 1].mem = NULL;
     st->symbols[st->count - 1].hwreg = NULL;
     st->symbols[st->count - 1].hwbits = 0;
+    st->symbols[st->count - 1].is_vec = 0;
+    st->symbols[st->count - 1].drop_kind = 0;
     symbol_assign_reg(&st->symbols[st->count - 1]);
     return -st->stack_size;
 }
@@ -917,6 +932,8 @@ int symtab_add_struct(SymbolTable* st, char* name, char* type_name, int size_byt
     st->symbols[st->count - 1].mem = NULL;
     st->symbols[st->count - 1].hwreg = NULL;
     st->symbols[st->count - 1].hwbits = 0;
+    st->symbols[st->count - 1].is_vec = 0;
+    st->symbols[st->count - 1].drop_kind = 0;
     symbol_assign_reg(&st->symbols[st->count - 1]);
     return -st->stack_size;
 }
@@ -933,6 +950,25 @@ int symtab_add_slice(SymbolTable* st, char* name, const char* elem) {
     s->size = 16;
     s->type_name = elem ? strdup(elem) : strdup("i64");
     s->is_slice = 1;
+    s->reg = -1;
+    return s->offset;
+}
+
+// vec T. Pointer at `offset`, i64 length at `offset + 8`, i64 capacity at `offset + 16`.
+// The buffer is malloc'd and freed when the declaring block ends. Not a register.
+static int symtab_add_vec(SymbolTable* st, char* name, const char* elem) {
+    Symbol* s;
+    st->count++;
+    st->symbols = safe_realloc(st->symbols, sizeof(Symbol) * st->count);
+    st->stack_size += 24;
+    s = &st->symbols[st->count - 1];
+    memset(s, 0, sizeof *s);
+    s->name = strdup(name);
+    s->offset = -st->stack_size;
+    s->size = 24;
+    s->type_name = elem ? strdup(elem) : strdup("i64");
+    s->is_vec = 1;
+    s->drop_kind = 2;
     s->reg = -1;
     return s->offset;
 }
@@ -955,6 +991,8 @@ int symtab_add_pointer(SymbolTable* st, char* name) {
     st->symbols[st->count - 1].mem = NULL;
     st->symbols[st->count - 1].hwreg = NULL;
     st->symbols[st->count - 1].hwbits = 0;
+    st->symbols[st->count - 1].is_vec = 0;
+    st->symbols[st->count - 1].drop_kind = 0;
     symbol_assign_reg(&st->symbols[st->count - 1]);
     return -st->stack_size;
 }
@@ -2057,6 +2095,7 @@ static AstNode* parse_for_in(Parser* p) {
     AstNode* lit = ast_new(AST_LET);
     lit->name = strdup(it);
     lit->struct_type = strdup("__slice__");
+    lit->flags |= AF_BORROW;
     ast_add(lit, first);
     AstNode* lix = ast_new(AST_LET);
     lix->name = strdup(ix);
@@ -2127,8 +2166,11 @@ AstNode* parse_stmt(Parser* p) {
             let->is_pointer = spec.is_pointer | (spec.is_mutable << 1) | (spec.is_volatile << 2);
 
             // For arrays, mark as array in struct_type field
+            if (spec.is_own) let->flags |= AF_OWN;
             if (spec.is_slice) {
                 let->struct_type = strdup("__slice__");
+            } else if (spec.is_vec) {
+                let->struct_type = strdup("__vec__");
             } else if (spec.is_array) {
                 let->struct_type = strdup("__array__");  // Marker for array
             } else if (!spec.is_pointer && spec.base_type) {
@@ -2492,6 +2534,12 @@ AstNode* parse_struct_def(Parser* p) {
             if (!check_tok(p, T_RBRACE)) expect(p, T_COMMA);
             continue;
         }
+        if (field_type.is_vec || field_type.is_own) {
+            diag_error(field_name.line, field_name.col, field_type.is_vec
+                       ? "a vec must be a local" : "an owning pointer must be a local");
+            if (!check_tok(p, T_RBRACE)) expect(p, T_COMMA);
+            continue;
+        }
 
         AstNode* field = ast_new(AST_IDENT);
         field->name = strndup(field_name.s, field_name.len);
@@ -2548,9 +2596,35 @@ static char* pointee_name(TypeSpec inner) {
     return inner.base_type;
 }
 
-// Parse type specification: i32, [i32; 10], *i32, *mut i32, **u8, Point (struct)
+// Parse type specification: i32, [i32; 10], *i32, *mut i32, **u8, Point (struct),
+// `vec T`, `own *T`. `vec` and `own` are contextual: a following type keeps
+// them as types, and any other token leaves the word as a name.
 TypeSpec parse_type(Parser* p) {
     TypeSpec spec = {0};
+
+    if (peek_word(p, "own") && peek_tok_at(p, 1, T_STAR)) {
+        Tok kw = advance_tok(p);
+        spec = parse_type(p);
+        if (!spec.is_pointer || spec.is_own || spec.is_vec)
+            diag_error(kw.line, kw.col, "own applies to a pointer");
+        spec.is_own = 1;
+        return spec;
+    }
+    if (peek_word(p, "vec") && (peek_tok_at(p, 1, T_STAR) || peek_tok_at(p, 1, T_LBRACKET) ||
+                                peek_tok_at(p, 1, T_IDENT))) {
+        Tok kw = advance_tok(p);
+        TypeSpec inner = parse_type(p);
+        if (inner.is_slice || inner.is_array || inner.is_vec || inner.is_own) {
+            diag_error(kw.line, kw.col, "a vec element must be an integer or a pointer");
+            spec.base_type = strdup("i64");
+        } else if (inner.is_pointer) {
+            spec.base_type = type_spec_name(inner);
+        } else {
+            spec.base_type = inner.base_type ? inner.base_type : strdup("i64");
+        }
+        spec.is_vec = 1;
+        return spec;
+    }
 
     // Check for pointer: *T, *mut T, *volatile T, *volatile mut T, **T
     if (check_tok(p, T_STAR)) {
@@ -2629,6 +2703,14 @@ AstNode* parse_global_var(Parser* p) {
         TypeSpec spec = parse_type(p);
 
         // Store type info in AST node (creative use of fields)
+        if (spec.is_vec || spec.is_own) {
+            diag_error(name.line, name.col, spec.is_vec
+                       ? "a vec must be a local" : "an owning pointer must be a local");
+            spec.base_type = NULL;
+            spec.is_vec = 0;
+            spec.is_own = 0;
+            spec.is_pointer = 0;
+        }
         global_var->value = spec.base_type;          // Base type
         global_var->array_size = spec.array_count;   // Array count
         global_var->is_pointer = spec.is_pointer | (spec.is_mutable << 1) | (spec.is_volatile << 2);
@@ -2680,12 +2762,27 @@ AstNode* parse_func(Parser* p) {
                 par->is_pointer = spec.is_pointer | (spec.is_mutable << 1) | (spec.is_volatile << 2);
                 par->value = spec.base_type;
             } else if (check_tok(p, T_IDENT)) {
-                par->value = take_type_name(p);
+                int owner = (peek_word(p, "own") && peek_tok_at(p, 1, T_STAR)) ||
+                            (peek_word(p, "vec") && (peek_tok_at(p, 1, T_STAR) ||
+                                                     peek_tok_at(p, 1, T_LBRACKET) ||
+                                                     peek_tok_at(p, 1, T_IDENT)));
+                if (owner) {
+                    TypeSpec spec = parse_type(p);
+                    diag_error(param.line, param.col, spec.is_vec
+                               ? "a vec must be a local" : "an owning pointer must be a local");
+                    par->value = strdup("i64");
+                } else {
+                    par->value = take_type_name(p);
+                }
             } else {
                 Tok type_tok = advance_tok(p);  // Get type
                 par->value = strndup(type_tok.s, type_tok.len);  // Save type name
             }
         }
+        // A missing annotation is i64. It is not guessed from a later index.
+        if (!par->value && !par->is_pointer &&
+            !(par->struct_type && !strcmp(par->struct_type, "__slice__")))
+            par->value = strdup("i64");
         if (!check_tok(p, T_RPAREN)) expect(p, T_COMMA);
     }
     expect(p, T_RPAREN);
@@ -2697,12 +2794,20 @@ AstNode* parse_func(Parser* p) {
         TypeSpec spec = parse_type(p);
         if (spec.is_slice)
             diag_error(name.line, name.col, "a slice cannot be returned");
-        func->is_pointer = spec.is_pointer | (spec.is_mutable << 1) | (spec.is_volatile << 2);
-        func->array_size = spec.array_count;
-        if (spec.is_pointer || spec.is_array) func->value = type_spec_name(spec);
-        else func->value = spec.base_type;
-        if (spec.is_array) func->struct_type = strdup("__array__");
+        if (spec.is_vec)
+            diag_error(name.line, name.col, "a vec cannot be returned");
+        if (spec.is_own)
+            diag_error(name.line, name.col, "an owning pointer cannot be returned");
+        if (!spec.is_vec && !spec.is_own) {
+            func->is_pointer = spec.is_pointer | (spec.is_mutable << 1) | (spec.is_volatile << 2);
+            func->array_size = spec.array_count;
+            if (spec.is_pointer || spec.is_array) func->value = type_spec_name(spec);
+            else func->value = spec.base_type;
+            if (spec.is_array) func->struct_type = strdup("__array__");
+        }
     }
+    // A missing `->` is i64, the same default as an untyped integer `let`.
+    if (!func->value) func->value = strdup("i64");
 
     // Check if this is a forward declaration (ends with ;) or full definition (has body)
     if (check_tok(p, T_SEMI)) {
@@ -3911,12 +4016,12 @@ static VTy ty_addr_of(Codegen* cg, AstNode* n) {
 static VTy ty_field(Codegen* cg, AstNode* n) {
     if (!n || !n->child_count || !n->name) return ty_unk();
     if (n->children[0] && n->children[0]->type == AST_IDENT && n->children[0]->name &&
-        (!strcmp(n->name, "ptr") || !strcmp(n->name, "len"))) {
+        (!strcmp(n->name, "ptr") || !strcmp(n->name, "len") || !strcmp(n->name, "cap"))) {
         Symbol* s = (cg && cg->symtab && !n->children[0]->qual)
             ? symtab_lookup_symbol(cg->symtab, n->children[0]->name) : NULL;
         GlobalVar* g = NULL;
         const char* elem = NULL;
-        if (s && s->is_slice) elem = s->type_name ? s->type_name : "i64";
+        if (s && (s->is_slice || s->is_vec)) elem = s->type_name ? s->type_name : "i64";
         else if (cg && cg->global_symtab) {
             g = global_symtab_lookup(cg->global_symtab, n->children[0]->name);
             if (g && g->is_slice)
@@ -3924,6 +4029,8 @@ static VTy ty_field(Codegen* cg, AstNode* n) {
         }
         if (elem) {
             if (!strcmp(n->name, "len")) return ty_i64();
+            if (!strcmp(n->name, "cap") && s && s->is_vec) return ty_i64();
+            if (!strcmp(n->name, "cap")) return ty_unk();
             char raw[200];
             snprintf(raw, sizeof raw, "*%s", elem);
             return ty_from_spelled(cg, raw);
@@ -3951,7 +4058,8 @@ static int builtin_ret_ty(const char* f, VTy* out) {
         !strcmp(f, "read_cr0") || !strcmp(f, "read_cr2") || !strcmp(f, "read_cr3") || !strcmp(f, "read_cr4") ||
         !strcmp(f, "write_cr0") || !strcmp(f, "write_cr3") || !strcmp(f, "write_cr4") ||
         !strcmp(f, "print_int") || !strcmp(f, "print") || !strcmp(f, "println") ||
-        !strcmp(f, "exit") || !strcmp(f, "free") || !strcmp(f, "syscall") || !strcmp(f, "syscall6") ||
+        !strcmp(f, "exit") || !strcmp(f, "free") || !strcmp(f, "vec_push") ||
+        !strcmp(f, "syscall") || !strcmp(f, "syscall6") ||
         !strcmp(f, "lidt") || !strcmp(f, "lgdt") || !strcmp(f, "invlpg") ||
         !strcmp(f, "hlt") || !strcmp(f, "cli") || !strcmp(f, "sti") || !strcmp(f, "pause") ||
         !strcmp(f, "swapgs") || !strcmp(f, "iretq") || !strcmp(f, "sysretq") ||
@@ -4674,7 +4782,7 @@ static void gen_user_call(Codegen* cg, AstNode* n, int indirect) {
 
 // Helper: Generate builtin function calls
 static const char* hosted_only_builtins[] = {
-    "print", "println", "print_int", "malloc", "free", "open", "read", "write",
+    "print", "println", "print_int", "malloc", "free", "vec_push", "open", "read", "write",
     "close", "exit", "syscall", "thread_spawn", "thread_join", "sched_setaffinity",
     NULL
 };
@@ -5736,6 +5844,8 @@ void gen_builtin_call(Codegen* cg, AstNode* n) {
             emit(cg, "    syscall\n");
             // Result already in rax
         }
+    } else if (!strcmp(n->name, "vec_push")) {
+        gen_vec_push(cg, n);
     } else {
         // Regular function call, or a call through a function pointer variable.
         // A qualified name is the link spelling; a local does not hide it.
@@ -5848,11 +5958,182 @@ static void emit_trap_cold(Codegen* cg, int lab, const char* tag, const char* ms
     cold_emit("    syscall\n");
 }
 
+// munmap of a malloc pointer in rax. NULL is a no-op. r11 is saved: a drop is
+// not an AST call, so a local the planner left in r11 must survive it.
+static void emit_free_rax(Codegen* cg) {
+    int skip = new_label(cg);
+    int done = new_label(cg);
+    emit(cg, "    test rax, rax\n");
+    emit(cg, "    jz .L%d\n", skip);
+    emit(cg, "    push r11\n");
+    emit(cg, "    mov rdi, rax\n");
+    emit(cg, "    sub rdi, 8\n");
+    emit(cg, "    mov rsi, [rdi]\n");
+    emit(cg, "    add rsi, 8\n");
+    emit(cg, "    mov rax, 11\n");
+    emit(cg, "    syscall\n");
+    emit(cg, "    pop r11\n");
+    emit(cg, "    jmp .L%d\n", done);
+    emit(cg, ".L%d:\n", skip);
+    emit(cg, "    xor rax, rax\n");
+    emit(cg, ".L%d:\n", done);
+}
+
+// mmap of `rax` user bytes. Returns the user pointer, or -1. Same header as malloc.
+static void emit_malloc_rax(Codegen* cg) {
+    int fail = new_label(cg);
+    emit(cg, "    mov rbx, rax\n");
+    emit(cg, "    add rax, 8\n");
+    emit(cg, "    mov rsi, rax\n");
+    emit(cg, "    xor rdi, rdi\n");
+    emit(cg, "    mov rdx, 3\n");
+    emit(cg, "    mov r10, 34\n");
+    emit(cg, "    mov r8, -1\n");
+    emit(cg, "    xor r9, r9\n");
+    emit(cg, "    mov rax, 9\n");
+    emit(cg, "    syscall\n");
+    emit(cg, "    cmp rax, -1\n");
+    emit(cg, "    je .L%d\n", fail);
+    emit(cg, "    mov [rax], rbx\n");
+    emit(cg, "    add rax, 8\n");
+    emit(cg, ".L%d:\n", fail);
+}
+
+static int scope_has_drop(Codegen* cg, int from, int to) {
+    if (!cg || !cg->symtab) return 0;
+    if (from < 0) from = 0;
+    if (to > cg->symtab->count) to = cg->symtab->count;
+    for (int i = from; i < to; i++)
+        if (cg->symtab->symbols[i].drop_kind) return 1;
+    return 0;
+}
+
+// Free owning locals in [from, to), innermost first. Each slot is then zero
+// so a later exit of the same value is free(NULL).
+static void emit_drops(Codegen* cg, int from, int to) {
+    if (!cg || !cg->symtab) return;
+    if (from < 0) from = 0;
+    if (to > cg->symtab->count) to = cg->symtab->count;
+    for (int i = to - 1; i >= from; i--) {
+        Symbol* s = &cg->symtab->symbols[i];
+        if (!s->drop_kind) continue;
+        if (s->mem) emit(cg, "    mov rax, [%s]\n", s->mem);
+        else emit(cg, "    mov rax, [rbp%d]\n", s->offset);
+        emit_free_rax(cg);
+        if (s->mem) emit(cg, "    mov qword [%s], 0\n", s->mem);
+        else emit(cg, "    mov qword [rbp%d], 0\n", s->offset);
+    }
+}
+
+static int owner_hosted(int line, int col, const char* what) {
+    if (g_freestanding || legacy_bits() ||
+        (g_fn_flags & (AF_NAKED | AF_INTERRUPT | AF_SYSCALL))) {
+        diag_error(line, col, "%s is hosted-only", what);
+        return 0;
+    }
+    return 1;
+}
+
+static int vec_elem_size(const char* elem) {
+    int bits = 64, sg = 1;
+    if (!elem || !elem[0]) return 0;
+    if (elem[0] == '*') return 8;
+    if (!int_name(elem, &bits, &sg)) return 0;
+    if (bits != 8 && bits != 16 && bits != 32 && bits != 64) return 0;
+    return bits / 8;
+}
+
+static void gen_vec_push(Codegen* cg, AstNode* n) {
+    Symbol* s = NULL;
+    const char* elem;
+    int es, off;
+    int dbl, alloc, oom, nocopy, store;
+    if (!n || n->child_count != 2) {
+        diag_error(n ? n->line : 0, n ? n->col : 0, "vec_push() takes a vec and a value");
+        return;
+    }
+    if (n->children[0] && n->children[0]->type == AST_IDENT && !n->children[0]->qual && cg->symtab)
+        s = symtab_lookup_symbol(cg->symtab, n->children[0]->name);
+    if (!s || !s->is_vec) {
+        diag_error(n->line, n->col, "vec_push() takes a local vec");
+        return;
+    }
+    elem = s->type_name ? s->type_name : "i64";
+    es = vec_elem_size(elem);
+    if (!es) {
+        diag_error(n->line, n->col, "a vec element must be an integer or a pointer");
+        return;
+    }
+    check_types(n->children[1], "", ty_from_spelled(cg, elem), expr_ty(cg, n->children[1]));
+    off = s->offset;
+    gen_expr(cg, n->children[1]);
+    emit(cg, "    push rax\n");
+    store = new_label(cg);
+    emit(cg, "    mov rax, [rbp%d]\n", off + 8);
+    emit(cg, "    cmp rax, [rbp%d]\n", off + 16);
+    emit(cg, "    jb .L%d\n", store);
+    dbl = new_label(cg);
+    alloc = new_label(cg);
+    emit(cg, "    mov rcx, [rbp%d]\n", off + 16);
+    emit(cg, "    test rcx, rcx\n");
+    emit(cg, "    jnz .L%d\n", dbl);
+    emit(cg, "    mov rcx, 4\n");
+    emit(cg, "    jmp .L%d\n", alloc);
+    emit(cg, ".L%d:\n", dbl);
+    emit(cg, "    shl rcx, 1\n");
+    emit(cg, ".L%d:\n", alloc);
+    emit(cg, "    push rcx\n");
+    emit(cg, "    mov rax, rcx\n");
+    if (es > 1) emit_scale_reg(cg, "rax", es);
+    emit_malloc_rax(cg);
+    emit(cg, "    pop r8\n");
+    oom = new_label(cg);
+    emit(cg, "    cmp rax, -1\n");
+    emit(cg, "    je .Lslice_oom_%d\n", oom);
+    emit(cg, "    mov rbx, rax\n");
+    nocopy = new_label(cg);
+    emit(cg, "    mov rsi, [rbp%d]\n", off);
+    emit(cg, "    test rsi, rsi\n");
+    emit(cg, "    jz .L%d\n", nocopy);
+    emit(cg, "    mov rdi, rbx\n");
+    emit(cg, "    mov rcx, [rbp%d]\n", off + 8);
+    if (es > 1) emit_scale_reg(cg, "rcx", es);
+    emit(cg, "    cld\n");
+    emit(cg, "    rep movsb\n");
+    emit(cg, "    mov rax, [rbp%d]\n", off);
+    emit_free_rax(cg);
+    emit(cg, ".L%d:\n", nocopy);
+    emit(cg, "    mov [rbp%d], rbx\n", off);
+    emit(cg, "    mov [rbp%d], r8\n", off + 16);
+    emit(cg, ".L%d:\n", store);
+    emit(cg, "    mov rbx, [rbp%d]\n", off);
+    emit(cg, "    mov rcx, [rbp%d]\n", off + 8);
+    if (es > 1) emit_scale_reg(cg, "rcx", es);
+    emit(cg, "    add rbx, rcx\n");
+    emit(cg, "    pop rax\n");
+    if (es <= 1) emit(cg, "    mov byte [rbx], al\n");
+    else if (es == 2) emit(cg, "    mov word [rbx], ax\n");
+    else if (es == 4) emit(cg, "    mov dword [rbx], eax\n");
+    else emit(cg, "    mov qword [rbx], rax\n");
+    emit(cg, "    inc qword [rbp%d]\n", off + 8);
+    emit(cg, "    mov rax, [rbp%d]\n", off + 8);
+    emit_trap_cold(cg, oom, "oom", "out of memory\n", 14);
+}
+
 static Symbol* local_slice(Codegen* cg, AstNode* id) {
     Symbol* s;
     if (!cg || !id || id->type != AST_IDENT || !id->name || id->qual || !cg->symtab) return NULL;
     s = symtab_lookup_symbol(cg->symtab, id->name);
     return (s && s->is_slice) ? s : NULL;
+}
+
+// A slice or a vec: pointer at 0, length at 8. A vec also has capacity at 16.
+static Symbol* local_fat(Codegen* cg, AstNode* id) {
+    Symbol* s;
+    if (!cg || !id || id->type != AST_IDENT || !id->name || id->qual || !cg->symtab) return NULL;
+    s = symtab_lookup_symbol(cg->symtab, id->name);
+    if (s && (s->is_slice || s->is_vec)) return s;
+    return NULL;
 }
 
 static GlobalVar* global_slice(Codegen* cg, AstNode* id) {
@@ -5906,14 +6187,14 @@ static int slice_index_base(Codegen* cg, AstNode* arr, Symbol** s, GlobalVar** g
     if (!arr) return 0;
     if (arr->type == AST_FIELD_ACCESS && arr->name && !strcmp(arr->name, "ptr") &&
         arr->child_count > 0) {
-        *s = local_slice(cg, arr->children[0]);
+        *s = local_fat(cg, arr->children[0]);
         *g = *s ? NULL : global_slice(cg, arr->children[0]);
         if (!*s && !*g) return 0;
         *unchecked = 1;
         return 1;
     }
     if (arr->type == AST_IDENT) {
-        *s = local_slice(cg, arr);
+        *s = local_fat(cg, arr);
         *g = *s ? NULL : global_slice(cg, arr);
         return *s || *g;
     }
@@ -6055,10 +6336,19 @@ static int gen_slice_field(Codegen* cg, AstNode* n) {
     GlobalVar* g;
     int lenf;
     if (!n || n->type != AST_FIELD_ACCESS || !n->name || n->child_count < 1) return 0;
-    if (strcmp(n->name, "ptr") && strcmp(n->name, "len")) return 0;
-    s = local_slice(cg, n->children[0]);
+    if (strcmp(n->name, "ptr") && strcmp(n->name, "len") && strcmp(n->name, "cap")) return 0;
+    s = local_fat(cg, n->children[0]);
     g = s ? NULL : global_slice(cg, n->children[0]);
     if (!s && !g) return 0;
+    if (!strcmp(n->name, "cap")) {
+        if (s && s->is_vec) {
+            emit(cg, "    mov rax, [rbp%d]\n", s->offset + 16);
+            return 1;
+        }
+        diag_error(n->line, n->col, "slice has no field 'cap'");
+        emit(cg, "    xor rax, rax\n");
+        return 1;
+    }
     lenf = !strcmp(n->name, "len");
     if (s) emit(cg, "    mov rax, [rbp%d]\n", s->offset + (lenf ? 8 : 0));
     else if (lenf) emit(cg, "    mov rax, [%s+8]\n", g->name);
@@ -6076,6 +6366,10 @@ static void found_spelling(Codegen* cg, AstNode* a, char* buf, int n) {
         if (!a->qual && cg->symtab) s = symtab_lookup_symbol(cg->symtab, a->name);
         if (s && s->is_slice) {
             snprintf(buf, n, "[]%s", s->type_name ? s->type_name : "i64");
+            return;
+        }
+        if (s && s->is_vec) {
+            snprintf(buf, n, "vec %s", s->type_name ? s->type_name : "i64");
             return;
         }
         if (s && s->is_array) {
@@ -6219,6 +6513,26 @@ static void gen_slice_let(Codegen* cg, AstNode* n) {
             if (src) copy16_local(cg, off, src->offset);
             else copy16_global_local(cg, off, gs->name);
             return;
+        }
+        {
+            Symbol* vs = (!init->qual && cg->symtab)
+                ? symtab_lookup_symbol(cg->symtab, init->name) : NULL;
+            if (vs && vs->is_vec) {
+                const char* elem = vs->type_name ? vs->type_name : "i64";
+                if (!(n->flags & AF_BORROW)) {
+                    diag_error(init->line, init->col, "a vec cannot be copied");
+                    zero_slice(cg, off);
+                    return;
+                }
+                if (want && strcmp(want, elem)) {
+                    diag_error(init->line, init->col, "expected []%s, found vec %s", want, elem);
+                    zero_slice(cg, off);
+                    return;
+                }
+                if (!want) remember_elem(dst, elem);
+                copy16_local(cg, off, vs->offset);
+                return;
+            }
         }
     }
     if (init && init->type == AST_CALL && init->name && !strcmp(init->name, "slice")) {
@@ -6403,6 +6717,12 @@ void gen_addr_of(Codegen* cg, AstNode* n) {
 
     if (var->type == AST_IDENT) {
         Symbol* hw = var->name ? symtab_lookup_symbol(cg->symtab, var->name) : NULL;
+        if (hw && (hw->is_vec || hw->drop_kind)) {
+            diag_error(var->line, var->col, hw->is_vec
+                       ? "a vec has no address" : "an owning pointer has no address");
+            emit(cg, "    xor rax, rax\n");
+            return;
+        }
         if (hw && hw->hwreg) {
             diag_error(var->line, var->col, "naked parameter '%s' has no address", var->name);
             return;
@@ -7026,6 +7346,7 @@ static char* array_elem_type_name(Codegen* cg, AstNode* arr) {
     Symbol* s = symtab_lookup_symbol(cg->symtab, arr->name);
     if (s) {
         if (s->is_slice && s->type_name) return s->type_name;
+        if (s->is_vec && s->type_name) return s->type_name;
         if (s->is_array && s->type_name) return s->type_name;
         if (s->is_pointer && s->type_name) return strip_star(s->type_name);
     }
@@ -8442,6 +8763,11 @@ void gen_expr(Codegen* cg, AstNode* n) {
                 emit(cg, "    xor rax, rax\n");
                 return;
             }
+            if (sym && sym->is_vec) {
+                diag_error(n->line, n->col, "a vec is not a scalar; read an element, .ptr, .len, or .cap");
+                emit(cg, "    xor rax, rax\n");
+                return;
+            }
             if (sym && sym->size > 1 && sym->type_name && !sym->is_pointer) {
                 // This is an array - use lea to get address
                 emit(cg, "    lea rax, [rbp%d]\n", off);
@@ -8555,6 +8881,11 @@ void gen_expr(Codegen* cg, AstNode* n) {
         // is the same, but only in a naked function, and a real variable wins.
         Symbol* hw = (!n->qual && n->name) ? symtab_lookup_symbol(cg->symtab, n->name) : NULL;
         GlobalVar* hwg = (!hw && n->name) ? global_symtab_lookup(cg->global_symtab, n->name) : NULL;
+        if (hw && hw->drop_kind) {
+            diag_error(n->line, n->col, hw->is_vec
+                       ? "a vec cannot be assigned" : "an owning pointer cannot be reassigned");
+            return;
+        }
         if (hw && hw->hwreg) {
             emit_reg_write(cg, hw->hwreg, hw->hwbits, 0, n->child_count > 0 ? n->children[0] : NULL);
             return;
@@ -9360,11 +9691,13 @@ void gen_expr(Codegen* cg, AstNode* n) {
 
         if (!obj || !field_name) return;
 
-        if (obj->type == AST_IDENT && (!strcmp(field_name, "ptr") || !strcmp(field_name, "len"))) {
-            Symbol* ss = local_slice(cg, obj);
+        if (obj->type == AST_IDENT && (!strcmp(field_name, "ptr") || !strcmp(field_name, "len") ||
+                                       !strcmp(field_name, "cap"))) {
+            Symbol* ss = local_fat(cg, obj);
             GlobalVar* gs = ss ? NULL : global_slice(cg, obj);
             if (ss || gs) {
-                diag_error(n->line, n->col, "slice field '%s' is read-only", field_name);
+                diag_error(n->line, n->col, "%s field '%s' is read-only",
+                           (ss && ss->is_vec) ? "vec" : "slice", field_name);
                 return;
             }
         }
@@ -11953,18 +12286,40 @@ void gen_stmt(Codegen* cg, AstNode* n) {
         }
         g_prev_stmt = NULL;
         g_prev2_stmt = NULL;
+        if (cg->symtab && cg->symtab->scope_depth > 0) {
+            int base = cg->symtab->scope_base[cg->symtab->scope_depth - 1];
+            emit_drops(cg, base, cg->symtab->count);
+        }
         symtab_leave(cg->symtab);
         g_unsafe = saved_unsafe;
         return;
     }
     if (n->type == AST_RETURN) {
+        int keep_rax = 0;
+        if (n->child_count > 0 && n->children[0] && n->children[0]->type == AST_IDENT &&
+            n->children[0]->name && cg->symtab) {
+            Symbol* rs = symtab_lookup_symbol(cg->symtab, n->children[0]->name);
+            if (rs && rs->drop_kind == 1) {
+                diag_error(n->line, n->col, "an owning pointer cannot be returned");
+                return;
+            }
+            if (rs && rs->is_vec) {
+                diag_error(n->line, n->col, "a vec cannot be returned");
+                return;
+            }
+        }
         if (n->child_count > 0) {
             if (g_cur_fn && !(g_cur_fn->struct_type && !strcmp(g_cur_fn->struct_type, "__array__"))) {
                 VTy dst_ty = ty_decl(cg, 1, g_cur_fn->is_pointer, g_cur_fn->value);
                 check_types(n->children[0], "return value", dst_ty, expr_ty(cg, n->children[0]));
             }
             gen_expr(cg, n->children[0]);
-        } else emit(cg, "    xor rax, rax\n");
+            keep_rax = scope_has_drop(cg, 0, cg->symtab ? cg->symtab->count : 0);
+            if (keep_rax) emit(cg, "    push rax\n");
+        }
+        emit_drops(cg, 0, cg->symtab ? cg->symtab->count : 0);
+        if (keep_rax) emit(cg, "    pop rax\n");
+        else if (n->child_count == 0) emit(cg, "    xor rax, rax\n");
         if (g_fn_flags & (AF_INTERRUPT | AF_SYSCALL))
             emit(cg, "    jmp .Lret_%s\n", g_fn_name);
         else if (g_fn_flags & AF_NAKED)
@@ -11981,6 +12336,30 @@ void gen_stmt(Codegen* cg, AstNode* n) {
 
         if (n->struct_type && !strcmp(n->struct_type, "__slice__")) {
             gen_slice_let(cg, n);
+            return;
+        }
+        if (n->struct_type && !strcmp(n->struct_type, "__vec__")) {
+            int es;
+            int off;
+            if (n->flags & AF_VOLATILE) {
+                diag_error(n->line, n->col, "volatile cannot apply to a vec");
+                return;
+            }
+            if (!owner_hosted(n->line, n->col, "vec")) return;
+            es = vec_elem_size(n->value);
+            if (!es) {
+                diag_error(n->line, n->col, "a vec element must be an integer or a pointer");
+                return;
+            }
+            if (n->child_count > 0) {
+                diag_error(n->line, n->col, "a vec starts empty");
+                return;
+            }
+            off = symtab_add_vec(cg->symtab, n->name, n->value ? n->value : "i64");
+            emit(cg, "    xor rax, rax\n");
+            emit(cg, "    mov [rbp%d], rax\n", off);
+            emit(cg, "    mov [rbp%d], rax\n", off + 8);
+            emit(cg, "    mov [rbp%d], rax\n", off + 16);
             return;
         }
 
@@ -12087,8 +12466,24 @@ void gen_stmt(Codegen* cg, AstNode* n) {
                 cg->symtab->symbols[cg->symtab->count - 1].is_volatile = 1;
             if (n->is_pointer & 4)
                 cg->symtab->symbols[cg->symtab->count - 1].volatile_pointee = 1;
+            if (n->flags & AF_OWN) {
+                Symbol* os = &cg->symtab->symbols[cg->symtab->count - 1];
+                if (!owner_hosted(n->line, n->col, "an owning pointer")) return;
+                os->drop_kind = 1;
+                os->reg = -1;
+            }
 
             if (n->child_count > 0) {
+                if ((n->flags & AF_OWN) && n->children[0]->type == AST_IDENT &&
+                    n->children[0]->name && cg->symtab) {
+                    Symbol* src = symtab_lookup_symbol(cg->symtab, n->children[0]->name);
+                    if (src && src->drop_kind == 1) {
+                        diag_error(n->line, n->col, "an owning pointer cannot be copied");
+                        emit(cg, "    xor rax, rax\n");
+                        emit(cg, "    mov [rbp%d], rax\n", off);
+                        return;
+                    }
+                }
                 VTy dst_ty = ty_decl(cg, 0, n->is_pointer, n->value);
                 check_types(n->children[0], "", dst_ty, expr_ty(cg, n->children[0]));
                 gen_expr(cg, n->children[0]);
@@ -12100,6 +12495,9 @@ void gen_stmt(Codegen* cg, AstNode* n) {
                     else if (ps->mem) emit(cg, "    mov [%s], rax\n", ps->mem);
                     else emit(cg, "    mov [rbp%d], rax\n", off);
                 }
+            } else if (n->flags & AF_OWN) {
+                emit(cg, "    xor rax, rax\n");
+                emit(cg, "    mov [rbp%d], rax\n", off);
             }
             return;
         }
@@ -12204,6 +12602,7 @@ void gen_stmt(Codegen* cg, AstNode* n) {
         if (g_loop_depth >= MAX_LOOP_DEPTH) { diag_error(n->line, n->col, "loops nested too deeply"); return; }
         g_loop_break[g_loop_depth] = end_lab;
         g_loop_cont[g_loop_depth] = cont_lab;
+        g_loop_symbase[g_loop_depth] = cg->symtab ? cg->symtab->count : 0;
         g_loop_depth++;
         const char* save_idx = g_proven_idx;
         long long save_lim = g_proven_lim;
@@ -12249,6 +12648,8 @@ void gen_stmt(Codegen* cg, AstNode* n) {
             diag_error(n->line, n->col, "'%s' outside of a loop", n->type == AST_BREAK ? "break" : "continue");
             return;
         }
+        if (cg->symtab)
+            emit_drops(cg, g_loop_symbase[g_loop_depth - 1], cg->symtab->count);
         emit(cg, "    jmp .L%d\n", n->type == AST_BREAK ? g_loop_break[g_loop_depth - 1] : g_loop_cont[g_loop_depth - 1]);
     } else if (n->type == AST_JMP) {
         gen_jmp(cg, n);
@@ -13158,6 +13559,8 @@ void gen_func(Codegen* cg, AstNode* n) {
     }
     g_prev_stmt = NULL;
     g_prev2_stmt = NULL;
+    if (cg->symtab && cg->symtab->scope_depth > 0)
+        emit_drops(cg, cg->symtab->scope_base[cg->symtab->scope_depth - 1], cg->symtab->count);
     symtab_leave(cg->symtab);
 
     if (is_int) {
