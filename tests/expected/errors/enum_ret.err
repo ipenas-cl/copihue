@@ -1,7 +1,4 @@
-tests/errors/enum_ret.lap:3:4: error: an enum cannot be returned
-      3 | fn bad() -> Option {
-        |    ^
-tests/errors/enum_ret.lap:9:5: error: an enum cannot be returned
-      9 |     return o;
+tests/errors/enum_ret.lap:5:5: error: an enum cannot be returned
+      5 |     return o;
         |     ^
-2 errors, compilation failed
+1 error, compilation failed

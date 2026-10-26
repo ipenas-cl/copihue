@@ -2,6 +2,33 @@
 
 Todos los cambios importantes del proyecto.
 
+## [0.39.0] - 2026-10-26
+
+### Added
+- `fn make(n: i64) -> Option` returns the enum through a hidden caller pointer in `rdi`. `rax:rdx` is not used: `Color` is 8 bytes, `Option` is 16, and `Pair` is 24, so one ABI covers every size. The callee saves `rdi` in an anonymous frame slot and writes the bytes through that pointer. After the drops, `rax` holds the address. Real arguments shift: the first five use `rsi`, `rdx`, `rcx`, `r8`, and `r9`, and the sixth is at `[rbp+16]`. `let x = give()` writes `x`. `return give()` forwards the caller's pointer. A discarded call allocates a temporary. `return o` from `-> i64` is still `an enum cannot be returned`.
+- A parameter is still passed by address and copied. A global, a struct field, and a call that returns the enum take the same path. Assigning the parameter does not change the caller. Passing the same value twice is a copy, not a move.
+- `_` covers the variants that are left and skips `ud2`. `Option::_` is `'_' is not a variant`. `_(x)` is `'_' has no fields` and does not cover. A second `_` is `'_' is already matched`. An arm after `_` is `arm after '_' is unreachable`. A block after `=>` is the arm. The last statement has to be an expression, or the caret is on `{` and the message is `match arm block needs a result`.
+- `let g: Option;` is a zeroed BSS global. Tag 0 is `None` when `None` is first. An initializer is `an enum global starts at zero; assign it in a function`. `struct Box { o: Option, n: i64 }` can be stored, copied, returned, and matched, including `p->o`. An array of enums is still `an enum cannot be an array element`.
+- Hosted `-O2` loads the tag once (`mov rbx, [slot]`, or `mov rbx, [name]`, or one load through a saved field pointer) and each arm is `cmp rbx, imm` / `jne`. The body may clobber `rbx`; the next compare is reached only by `jne`. `-O0`, `--freestanding`, and `--flat` still compare the tag in memory, so `tests/freestanding/enum.lap` and `tests/flat/enum.lap` keep the same bytes. The `Some` field is still spilled to a slot and reloaded.
+
+### Left out
+- `match` of a constructor, of a call, or of `*p` when `p` points at the enum (`match needs a local enum`).
+- `|` patterns, guards, named fields, and an enum nested as a field.
+- An enum inside a `module`, `bits 16`, `bits 32`, `naked`, `interrupt fn`, and `syscall fn`. An indirect call that would return an enum is `an indirect call cannot return an enum`.
+- A slice element, an array element, and a `vec` element. An `own *T` field is still rejected, so a variant does not drop.
+- Removing the payload spill. The register compare does not change `-O0`.
+
+### Changed
+- Language version is 0.39.0, on top of 0.38.1. The 0.38.1 note rejected sharing one register between two scalars whose live ranges do not overlap. That pass is not emitted. The 0.38.0 enum layout, exhaustive `match`, and `ud2` stay. The 0.37.2 note rejected aligning `.text` to 16 or 32, and 0.37.1 rejected a direct `arr[i].field` store. Neither is emitted here.
+
+### Measured
+- No timed bench was added to `make test`. `bench/slice` and `bench/lowlat` were not run again. The sources stayed in `/tmp`. Both programs print `80000000` and then `1`. The value is built once, outside an 80000000-iteration loop. `taskset -c 0`, one warmup and seven runs, `python` `time.perf_counter`. The 0.38 binary is `cb4dd52`. The `-O0` assembly of the `match` program is the same in both compilers.
+- NASM listing (`nasm -f elf64 -l`), `-O0`, of `pick`, from the label through the first `ret`: 70 bytes on 0.38.0 and on 0.39.0. The `if` on `struct Opt { tag: i64, val: i64 }` is 76. A difference of 6. The 70 includes `ud2` (2 bytes), which a tag of 0 or 1 does not execute. After that `ret` both functions still have the unreachable `xor rax` / `leave` / `ret` (5 bytes). Hosted `-O2` is the change: 0.38 compares `qword [rbp-16]` twice; 0.39 does `mov rbx, [rbp-16]` once and then `cmp rbx, imm` twice. Both still spill the `Some` field (`mov [rbp-40], rax` / `mov rax, [rbp-40]`) and `push`/`pop` the sum. The `if` loads the tag once into `rax` and adds the field. Neither loop is unrolled.
+- Window 2026-10-26T06:58:33Z — 2026-10-26T06:58:34Z, 0.39 `match` then 0.39 `if` on each round. `match`: 62.4, 60.8, 59.8, 63.5, 63.8, 63.6, 65.7 ms, median 63.5 (59.8–65.7). `if`: 57.0, 62.8, 63.7, 66.7, 67.5, 56.4, 64.0 ms, median 63.7 (56.4–67.5). The ranges overlap.
+- Window 2026-10-26T06:58:34Z — 2026-10-26T06:58:35Z, 0.39 `if` then 0.39 `match`. `if`: 63.0, 70.8, 64.9, 65.5, 68.4, 67.5, 70.7 ms, median 67.5 (63.0–70.8). `match`: 61.9, 61.8, 61.5, 61.4, 59.9, 65.3, 62.1 ms, median 61.8 (59.9–65.3). The ranges overlap. The `if` median moved (63.7 against 67.5). The `match` median moved (63.5 against 61.8). The ratio of the medians is not stable.
+- Window 2026-10-26T06:58:35Z — 2026-10-26T06:58:36Z, 0.38 `match` then 0.39 `match`. 0.38: 63.2, 65.1, 75.1, 62.3, 62.4, 64.7, 65.4 ms, median 64.7 (62.3–75.1). 0.39: 59.9, 61.3, 57.1, 59.2, 67.8, 57.9, 64.5 ms, median 59.9 (57.1–67.8). The ranges overlap.
+- Window 2026-10-26T06:58:36Z — 2026-10-26T06:58:37Z, 0.39 `match` then 0.38 `match`. 0.39: 58.4, 66.5, 58.3, 63.2, 65.3, 65.9, 64.2 ms, median 64.2 (58.3–66.5). 0.38: 62.4, 62.4, 62.4, 62.4, 64.6, 62.4, 62.3 ms, median 62.4 (62.3–64.6). The ranges overlap. In this window the 0.38 median is the lower one. The register load does not separate from the spill, the second compare, or the `push`/`pop` of the sum.
+
 ## [0.38.1] - 2026-10-26
 
 ### Changed

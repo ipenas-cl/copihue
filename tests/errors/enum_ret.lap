@@ -1,9 +1,5 @@
 enum Option { None, Some(i64) }
 
-fn bad() -> Option {
-    return Option::None;
-}
-
 fn wrap() -> i64 {
     let o = Option::None;
     return o;
