@@ -1,0 +1,5 @@
+import "parts/mfs.lap";
+
+fn boot() -> i64 {
+    return mfs::answer();
+}

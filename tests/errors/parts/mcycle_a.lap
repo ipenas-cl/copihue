@@ -1,0 +1,3 @@
+module a;
+import "mcycle_b.lap";
+pub fn f() -> i64 { return 1; }

@@ -1,0 +1,8 @@
+module mem;
+
+extern bias;
+extern fn add(a: i64, b: i64) -> i64;
+
+pub fn use_it() -> i64 {
+    return add(bias, 35);
+}

@@ -19,6 +19,7 @@
 # 6. User mode: tests/usermode, and QEMU must print USER.
 # 7. Context switch: tests/ctx, and QEMU must print COPIHUE.
 # 8. Relocatable objects: tests/link/parts, two -c files linked with ld.
+#    A second pair shares `module mem` across two objects (`mem__add`).
 set -u
 cd "$(dirname "$0")/.."
 ROOT=$PWD
@@ -309,6 +310,40 @@ elif grep -q "^COMPILE ERROR" "$WORK/link0"; then
   fail=$((fail+1)); failed+=("link -c"); echo "FAIL link -c:"; cat "$WORK/link0"
 else
   check "link -c" "tests/expected/tests/link/reloc.out" "$WORK/link0"
+fi
+# Same module name in two objects. The definition exports mem__add and
+# mem__bias. The caller object redeclares `module mem`, externs those
+# symbols, and a flat file in that same -c invocation defines main.
+modlink_run() {
+  local opt=$1
+  ( cd "$WORK" && rm -f mem_prog mem_def.o mem_use.o &&
+    "$CC" "$opt" -c -o mem_def.o "$ROOT/tests/link/parts/mod_mem.lap" &&
+    "$CC" "$opt" -c -o mem_use.o \
+      "$ROOT/tests/link/parts/mod_mem_use.lap" "$ROOT/tests/link/parts/mod_mem_main.lap" &&
+    ld mem_def.o mem_use.o -o mem_prog ) >/dev/null 2>err.txt || {
+      echo "COMPILE ERROR"; sed "s|$ROOT/||g" "$WORK/err.txt"; return; }
+  ( cd "$WORK" && ./mem_prog </dev/null; echo "exit=$?" ) | mask
+}
+modlink_run -O0 > "$WORK/mlink0"
+if ! nm "$WORK/mem_def.o" | grep -q ' T mem__add' || \
+   ! nm "$WORK/mem_def.o" | grep -q ' D mem__bias' || \
+   nm "$WORK/mem_def.o" | grep -q ' _start$' || \
+   ! nm -u "$WORK/mem_use.o" | grep -q ' mem__add$' || \
+   ! nm -u "$WORK/mem_use.o" | grep -q ' mem__bias$' || \
+   ! nm "$WORK/mem_use.o" | grep -q ' T mem__use_it' || \
+   ! nm "$WORK/mem_use.o" | grep -q ' T main' || \
+   ! nm "$WORK/mem_use.o" | grep -q ' T _start'; then
+  fail=$((fail+1)); failed+=("module link symbols"); echo "FAIL module link symbols"; nm "$WORK/mem_def.o"; nm "$WORK/mem_use.o"
+else
+  pass=$((pass+1))
+fi
+modlink_run -O2 > "$WORK/mlink2"
+if ! cmp -s "$WORK/mlink0" "$WORK/mlink2"; then
+  fail=$((fail+1)); failed+=("module link (-O0 vs -O2)"); echo "FAIL module link: -O0 and -O2 differ"; diff "$WORK/mlink0" "$WORK/mlink2" | head -10
+elif grep -q "^COMPILE ERROR" "$WORK/mlink0"; then
+  fail=$((fail+1)); failed+=("module link"); echo "FAIL module link:"; cat "$WORK/mlink0"
+else
+  check "module link" "tests/expected/tests/link/module.out" "$WORK/mlink0"
 fi
 if ( cd "$WORK" && "$CC" -c --flat 0x10000 -o flat_bad.o "$ROOT/tests/link/parts/mod_add.lap" >/dev/null 2>err.txt ); then
   fail=$((fail+1)); failed+=("link -c --flat"); echo "FAIL link -c --flat: compiled"

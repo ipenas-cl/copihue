@@ -1,0 +1,4 @@
+import "parts/mpriv.lap";
+fn main() -> i64 {
+    return secret::hidden();
+}

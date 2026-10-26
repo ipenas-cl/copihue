@@ -1,0 +1,11 @@
+import "parts/mod_a.lap";
+
+fn main() -> i64 {
+    print_int(a::part());
+    println("");
+    print_int(b::part());
+    println("");
+    print_int(c::part());
+    println("");
+    return 0;
+}
