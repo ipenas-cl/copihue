@@ -1,0 +1,4 @@
+tests/errors/enum_field_arr.lap:3:27: error: an enum cannot be an array element
+      3 | struct Bad { a: [Option; 2] }
+        |                           ^
+1 error, compilation failed

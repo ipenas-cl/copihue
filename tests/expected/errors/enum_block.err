@@ -1,0 +1,4 @@
+tests/errors/enum_block.lap:6:20: error: match arm block needs a result
+      6 |         Some(n) => {
+        |                    ^
+1 error, compilation failed
