@@ -1,9 +1,11 @@
 // Hosted -O2. A byte copy from index 0 is rep movsb. (a[i] + i + r) & 255
-// over a multiple of 16 is paddb. A power-of-two struct stride is shl.
-// v * 10 stays imul: on parse it did not separate from the previous range.
-// -O0 prints the same lines. A length that is not a multiple of 16, a copy
-// that does not start at 0, and a struct whose size is not a power of two
-// stay on the old path.
+// over a multiple of 16 is paddb. sum = sum + u8[i]; a[i] = (a[i] + imm) & 255
+// over a multiple of 16 is psadbw plus paddb. A one-byte (a[i] + imm) store
+// is add byte, or add al when the arrays differ. A power-of-two struct
+// stride is shl. v * 10 stays imul: on parse it did not separate from the
+// previous range. -O0 prints the same lines. A length that is not a multiple
+// of 16, a copy that does not start at 0, and a struct whose size is not a
+// power of two stay on the old path.
 
 struct Node { val: i64, next: i64 }
 struct Wide { a: i64, b: i64, c: i64, d: i64 }
@@ -351,6 +353,112 @@ fn mul10s() -> i64 {
     return s;
 }
 
+fn suminc16() -> i64 {
+    let n = 16;
+    let i = 0;
+    let s = 0;
+    let t = 0;
+    zero_buf(n);
+    i = 0;
+    while (i < n) {
+        buf[i] = i as u8;
+        i = i + 1;
+    }
+    i = 0;
+    while (i < n) {
+        s = s + buf[i];
+        buf[i] = ((buf[i] + 1) & 255) as u8;
+        i = i + 1;
+    }
+    i = 0;
+    while (i < n) {
+        t = t + buf[i];
+        i = i + 1;
+    }
+    return s * 1000 + t;
+}
+
+fn suminc_cross() -> i64 {
+    let n = 16;
+    let i = 0;
+    let s = 0;
+    let t = 0;
+    fill_src();
+    zero_dst();
+    i = 0;
+    while (i < n) {
+        dst[i] = src[i];
+        i = i + 1;
+    }
+    i = 0;
+    while (i < n) {
+        s = s + dst[i];
+        src[i] = ((src[i] + 1) & 255) as u8;
+        i = i + 1;
+    }
+    i = 0;
+    while (i < n) {
+        t = t + src[i];
+        i = i + 1;
+    }
+    return s * 1000 + t;
+}
+
+fn inc15() -> i64 {
+    let n = 15;
+    let i = 0;
+    let s = 0;
+    zero_buf(n);
+    i = 0;
+    while (i < n) {
+        buf[i] = ((buf[i] + 1) & 255) as u8;
+        i = i + 1;
+    }
+    i = 0;
+    while (i < n) {
+        s = s + buf[i];
+        i = i + 1;
+    }
+    return s;
+}
+
+fn plus1() -> i64 {
+    let n = 8;
+    let i = 0;
+    let s = 0;
+    fill_src();
+    zero_dst();
+    i = 0;
+    while (i < n) {
+        dst[i] = (src[i] + 1) as u8;
+        i = i + 1;
+    }
+    i = 0;
+    while (i < n) {
+        s = s + dst[i];
+        i = i + 1;
+    }
+    return s;
+}
+
+fn add200_15() -> i64 {
+    let n = 15;
+    let i = 0;
+    let s = 0;
+    zero_buf(n);
+    i = 0;
+    while (i < n) {
+        buf[i] = ((buf[i] + 200) & 255) as u8;
+        i = i + 1;
+    }
+    i = 0;
+    while (i < n) {
+        s = s + buf[i];
+        i = i + 1;
+    }
+    return s;
+}
+
 fn main() -> i32 {
     print_int(copy0());
     println("");
@@ -387,6 +495,16 @@ fn main() -> i32 {
     print_int(odd_sum());
     println("");
     print_int(mul10s());
+    println("");
+    print_int(suminc16());
+    println("");
+    print_int(suminc_cross());
+    println("");
+    print_int(inc15());
+    println("");
+    print_int(plus1());
+    println("");
+    print_int(add200_15());
     println("");
     return 0;
 }
