@@ -2,6 +2,22 @@
 
 Todos los cambios importantes del proyecto.
 
+## [0.36.2] - 2026-10-26
+
+### Changed
+- Language version is 0.36.2, on top of 0.36.1. The only edit in `compiler/bootstrap-c/copihue.c` is that version string. No instruction selection changed. The 0.36.1 `lock add` and direct `&name` operand stay.
+
+### Not shipped
+- Hosted `-O2` store of `arr[i].field = v` as one memory operand. The index had no call and no assignment. The value was an immediate, a callee-saved register (`r12`–`r15`), or a scalar slot. The index was scaled once (`shl` for a power of two, `imul` otherwise, including `*12`) and the store was `mov dword [orders+reg+off], …`. A call, an assignment in the index, a volatile immediate, and any other value stayed on the push path. `-O0`, `--freestanding`, `--flat`, and `--boot` were unchanged. This is not the 0.33.1 leaf inliner, not a fifth callee-saved register, and not the `*12` `lea`.
+- Paired window 2026-10-26T05:20:04Z — 2026-10-26T05:20:17Z, same machine, one warmup and seven runs, alternating which binary ran first. Milliseconds, median (min–max). The before binary is 0.36.1. The after binary is that store. Checksums stayed 2160927, 2853449, 2052000, 274869518336, and 500000500000.
+- `examples/lowlat/bench/book`, `taskset -c 0`: 49.4 (48.9–49.6) to 59.2 (58.9–59.8). The new minimum is above the old maximum. The text went from 1330 lines to 1116. `insert` moved from `0x40166b` to `0x40157d` and `cancel` from `0x4018f9` to `0x40174d`. The stores are shorter. The book is slower.
+- `examples/lowlat/bench/match`, `taskset -c 0`: 46.8 (46.5–49.1) to 47.1 (46.9–47.4). The ranges overlap.
+- `examples/lowlat/bench/pool`, `taskset -c 0`: 13.1 (12.6–13.3) to 13.3 (12.9–13.5). The ranges overlap. `bench/lowlat/pool.lap` was the same bytes and was not retimed.
+- `bench/src/list`, `taskset -c 0`: 41.0 (40.8–41.4) to 41.1 (40.8–41.4). The ranges overlap. The walk is still the load. The difference is the init stores.
+- `bench/lowlat`, `taskset -c 0,1,2,3`: `mpmc` 163.7 (158.0–170.9) to 162.8 (140.7–171.3), `spmc` 236.6 (207.2–287.5) to 264.1 (214.6–285.4), `tpool` 219.1 (205.5–255.1) to 230.5 (202.9–256.8). All three ranges overlap. `spsc` was the same bytes and was not retimed.
+- The same bytes as 0.36.1, so not retimed: `bench/src` `fib`, `parse`, `matmul`, `arith`, `chain`, `fold`, `array`, `array_global`, `sort`, `fill`, `copy`, `hash`, `sieve`, and `examples/lowlat/bench` `vec`, `share`, `split`, `pin`, `same`, `free`, `watch`. `fib` stays about 3× C. `parse` and `vec` were not this change.
+- A diagnostic pass, not the compiler, put 462 `nop`s in that book assembly so `book_init`, `take`, `give`, `find_level`, `add_level`, `drop_level`, `insert`, `cancel`, `best_bid`, `best_ask`, `rnd`, and `main` start at the 0.36.1 addresses. Checksum still 2160927. Against 0.36.1, `taskset -c 0`, one warmup and seven runs, alternating: 49.7 (49.3–50.1) and 49.4 (49.1–49.8). The ranges overlap. The shorter stores are not a win once the later functions stay put, and the unpadded form is a regression. The `nop`s are not emitted. This is the same address shift as the 0.35.1 note that kept the pointer walk off a loop with no call.
+
 ## [0.36.1] - 2026-10-26
 
 ### Added
