@@ -4,7 +4,8 @@
 #   tests/run_tests.sh            run everything
 #   tests/run_tests.sh --update   regenerate golden files (review the diff!)
 #
-# 1. Program tests: every tests/**/*.lap and examples/*.lap is compiled at -O0
+# 1. Program tests: every tests/**/*.lap, examples/*.lap, and examples/*/*.lap
+#    (including examples/lowlat and its benches) is compiled at -O0
 #    and -O2, run with a timeout, and its stdout + exit code compared with
 #    tests/expected/<path>.out. Both optimization levels must match the same
 #    golden file. Heap/stack addresses (9+ digit numbers) are masked.
@@ -47,7 +48,7 @@ check() {  # $1 = name, $2 = golden file, $3 = actual file
   else fail=$((fail+1)); failed+=("$1"); echo "FAIL $1"; [ -f "$2" ] && diff "$2" "$3" | head -10; fi
 }
 
-for src in $(ls tests/*.lap tests/*/*.lap examples/*.lap | grep -v -e '^tests/errors/' -e '^tests/freestanding/' -e "^tests/flat/" -e "^tests/boot/" -e '^tests/usermode/' -e '^tests/ctx/'); do
+for src in $(ls tests/*.lap tests/*/*.lap examples/*.lap examples/*/*.lap examples/*/*/*.lap | grep -v -e '^tests/errors/' -e '^tests/freestanding/' -e "^tests/flat/" -e "^tests/boot/" -e '^tests/usermode/' -e '^tests/ctx/'); do
   case "$SKIP" in *" $src "*) continue ;; esac
   golden=tests/expected/${src%.lap}.out
   run_program "$src" -O0 > "$WORK/o0"

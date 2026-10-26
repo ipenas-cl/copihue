@@ -1,4 +1,4 @@
-# Copihue Language Reference (v0.31.0)
+# Copihue Language Reference (v0.31.2)
 
 This document describes the language that `copihue` accepts today. Anything not listed here is not supported.
 Planned features are in the README roadmap.

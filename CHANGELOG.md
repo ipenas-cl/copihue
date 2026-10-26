@@ -2,6 +2,19 @@
 
 Todos los cambios importantes del proyecto.
 
+## [0.31.2] - 2026-10-26
+
+### Added
+- `examples/lowlat/` is four hosted programs: a fixed-block pool with a pointer free list (`alloc` / `free` are O(1); a full pool returns a null pointer), an order book with price levels and FIFO orders per side (insert, cancel, best bid/ask; cancelling an unknown id prints `miss`), a matching engine on that book (limit and market orders, price-time priority, a partial cross), and a single-threaded power-of-two ring with `volatile` head and tail. There are no threads. Atomics are not in this release.
+- Each program has a note on the capability it shows: real field widths (`Block` is 24 bytes, `Order` 12, `Level` 16), pointers, `as` (a pointer turned into an integer, an `i64` stored in an `i32`, a `u32` index stored into an `i64` slot), and `volatile` on the ring indices. `-O0` and `-O2` print the same lines. The golden files are `tests/expected/examples/lowlat/`.
+- `examples/lowlat/bench/` is the same pool, book, and engine in Copihue, C, and Rust, with a larger fixed load. `run.sh` checks the three stdout bytes, then records one warmup and seven runs (`taskset -c 0`, median is the 4th). The ring is not timed.
+
+### Changed
+- Language version is 0.31.2, on top of 0.31.0. 0.31.1 is the open `psadbw` change for `copy` and is not in this branch. The language rules are the 0.31.0 rules. This release does not change the code generator.
+
+### Measured
+- On this machine, `examples/lowlat/RESULTS.md` is the 2026-10-26T00:27:12Z — 2026-10-26T00:27:15Z window (the binary prints 0.31.2). Copihue is above C and Rust on all three rows. The ranges do not overlap. Pool 20.8 ms (20.2–23.4) against C 9.1 (8.5–9.3) and Rust 9.0 (8.6–9.3). Book 49.6 (49.3–50.0) against C 38.7 (38.3–39.1) and Rust 33.4 (33.2–33.5). Match 47.1 (46.8–47.3) against C 33.2 (32.9–33.4) and Rust 33.6 (33.1–34.4). Nothing here is faster. The ring was not measured: without atomics it is not an SPSC queue between two threads.
+
 ## [0.31.0] - 2026-10-25
 
 ### Added

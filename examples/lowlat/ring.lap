@@ -1,0 +1,62 @@
+// Anillo de 8 ranuras, una sola hebra. Una ranura queda vacía para
+// distinguir lleno de vacío. head y tail son volatile: cada lectura y
+// cada escritura es un acceso a memoria. No hay atómicos ni hilos.
+let slots: [i64; 8];
+let volatile head: u32 = 0;
+let volatile tail: u32 = 0;
+
+fn ring_push(v: i64) -> i64 {
+    let h: u32 = head;
+    let t: u32 = tail;
+    let nxt: u32 = (h + 1) & 7;
+    if (nxt == t) { return 0; }
+    slots[h as i64] = v;
+    head = nxt;
+    return 1;
+}
+
+fn ring_pull(out: *i64) -> i64 {
+    let h: u32 = head;
+    let t: u32 = tail;
+    if (t == h) { return 0; }
+    *out = slots[t as i64];
+    tail = (t + 1) & 7;
+    return 1;
+}
+
+fn main() -> i32 {
+    let i = 0;
+    let v = 0;
+    let p: *i64 = &v;
+    print("mask ");
+    print_int(7);
+    println("");
+    while (i < 7) {
+        print_int(ring_push(10 + i));
+        if (i < 6) { print(" "); }
+        i = i + 1;
+    }
+    println("");
+    print("full ");
+    print_int(ring_push(99));
+    println("");
+    ring_pull(p);
+    print("pop ");
+    print_int(v);
+    println("");
+    print("push ");
+    print_int(ring_push(80));
+    println("");
+    i = 0;
+    while (i < 7) {
+        ring_pull(p);
+        print_int(v);
+        if (i < 6) { print(" "); }
+        i = i + 1;
+    }
+    println("");
+    print("empty ");
+    print_int(ring_pull(p));
+    println("");
+    return 0;
+}
