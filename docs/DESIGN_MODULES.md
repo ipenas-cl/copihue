@@ -40,6 +40,8 @@ Una invocación de `copihue`, con todos los `import` y todos los archivos de la 
 
 `--freestanding`, `--flat` y `--boot` aceptan `module`, `pub` e `import` con las mismas reglas. `import` dentro de `section` sigue prohibido.
 
+`--flat ADDR --elf` es esa misma unidad como un ELF64 ejecutable (`ET_EXEC`), no un objeto reubicable. Varios `.lap` y sus módulos salen en un solo archivo. Una `section "nombre" @ dirección` conserva ese nombre y esa dirección virtual. Sin `--elf`, `--flat` sigue siendo el binario crudo de `nasm -f bin`.
+
 ## `extern` que ya existe
 
 `extern nombre;` y `extern fn` siguen significando «este símbolo lo define otro objeto». Sin `-c`, `extern fn` sigue siendo un error. En el espacio plano el símbolo es el nombre escrito: `extern fn add` es `add`, `extern bias` es `bias`. Los objetos de `tests/link` no cambian.
