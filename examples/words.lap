@@ -1,0 +1,65 @@
+enum Result<T, E> { Ok(T), Err(E) }
+
+fn words(s: str) -> Result<i64, i64> {
+    let i = 0;
+    let n = 0;
+    let inw = 0;
+    while (i < s.len) {
+        let c = s[i];
+        if (c == 9) {
+            return Result<i64, i64>::Err(i);
+        }
+        if (c == 32) {
+            inw = 0;
+        } else {
+            if (inw == 0) {
+                n = n + 1;
+                inw = 1;
+            }
+        }
+        i = i + 1;
+    }
+    return Result<i64, i64>::Ok(n);
+}
+
+fn report(r: Result<i64, i64>) -> i64 {
+    match r {
+        Ok(v) => {
+            print_int(0);
+            println("");
+            print_int(v);
+        },
+        Err(e) => {
+            print_int(1);
+            println("");
+            print_int(e);
+        }
+    };
+    return 0;
+}
+
+fn main() -> i64 {
+    let a: str = "one two three";
+    let b: str = "  hi  ";
+    let c: str = "";
+    let d: str = "tab\there";
+    report(words(a));
+    println("");
+    report(words(b));
+    println("");
+    report(words(c));
+    println("");
+    report(words(d));
+    println("");
+    let w: str = a[0..3];
+    println(w);
+    let again: str = "one two three";
+    let other: str = "  hi  ";
+    print_int(a == a);
+    println("");
+    print_int(a == again);
+    println("");
+    print_int(a == other);
+    println("");
+    return 0;
+}

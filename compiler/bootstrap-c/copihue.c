@@ -16,7 +16,7 @@
 
 // ==== NAMING (single place to change when the language is renamed) ====
 #define LANG_NAME     "Copihue"
-#define LANG_VERSION  "0.42.1"
+#define LANG_VERSION  "0.43.0"
 #define COMPILER_BIN  "copihue"
 #define SRC_EXT       ".lap"   /* Lapageria rosea, the copihue */
 #define OLD_SRC_EXT   ".cph"   /* v0.18.x extension, still accepted with a warning */
@@ -837,7 +837,13 @@ char* strtab_add(StringTable* st, char* value, int len) {
     snprintf(label, 32, "str_%d", st->count - 1);
 
     st->strings[st->count - 1].label = label;
-    st->strings[st->count - 1].value = strndup(value, len);
+    /* memcpy, not strndup: a str length counts an interior NUL. */
+    {
+        char* buf = malloc((size_t)len + 1);
+        if (len > 0 && value) memcpy(buf, value, (size_t)len);
+        buf[len] = '\0';
+        st->strings[st->count - 1].value = buf;
+    }
     st->strings[st->count - 1].len = len;
 
     return label;
@@ -1676,7 +1682,9 @@ char* number_literal_to_decimal(Tok t) {
 }
 
 // Decode escape sequences in a string literal body: \n \t \r \0 \\ \" \'
-static char* decode_string_literal(const char* s, int len) {
+// *out_len is the decoded byte count. It includes an interior NUL. The
+// buffer is still terminated so a *u8 use can call strlen.
+static char* decode_string_literal(const char* s, int len, int* out_len) {
     char* out = malloc(len + 1);
     int o = 0;
     for (int i = 0; i < len; i++) {
@@ -1697,13 +1705,15 @@ static char* decode_string_literal(const char* s, int len) {
         } else out[o++] = s[i];
     }
     out[o] = '\0';
+    if (out_len) *out_len = o;
     return out;
 }
 
 static int builtin_type_name(const char* s) {
     return s && (!strcmp(s, "i8") || !strcmp(s, "u8") || !strcmp(s, "i16") ||
                  !strcmp(s, "u16") || !strcmp(s, "i32") || !strcmp(s, "u32") ||
-                 !strcmp(s, "i64") || !strcmp(s, "u64") || !strcmp(s, "bool"));
+                 !strcmp(s, "i64") || !strcmp(s, "u64") || !strcmp(s, "bool") ||
+                 !strcmp(s, "str"));
 }
 
 static int is_tparse(const char* s);
@@ -2393,7 +2403,11 @@ AstNode* parse_primary(Parser* p) {
     if (check_tok(p, T_STR)) {
         Tok t = advance_tok(p);
         AstNode* n = ast_new(AST_STRING);
-        n->value = decode_string_literal(t.s + 1, t.len - 2);
+        {
+            int slen = 0;
+            n->value = decode_string_literal(t.s + 1, t.len - 2, &slen);
+            n->array_size = slen;
+        }
         return n;
     }
     if (check_tok(p, T_LBRACKET)) {
@@ -2490,6 +2504,7 @@ AstNode* parse_primary(Parser* p) {
                 TypeSpec ts = parse_type(p);
                 AstNode* id = ast_new(AST_IDENT);
                 id->name = ts.base_type ? ts.base_type : strdup("");
+                if (ts.is_slice) id->struct_type = strdup("__slice__");
                 ast_add(call, id);
                 if (match_tok(p, T_COMMA)) {
                     while (!check_tok(p, T_RPAREN) && !check_tok(p, T_EOF)) {
@@ -2665,11 +2680,20 @@ AstNode* parse_postfix(Parser* p) {
     AstNode* left = parse_postfix_base(p);
     while (1) {
         if (check_tok(p, T_LBRACKET)) {
-            // Array indexing
-            advance_tok(p);
+            // Array indexing, or s[i..j] (a slice of the bytes, not one byte).
+            Tok lb = advance_tok(p);
             AstNode* index_node = ast_new(AST_INDEX);
+            index_node->line = lb.line;
+            index_node->col = lb.col;
             ast_add(index_node, left);
             ast_add(index_node, parse_expr(p));
+            if (check_tok(p, T_DOTDOT)) {
+                advance_tok(p);
+                if (check_tok(p, T_RBRACKET))
+                    diag_error(lb.line, lb.col, "a substring needs a start and an end");
+                else
+                    ast_add(index_node, parse_expr(p));
+            }
             expect(p, T_RBRACKET);
             left = index_node;
         } else if (check_tok(p, T_ARROW)) {
@@ -3279,6 +3303,13 @@ AstNode* parse_stmt(Parser* p) {
 
     // Check for array assignment: array[index] = value
     if (expr && expr->type == AST_INDEX && check_tok(p, T_EQ)) {
+        if (expr->child_count >= 3) {
+            diag_error(expr->line, expr->col, "a substring is not a place");
+            advance_tok(p);
+            parse_expr(p);
+            end_simple_stmt(p);
+            return ast_new(AST_BLOCK);
+        }
         advance_tok(p);  // Consume '='
         AstNode* array_assign = ast_new(AST_ARRAY_ASSIGN);
         // children[0] = array base (from INDEX)
@@ -3655,6 +3686,16 @@ TypeSpec parse_type(Parser* p) {
     }
     if (!check_tok(p, T_IDENT)) error_expected_type(p);
     spec.base_type = take_type_name(p);
+    /* `str` is []u8. A type parameter of that spelling stays the parameter
+     * (the definition already said it hides a builtin). */
+    if (spec.base_type && !strcmp(spec.base_type, "str") && !is_tparse(spec.base_type)) {
+        if (check_tok(p, T_LT))
+            diag_error(p->tokens[p->pos].line, p->tokens[p->pos].col, "str is not a generic type");
+        free(spec.base_type);
+        spec.base_type = strdup("u8");
+        spec.is_slice = 1;
+        return spec;
+    }
     if (check_tok(p, T_LT)) {
         char* args[MAX_TPARAMS];
         int n = 0, i;
@@ -4380,7 +4421,7 @@ static void parse_import(Parser* p, AstNode* prog) {
         diag_error(kw.line, kw.col, "import needs a string path");
         return;
     }
-    char* rel = decode_string_literal(str.s + 1, str.len - 2);
+    char* rel = decode_string_literal(str.s + 1, str.len - 2, NULL);
     char* dir = path_dir(g_src_file);
     char* full = path_join(dir, rel);
     expect(p, T_SEMI);
@@ -4407,7 +4448,7 @@ static void parse_section(Parser* p, AstNode* prog) {
         return;
     }
     Tok str = advance_tok(p);
-    char* name = decode_string_literal(str.s + 1, str.len - 2);
+    char* name = decode_string_literal(str.s + 1, str.len - 2, NULL);
     if (!section_name_ok(name))
         diag_error(str.line, str.col, "section name '%s' is not a NASM section name", name ? name : "");
     int has_addr = 0;
@@ -6026,6 +6067,8 @@ static void atomic_ptr_error(Codegen* cg, AstNode* n, AstNode* p) {
                n->name ? n->name : "atomic", got);
 }
 
+static int expr_is_u8_slice(Codegen* cg, AstNode* a);
+
 static void check_builtin_args(Codegen* cg, AstNode* n) {
     const char* f;
     int c;
@@ -6033,7 +6076,10 @@ static void check_builtin_args(Codegen* cg, AstNode* n) {
     f = n->name;
     c = n->child_count;
     if (!strcmp(f, "print") || !strcmp(f, "println") || !strcmp(f, "strlen")) {
-        if (c >= 1) check_arg(cg, n->children[0], 0, f, ty_from_spelled(cg, "*u8"));
+        /* print(str) is write(1, ptr, len). strlen still wants a *u8. */
+        if (c >= 1 && !((!strcmp(f, "print") || !strcmp(f, "println")) &&
+                        expr_is_u8_slice(cg, n->children[0])))
+            check_arg(cg, n->children[0], 0, f, ty_from_spelled(cg, "*u8"));
         return;
     }
     if (!strcmp(f, "strcmp") || !strcmp(f, "strcpy")) {
@@ -8768,18 +8814,39 @@ void gen_builtin_call(Codegen* cg, AstNode* n) {
             }
         }
     }
-    if (!strcmp(n->name, "print")) {
-        if (n->child_count > 0) {
+    if (!strcmp(n->name, "print") || !strcmp(n->name, "println")) {
+        int nl = !strcmp(n->name, "println");
+        if (n->child_count > 0 && expr_is_u8_slice(cg, n->children[0])) {
+            /* Same bytes as write(1, s.ptr, s.len). No __strlen, no libc. */
+            AstNode* call = ast_new(AST_CALL);
+            AstNode* fd = ast_new(AST_NUMBER);
+            AstNode* ptr = ast_new(AST_FIELD_ACCESS);
+            AstNode* lenf = ast_new(AST_FIELD_ACCESS);
+            call->name = strdup("write");
+            call->line = n->line;
+            call->col = n->col;
+            fd->value = strdup("1");
+            ptr->name = strdup("ptr");
+            ptr->line = n->line;
+            ptr->col = n->col;
+            ast_add(ptr, n->children[0]);
+            lenf->name = strdup("len");
+            lenf->line = n->line;
+            lenf->col = n->col;
+            ast_add(lenf, n->children[0]);
+            ast_add(call, fd);
+            ast_add(call, ptr);
+            ast_add(call, lenf);
+            gen_builtin_call(cg, call);
+        } else if (n->child_count > 0) {
             gen_print_arg(cg, n->children[0]);
         }
-    } else if (!strcmp(n->name, "println")) {
-        if (n->child_count > 0) {
-            gen_print_arg(cg, n->children[0]);
+        if (nl) {
+            // Newline from a temporary stack slot (never overlaps locals)
+            emit(cg, "    push 10\n    mov rsi, rsp\n");
+            emit(cg, "    mov rdi, 1\n    mov rdx, 1\n    mov rax, 1\n    syscall\n");
+            emit(cg, "    add rsp, 8\n");
         }
-        // Newline from a temporary stack slot (never overlaps locals)
-        emit(cg, "    push 10\n    mov rsi, rsp\n");
-        emit(cg, "    mov rdi, 1\n    mov rdx, 1\n    mov rax, 1\n    syscall\n");
-        emit(cg, "    add rsp, 8\n");
     } else if (!strcmp(n->name, "print_int")) {
         if (n->child_count > 0) {
             gen_expr(cg, n->children[0]);
@@ -9373,6 +9440,15 @@ static const char* slice_elem_name(Symbol* s, GlobalVar* g) {
     return "i64";
 }
 
+static int expr_is_u8_slice(Codegen* cg, AstNode* a) {
+    Symbol* s = local_slice(cg, a);
+    GlobalVar* g = s ? NULL : global_slice(cg, a);
+    const char* elem;
+    if (!s && !g) return 0;
+    elem = slice_elem_name(s, g);
+    return elem && !strcmp(elem, "u8");
+}
+
 static char* ptr_field_elem(Codegen* cg, AstNode* base) {
     Symbol* s;
     GlobalVar* g;
@@ -9457,6 +9533,11 @@ static int gen_slice_index(Codegen* cg, AstNode* n, int want_addr) {
     const char* elem;
     const char* base_name = NULL;
     if (!n || n->type != AST_INDEX || n->child_count < 2) return 0;
+    if (n->child_count >= 3) {
+        diag_error(n->line, n->col, "a substring is a slice; bind it with let");
+        emit(cg, "    xor rax, rax\n");
+        return 1;
+    }
     arr = n->children[0];
     ix = n->children[1];
     if (!slice_index_base(cg, arr, &s, &g, &unchecked)) return 0;
@@ -9680,6 +9761,70 @@ static Symbol* local_array_sym(Codegen* cg, AstNode* id) {
     return (s && s->is_array) ? s : NULL;
 }
 
+// s[i..j] stored at a local slice slot. `j` is exclusive. Unsigned
+// `i <= j <= len`, or the same `index out of range` trap as s[i].
+static void fill_substr(Codegen* cg, AstNode* idx, int off, const char* want, Symbol* dst) {
+    AstNode* base;
+    AstNode* start;
+    AstNode* end;
+    Symbol* s;
+    GlobalVar* g;
+    const char* elem;
+    int es, is_struct, lab;
+    if (!idx || idx->child_count < 3) return;
+    base = idx->children[0];
+    start = idx->children[1];
+    end = idx->children[2];
+    s = local_slice(cg, base);
+    g = s ? NULL : global_slice(cg, base);
+    if (!s && !g) {
+        diag_error(idx->line, idx->col, "a substring needs a slice");
+        zero_slice(cg, off);
+        return;
+    }
+    if (legacy_bits()) {
+        diag_error(idx->line, idx->col, "[]T is a 64-bit value");
+        zero_slice(cg, off);
+        return;
+    }
+    elem = slice_elem_name(s, g);
+    if (want && elem && strcmp(want, elem)) {
+        diag_error(idx->line, idx->col, "expected []%s, found []%s", want, elem);
+        zero_slice(cg, off);
+        return;
+    }
+    if (!want && dst) remember_elem(dst, elem);
+    es = elem_layout(cg, elem, &is_struct);
+    if (is_struct) {
+        diag_error(idx->line, idx->col, "a substring element must be an integer or a pointer");
+        zero_slice(cg, off);
+        return;
+    }
+    gen_expr(cg, start);
+    emit(cg, "    push rax\n");
+    gen_expr(cg, end);
+    emit(cg, "    push rax\n");
+    load_slice_len(cg, s, g);
+    emit(cg, "    pop rdx\n");
+    emit(cg, "    pop rax\n");
+    if (slice_checks()) {
+        lab = new_label(cg);
+        emit(cg, "    cmp rax, rdx\n");
+        emit(cg, "    ja .Lslice_trap_%d\n", lab);
+        emit(cg, "    cmp rdx, rcx\n");
+        emit(cg, "    ja .Lslice_trap_%d\n", lab);
+        emit_trap_cold(cg, lab, "trap", "index out of range\n", 19);
+    }
+    emit(cg, "    sub rdx, rax\n");
+    emit(cg, "    push rdx\n");
+    load_slice_ptr(cg, s, g);
+    if (es > 1) emit_scale_reg(cg, "rax", es);
+    emit(cg, "    add rbx, rax\n");
+    emit(cg, "    pop rax\n");
+    emit(cg, "    mov [rbp%d], rbx\n", off);
+    emit(cg, "    mov [rbp%d], rax\n", off + 8);
+}
+
 static void gen_slice_let(Codegen* cg, AstNode* n) {
     AstNode* init;
     Symbol* dst;
@@ -9760,6 +9905,32 @@ static void gen_slice_let(Codegen* cg, AstNode* n) {
             }
         }
     }
+    if (init && init->type == AST_STRING) {
+        AstNode* call;
+        AstNode* num;
+        char buf[32];
+        if (want && strcmp(want, "u8")) {
+            diag_error(init->line, init->col, "expected []%s, found str", want);
+            zero_slice(cg, off);
+            return;
+        }
+        /* Same stores as slice(literal, decoded_len), including the
+         * negative-length test a handwritten slice() emits. */
+        call = ast_new(AST_CALL);
+        call->name = strdup("slice");
+        call->line = init->line;
+        call->col = init->col;
+        ast_add(call, init);
+        num = ast_new(AST_NUMBER);
+        snprintf(buf, sizeof buf, "%d", init->array_size);
+        num->value = strdup(buf);
+        ast_add(call, num);
+        init = call;
+    }
+    if (init && init->type == AST_INDEX && init->child_count >= 3) {
+        fill_substr(cg, init, off, want, dst);
+        return;
+    }
     if (init && init->type == AST_CALL && init->name && !strcmp(init->name, "slice")) {
         AstNode* plen;
         VTy pt;
@@ -9827,6 +9998,15 @@ static int gen_slice_assign(Codegen* cg, AstNode* n) {
         return 1;
     }
     src = n->children[0];
+    if (src && src->type == AST_INDEX && src->child_count >= 3) {
+        if (!ds || !ds->is_slice) {
+            diag_error(n->line, n->col, "a substring initializes a local str");
+            return 1;
+        }
+        fill_substr(cg, src, ds->offset,
+                    ds->type_name ? ds->type_name : "i64", ds);
+        return 1;
+    }
     ss = local_slice(cg, src);
     sg = ss ? NULL : global_slice(cg, src);
     if (!ss && !sg) {
@@ -9908,6 +10088,21 @@ static void finish_global_slice(Codegen* cg, AstNode* gvar, GlobalVar* added) {
         gvar->children[0]->name && !strcmp(gvar->children[0]->name, "slice")) {
         diag_error(gvar->line, gvar->col, "slice() initializes a local []T");
         added->is_initialized = 0;
+        return;
+    }
+    if (gvar->children[0] && gvar->children[0]->type == AST_STRING) {
+        AstNode* lit = gvar->children[0];
+        char* lab;
+        if (strcmp(want, "u8")) {
+            diag_error(lit->line, lit->col, "expected []%s, found str", want);
+            added->is_initialized = 0;
+            return;
+        }
+        lab = strtab_add(cg->strtab, lit->value, lit->array_size);
+        added->is_initialized = 1;
+        free(added->init_value);
+        added->init_value = strdup(lab);
+        added->array_count = lit->array_size;
         return;
     }
     if (static_slice_from(cg, gvar, &label, &count, &elem, 0)) {
@@ -10206,8 +10401,8 @@ void gen_array_index(Codegen* cg, AstNode* n) {
 
     // Handle string literal indexing: "Hello"[0]
     if (arr->type == AST_STRING) {
-        char* label = strtab_add(cg->strtab, arr->value, strlen(arr->value));
-        int str_len = strlen(arr->value);
+        int str_len = arr->array_size;
+        char* label = strtab_add(cg->strtab, arr->value, str_len);
 
         gen_expr(cg, n->children[1]);  // Index in rax
 
@@ -10760,6 +10955,7 @@ static int known_type_size(Codegen* cg, const char* name, int is_pointer) {
     if (is_pointer || (name && name[0] == '*'))
         return type_layout(cg ? cg->types : NULL, name, 1, &al, 0);
     if (!name) return -1;
+    if (!strcmp(name, "str")) return 16;
     if (prim_width(name) || name[0] == '[')
         return type_layout(cg ? cg->types : NULL, name, 0, &al, 0);
     st = (cg && cg->types) ? typetab_lookup(cg->types, (char*)name) : NULL;
@@ -10775,6 +10971,7 @@ static int known_type_size(Codegen* cg, const char* name, int is_pointer) {
 // A scalar local still occupies an 8-byte slot; this reports the type's width.
 static int sizeof_node(Codegen* cg, AstNode* n) {
     if (!n || !cg) return -1;
+    if (n->struct_type && !strcmp(n->struct_type, "__slice__")) return 16;
     if (n->type == AST_FIELD_ACCESS) {
         StructField* f = access_field(cg, n);
         if (!f) return -1;
@@ -12843,11 +13040,12 @@ void gen_expr(Codegen* cg, AstNode* n) {
         if (legacy_bits()) emit(cg, "    mov eax, %s\n", n->value);
         else emit(cg, "    mov rax, %s\n", n->value);
     } else if (n->type == AST_STRING) {
-        char* label = strtab_add(cg->strtab, n->value, strlen(n->value));
+        int slen = n->array_size;
+        char* label = strtab_add(cg->strtab, n->value, slen);
         if (legacy_bits()) emit(cg, "    mov eax, %s\n", label);
         else {
             emit(cg, "    mov rax, %s\n", label);
-            emit(cg, "    mov rbx, %d\n", (int)strlen(n->value));
+            emit(cg, "    mov rbx, %d\n", slen);
         }
     } else if (n->type == AST_IDENT) {
         // A qualified name is `mod__item`. A local does not hide it.
@@ -18280,6 +18478,311 @@ static void lower_tries(AstNode* fn) {
     lower_block(body);
 }
 
+static int g_str_seq;
+
+static int str_u8_name(const char* name, char** names, int nn) {
+    int i;
+    if (!name) return 0;
+    for (i = nn - 1; i >= 0; i--)
+        if (names[i] && !strcmp(names[i], name)) return 1;
+    return 0;
+}
+
+static int str_u8_ident(AstNode* n, char** names, int nn) {
+    return n && n->type == AST_IDENT && n->name && !n->qual && str_u8_name(n->name, names, nn);
+}
+
+static int str_u8_cmp(AstNode* n, char** names, int nn) {
+    if (!n || n->type != AST_COMPARE || !n->op || n->child_count != 2) return 0;
+    if (strcmp(n->op, "==") && strcmp(n->op, "!=")) return 0;
+    return str_u8_ident(n->children[0], names, nn) && str_u8_ident(n->children[1], names, nn);
+}
+
+static int str_u8_let(AstNode* st) {
+    return st && st->type == AST_LET && st->name && st->struct_type &&
+           !strcmp(st->struct_type, "__slice__") && st->value && !strcmp(st->value, "u8");
+}
+
+static void ast_insert_n(AstNode* parent, int idx, AstNode** nodes, int n) {
+    int old, i;
+    if (!parent || n <= 0) return;
+    old = parent->child_count;
+    parent->child_count = old + n;
+    parent->children = safe_realloc(parent->children, sizeof(AstNode*) * (size_t)parent->child_count);
+    if (old > idx)
+        memmove(&parent->children[idx + n], &parent->children[idx],
+                (size_t)(old - idx) * sizeof(AstNode*));
+    for (i = 0; i < n; i++) parent->children[idx + i] = nodes[i];
+}
+
+static void ast_replace_n(AstNode* parent, int idx, AstNode** nodes, int n) {
+    int old, i;
+    if (!parent || n <= 0) return;
+    old = parent->child_count;
+    parent->child_count = old + n - 1;
+    parent->children = safe_realloc(parent->children, sizeof(AstNode*) * (size_t)parent->child_count);
+    if (old - idx - 1 > 0)
+        memmove(&parent->children[idx + n], &parent->children[idx + 1],
+                (size_t)(old - idx - 1) * sizeof(AstNode*));
+    for (i = 0; i < n; i++) parent->children[idx + i] = nodes[i];
+}
+
+static AstNode* ident_at(AstNode* n) {
+    AstNode* c = ident_named(n && n->name ? n->name : "_");
+    if (n) { c->line = n->line; c->col = n->col; }
+    return c;
+}
+
+static AstNode* field_len_of(AstNode* base) {
+    AstNode* f = ast_new(AST_FIELD_ACCESS);
+    f->name = strdup("len");
+    f->line = base ? base->line : 0;
+    f->col = base ? base->col : 0;
+    ast_add(f, ident_at(base));
+    return f;
+}
+
+static AstNode* cmp_op_new(const char* op, AstNode* a, AstNode* b) {
+    AstNode* c = ast_new(AST_COMPARE);
+    c->op = strdup(op);
+    c->line = a ? a->line : 0;
+    c->col = a ? a->col : 0;
+    ast_add(c, a);
+    ast_add(c, b);
+    return c;
+}
+
+static AstNode* index_at_name(AstNode* base, const char* ix) {
+    AstNode* n = ast_new(AST_INDEX);
+    n->line = base ? base->line : 0;
+    n->col = base ? base->col : 0;
+    ast_add(n, ident_at(base));
+    ast_add(n, ident_named(ix));
+    return n;
+}
+
+static AstNode* ret_num(const char* v) {
+    AstNode* r = ast_new(AST_RETURN);
+    ast_add(r, num_node(v));
+    return r;
+}
+
+static AstNode* block_of(AstNode* s) {
+    AstNode* b = ast_new(AST_BLOCK);
+    if (s) ast_add(b, s);
+    return b;
+}
+
+static AstNode* assign_num(const char* name, const char* num) {
+    AstNode* as = ast_new(AST_ASSIGN);
+    as->name = strdup(name);
+    ast_add(as, num_node(num));
+    return as;
+}
+
+/* The loop a programmer writes: `for i in 0..a.len { if (a[i] != b[i]) ... }`.
+ * AF_PROVEN drops the check on a[i]. b[i] stays checked. Three statements. */
+static int append_byte_loop(AstNode** out, AstNode* a, AstNode* b, AstNode* on_diff) {
+    int seq = g_str_seq++;
+    char endn[40], idx[40], at[80];
+    AstNode* lend;
+    AstNode* lidx;
+    AstNode* wh;
+    AstNode* body;
+    AstNode* iff;
+    AstNode* incb;
+    snprintf(endn, sizeof endn, "__str_end_%d", seq);
+    snprintf(idx, sizeof idx, "__str_i_%d", seq);
+    lend = ast_new(AST_LET);
+    lend->name = strdup(endn);
+    ast_add(lend, field_len_of(a));
+    lidx = ast_new(AST_LET);
+    lidx->name = strdup(idx);
+    ast_add(lidx, num_node("0"));
+    iff = ast_new(AST_IF);
+    ast_add(iff, cmp_op_new("!=", index_at_name(a, idx), index_at_name(b, idx)));
+    ast_add(iff, block_of(on_diff));
+    body = ast_new(AST_BLOCK);
+    ast_add(body, iff);
+    wh = ast_new(AST_WHILE);
+    ast_add(wh, cmp_lt(ident_named(idx), ident_named(endn)));
+    ast_add(wh, body);
+    incb = ast_new(AST_BLOCK);
+    ast_add(incb, inc_one(idx));
+    ast_add(wh, incb);
+    wh->flags |= AF_PROVEN;
+    wh->name = strdup(idx);
+    snprintf(at, sizeof at, "@%s", a && a->name ? a->name : "_");
+    wh->value = strdup(at);
+    out[0] = lend;
+    out[1] = lidx;
+    out[2] = wh;
+    return 3;
+}
+
+static int build_return_eq(AstNode* cmp, AstNode** out) {
+    int neq = cmp->op && !strcmp(cmp->op, "!=");
+    const char* bad = neq ? "1" : "0";
+    const char* good = neq ? "0" : "1";
+    AstNode* a = cmp->children[0];
+    AstNode* b = cmp->children[1];
+    AstNode* iff = ast_new(AST_IF);
+    int n = 0;
+    iff->line = cmp->line;
+    iff->col = cmp->col;
+    ast_add(iff, cmp_op_new("!=", field_len_of(a), field_len_of(b)));
+    ast_add(iff, block_of(ret_num(bad)));
+    out[n++] = iff;
+    n += append_byte_loop(out + n, a, b, ret_num(bad));
+    out[n++] = ret_num(good);
+    return n;
+}
+
+static int build_local_eq(const char* dest, AstNode* cmp, AstNode* proto, AstNode** out) {
+    int neq = cmp->op && !strcmp(cmp->op, "!=");
+    const char* bad = neq ? "1" : "0";
+    const char* good = neq ? "0" : "1";
+    AstNode* a = cmp->children[0];
+    AstNode* b = cmp->children[1];
+    AstNode* init = ast_new(AST_LET);
+    AstNode* iff = ast_new(AST_IF);
+    AstNode* el = ast_new(AST_BLOCK);
+    AstNode* loop[4];
+    int ln, i;
+    init->name = strdup(dest);
+    init->line = cmp->line;
+    init->col = cmp->col;
+    if (proto) {
+        init->value = proto->value ? strdup(proto->value) : NULL;
+        init->struct_type = proto->struct_type ? strdup(proto->struct_type) : NULL;
+        init->is_pointer = proto->is_pointer;
+        init->flags = proto->flags;
+        init->line = proto->line;
+        init->col = proto->col;
+    }
+    ast_add(init, num_node(good));
+    ln = append_byte_loop(loop, a, b, assign_num(dest, bad));
+    for (i = 0; i < ln; i++) ast_add(el, loop[i]);
+    iff->line = cmp->line;
+    iff->col = cmp->col;
+    ast_add(iff, cmp_op_new("!=", field_len_of(a), field_len_of(b)));
+    ast_add(iff, block_of(assign_num(dest, bad)));
+    ast_add(iff, el);
+    out[0] = init;
+    out[1] = iff;
+    return 2;
+}
+
+static void forbid_str_cmp(AstNode* n, char** names, int nn) {
+    int i;
+    if (!n || n->type == AST_BLOCK) return;
+    if (str_u8_cmp(n, names, nn)) {
+        diag_error(n->line, n->col, "'%s' on str in a while condition needs a local", n->op);
+        n->type = AST_NUMBER;
+        n->value = strdup("0");
+        n->child_count = 0;
+        return;
+    }
+    for (i = 0; i < n->child_count; i++) forbid_str_cmp(n->children[i], names, nn);
+}
+
+static AstNode* hoist_str_cmp(AstNode* n, AstNode** stmts, int* ns, char** names, int nn) {
+    int i;
+    if (!n || n->type == AST_BLOCK) return n;
+    if (str_u8_cmp(n, names, nn)) {
+        char dest[40];
+        AstNode* built[4];
+        int k, nbuilt;
+        if (*ns + 2 > 24) return n;
+        snprintf(dest, sizeof dest, "__sc_%d", g_str_seq++);
+        nbuilt = build_local_eq(dest, n, NULL, built);
+        for (k = 0; k < nbuilt; k++) stmts[(*ns)++] = built[k];
+        return ident_named(dest);
+    }
+    for (i = 0; i < n->child_count; i++) {
+        if (n->children[i] && n->children[i]->type != AST_BLOCK)
+            n->children[i] = hoist_str_cmp(n->children[i], stmts, ns, names, nn);
+    }
+    return n;
+}
+
+static void lower_str_block(AstNode* block, char** names, int* nn);
+
+static void lower_str_walk(AstNode* n, char** names, int* nn) {
+    int i;
+    if (!n) return;
+    if (n->type == AST_BLOCK) {
+        lower_str_block(n, names, nn);
+        return;
+    }
+    for (i = 0; i < n->child_count; i++) lower_str_walk(n->children[i], names, nn);
+}
+
+static int try_lower_str_stmt(AstNode* block, int idx, char** names, int nn) {
+    AstNode* st = block->children[idx];
+    AstNode* built[8];
+    AstNode* hoisted[24];
+    int ns = 0;
+    if (!st) return 0;
+    if (st->type == AST_WHILE) {
+        if (st->child_count > 0) forbid_str_cmp(st->children[0], names, nn);
+        return 0;
+    }
+    if (st->type == AST_RETURN && st->child_count == 1 && str_u8_cmp(st->children[0], names, nn)) {
+        int n = build_return_eq(st->children[0], built);
+        ast_replace_n(block, idx, built, n);
+        return n;
+    }
+    if (st->type == AST_LET && st->child_count == 1 && str_u8_cmp(st->children[0], names, nn) &&
+        !(st->struct_type && !strcmp(st->struct_type, "__slice__"))) {
+        int n = build_local_eq(st->name, st->children[0], st, built);
+        ast_replace_n(block, idx, built, n);
+        return n;
+    }
+    hoist_str_cmp(st, hoisted, &ns, names, nn);
+    if (ns > 0) {
+        ast_insert_n(block, idx, hoisted, ns);
+        return ns;
+    }
+    return 0;
+}
+
+static void lower_str_block(AstNode* block, char** names, int* nn) {
+    int saved, i;
+    if (!block || block->type != AST_BLOCK) return;
+    saved = *nn;
+    for (i = 0; i < block->child_count; i++) {
+        int nnew = try_lower_str_stmt(block, i, names, *nn);
+        AstNode* st;
+        if (nnew > 0) {
+            i += nnew - 1;
+            continue;
+        }
+        st = block->children[i];
+        lower_str_walk(st, names, nn);
+        if (str_u8_let(st) && *nn < 128) names[(*nn)++] = st->name;
+    }
+    *nn = saved;
+}
+
+static void lower_str(AstNode* fn) {
+    char* names[128];
+    int nn = 0;
+    int i, pc;
+    AstNode* body;
+    g_str_seq = 0;
+    if (!fn || fn->child_count < 1) return;
+    pc = fn->child_count - 1;
+    for (i = 0; i < pc && nn < 128; i++) {
+        AstNode* p = fn->children[i];
+        if (p && p->name && p->struct_type && !strcmp(p->struct_type, "__slice__") &&
+            p->value && !strcmp(p->value, "u8"))
+            names[nn++] = p->name;
+    }
+    body = fn->children[pc];
+    if (body && body->type == AST_BLOCK) lower_str_block(body, names, &nn);
+}
+
 void gen_func(Codegen* cg, AstNode* n) {
     g_eret_off = 0;
     g_enum_dst_kind = 0;
@@ -18389,6 +18892,9 @@ void gen_func(Codegen* cg, AstNode* n) {
      * while shapes look at the body. A nested call generates its own
      * function later; the return enum is already stored on the match. */
     lower_tries(n);
+    /* `str` compare becomes the same if/for a []u8 program writes, before
+     * the frame and the hosted -O2 while shapes look at the body. */
+    lower_str(n);
     if (!(n->is_pointer & 1) && n->value && enum_lookup(n->value) && !enum_ret_allowed(n))
         diag_error(n->line, n->col, "an enum cannot be returned");
     if (n->flags & AF_OWN)

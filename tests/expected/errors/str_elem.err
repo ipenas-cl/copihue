@@ -1,0 +1,4 @@
+tests/errors/str_elem.lap:2:20: error: expected []i64, found str
+      2 |     let s: []i64 = "hi";
+        |                    ^
+1 error, compilation failed
