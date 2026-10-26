@@ -1,0 +1,19 @@
+// also-o2
+enum Option { None, Some(i64) }
+
+fn pick(o: Option) -> i64 {
+    return match o {
+        None => 0,
+        Some(n) => n
+    };
+}
+
+fn _start() -> i64 {
+    let a: Option = Option::Some(1);
+    let n: i64 = pick(a);
+    while (1) {
+        cli();
+        hlt();
+    }
+    return n;
+}

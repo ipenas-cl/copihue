@@ -1,0 +1,4 @@
+tests/errors/enum_arity.lap:4:21: error: variant 'Some' takes 1 field, not 0
+      4 |     let o = Option::Some();
+        |                     ^
+1 error, compilation failed

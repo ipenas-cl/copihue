@@ -2,21 +2,49 @@
 
 Todos los cambios importantes del proyecto.
 
-## [0.37.3] - 2026-10-26
+## [0.38.1] - 2026-10-26
 
 ### Added
 - Hosted `-O2` can place a second scalar or pointer in a register that already holds another name, when the two are never live at the same time. The first assignment is unchanged: callee-saved `r12`–`r15` first, names that cross a call before names that do not, then `r10` and `r11` only for names that do not cross a call. The second pass runs only in a function that contains a call. It does not open another callee-saved slot, so a function that cannot share keeps the same prologue. A name that is live across a call still cannot use `r10` or `r11`. `own *T` stays live until the function returns, because the drop is not a use in the AST. `-O0`, `--freestanding`, `--flat`, `--boot`, and `bits 16` / `bits 32` do not share.
-- The overlap test is a backward walk of `if`, `while`, `break`, `continue`, and `return`, not the straight first-to-last tick. The 0.33.1 attempt shared on that tick and miscompiled the order book: a name used in a `while` condition was recorded before the body, and a body local reused the register. `tests/lang/o2_share.lap` prints the same ten lines at `-O0` and `-O2`, including a loop condition that stays live across a call in the body.
+- The overlap test is a backward walk of `if`, `while`, `break`, `continue`, and `return`, not the straight first-to-last tick. The 0.33.1 attempt shared on that tick and miscompiled the order book: a name used in a `while` condition was recorded before the body, and a body local reused the register. `tests/lang/o2_share.lap` prints the same lines at `-O0` and `-O2`, including a loop condition that stays live across a call in the body.
 
 ### Changed
-- Language version is 0.37.3, on top of 0.37.2.
+- Language version is 0.38.1, on top of 0.38.0. The 0.38.0 enums and `match` are unchanged.
 
 ### Measured
 - Choice, before the change. Hardware `cycles` and `instructions` are not available in this guest (`perf stat` reports them as not supported), so the split is dynamic instruction counts from one counter on each basic block, and `perf` `cpu-clock` at 4999 Hz for which function is running. The cpu-clock samples inside `fib` land on one `cmp` often enough that they are not an instruction mix. Checksums stayed 102334155, 41421435022848, and 2160927.
 - `fib`. 3311603014 instructions. `call`, `ret`, the frame (`sub`/`add rsp`), and the `push`/`pop` of `r12`/`r13` are 50.0%. The other 50.0% is the compare, the two `lea`s, and the add. Stack slots of a local that missed a register are 0. A leaf inliner does not apply: `fib` calls itself. The register plan already keeps `n` and the first result in `r12` and `r13`.
 - `parse`. 337246641 instructions. Work is 100.0%. The inner loop is `movzx`, `imul`, `add`, and `jmp`, all in registers. The only stack operand on the timed path is `cmp r15, [rbp-16]` for the outer trip count, 513 times, 0.0002%. There is one call, the final print.
 - `book`. 759730534 instructions. Work is 93.1%. Stack slots are 5.1%, and 4.03% of all instructions are one reload, `mov rbx, [rbp-8]`, the id in `cancel`'s order walk (30610896 times). Call, return, and frame traffic is 1.7%. The scratch `push`/`pop` of a field store is 0.1%. `cpu-clock` (3586 samples in the binary): `cancel` 71.8%, `find_level` 10.3%, `main` 7.2%, `best_ask` 3.3%, `rnd` 3.2%, `best_bid` 2.4%, `take` 0.9%, `insert` 0.8%.
-- That picks the register pass, not a leaf inliner. The 0.33.1 inliner (a direct call, no nested call, at most six scalar parameters, body weight at most 40, four passes, the result written into a destination local during codegen) made the book 57.21 against 49.74 and the pool 14.94 against 14.25. An AST inliner before register allocation would still be inlining leaves. Leaf-call overhead is 1.7% of the book's instructions, none of `parse`'s, and `fib`'s calls are not leaves. The reload in `cancel` is a name that dies before `nxt` is born on the match path and stays in `r10` on the miss path, so the two can share `r10`.
+- That picks the register pass, not a leaf inliner. The 0.33.1 inliner (a direct call, no nested call, at most six scalar parameters, body weight at most 40, four passes, the result written into a destination local during codegen) made the book 57.21 against 49.74 and the pool 14.94 against 14.25. An AST inliner before register allocation would still be inlining leaves. Leaf-call overhead is 1.7% of the book's instructions, none of `parse`'s, and `fib`'s calls are not leaves. The reload in `cancel` is a name that dies before `nxt` is born on the match path and stays in `r10` on the miss path, so the two can share `r10`. The instruction counts above are the 0.37.2 sources; `book`, `fib`, and `parse` do not use `enum`. The paired window below is 0.38.0 against this tree.
+
+## [0.38.0] - 2026-10-26
+
+### Added
+- `enum Name { None, Some(i64), ... }` is a sum type. A variant has zero or more fields. A field is an integer or a pointer. The value is an `i64` tag at offset 0 and a payload from offset 8, aligned to each field and rounded up to 8. `sizeof` is that size. `Option` is not a compiler type: the program writes the enum. `enum` and `match` are contextual, not keywords, so `let enum = 1` and `match(1)` stay a name and a call.
+- `Option::Some(7)` and `Option::None` write a local: the slot is zeroed, then the tag and the fields. `x = y` copies the bytes when both sides are the same enum. A parameter is passed by address and copied, the same way a struct is. A constructor argument fills a temporary of that size.
+- `match e { None => 0, Some(n) => n }` is an expression. `e` is a local or a parameter. Every variant is required (`match does not cover 'None'`). A duplicate arm is `variant 'Some' is already matched`. A field of the wrong type is `expected i64, found *u8`. The wrong arity is `variant 'Some' takes 1 field, not 0`. The lowering is `cmp qword [slot], tag` / `jne`. A tag that matches nothing is `ud2`. There is no heap and no libc. `--freestanding` and `--flat` use the same code when the enum does not need `malloc`.
+- Hosted `-O2` keeps the enum on the stack and builds a normal `rbp` frame for a function with an enum parameter. The short `push`/`pop` frame has no `rbp`. Copying the tag through that frame wrote the caller's slots: `take` of an `Option` that was not the first local returned the wrong value. `tests/lang/enum_opt.lap` prints 2 and then 40 for that call. The `i64` beside the enum stays 40.
+
+### Left out
+- Returning an enum. `rax` holds one scalar, and a struct declared `-> T` already comes back only in `rax`. `-> Option` and `return o` are `an enum cannot be returned`.
+- An enum global (`an enum must be a local or a parameter`), a struct field, a slice element, an array element, and a `vec` element.
+- An enum inside a `module`. `pub enum` outside a module is the existing `pub is only valid inside a module`.
+- `bits 16`, `bits 32`, and `naked`, including 64-bit `naked` (`an enum is a 64-bit value`).
+- `match` of a pointer, of `*p`, or of a constructor that is not stored in a local (`match needs a local enum`). `&o` is the address of the bytes.
+- `_`, `|` patterns, guards, block arms, named fields, and an enum nested as a field. An `own *T` field is rejected, so a variant does not drop. Reassignment copies the bytes.
+- A `match` of only literals is `i64`, so `let x: i8 = match ... => 1` is `expected i8, found i64`. An arm that is itself an enum is `an enum is not a scalar; match it`.
+
+### Changed
+- Language version is 0.38.0, on top of 0.37.2. The 0.37.2 note rejected aligning `.text` to 16 or 32, and 0.37.1 rejected a direct `arr[i].field` store. Neither is emitted here. The 0.37.0 `vec` of structs, owning move, and slice view are unchanged.
+
+### Measured
+- No timed bench was added to `make test`. `bench/slice` and `bench/lowlat` were not run again. The sources of this comparison stayed in `/tmp`.
+- NASM listing (`nasm -f elf64 -l`), `-O0`, of `pick`. The enum `pick` copies an `Option` parameter, matches `None => 0` and `Some(v) => v`, stores that in a local, and returns it. Bytes from `pick` through the first `ret`: 70. The same shape on `struct Opt { tag: i64, val: i64 }`, with `if (o.tag == 0) n = 0; else n = o.val; return n`: 76. A difference of 6. The match compare is `cmp qword [rbp-16], imm`. The `if` compare is `push` / `mov rbx` / `pop` / `cmp rax, rbx`. The 70 includes `ud2` (2 bytes), which a tag of 0 or 1 does not execute. After that `ret` both functions have the unreachable `xor rax` / `leave` / `ret` (5 bytes).
+- Hosted `-O2`, `taskset -c 0`, one warmup and seven runs. The value is built once, outside the loop. The loop adds the payload `1`, 80000000 times. Both programs print `80000000` and then `1`. The `-O2` loop is not the `-O0` `pick`: `match` compares the tag in memory twice, spills the `Some` field into a slot, and `push`/`pop`s the sum. The `if` compares the tag once from a register and adds the field. Neither loop is unrolled.
+- Window 2026-10-26T06:09:47Z — 2026-10-26T06:09:48Z, `match` then `if` on each round. `match`: 63.3, 63.0, 62.9, 62.9, 63.1, 62.9, 63.2 ms, median 63.0 (62.9–63.3). `if`: 62.3, 58.3, 55.5, 56.0, 55.8, 54.4, 56.1 ms, median 56.0 (54.4–62.3). The ranges do not overlap. The edges are 0.6 ms apart (62.3 against 62.9). The ratio of the medians is 1.13.
+- Window 2026-10-26T06:10:09Z — 2026-10-26T06:10:10Z, `if` then `match` on each round. `match`: 63.1, 63.0, 63.1, 63.7, 63.2, 63.8, 62.9 ms, median 63.1 (62.9–63.8). `if`: 51.4, 48.8, 56.9, 50.9, 54.3, 54.5, 51.6 ms, median 51.6 (48.8–56.9). The ranges do not overlap. The edges are 6.0 ms apart. The ratio of the medians is 1.22.
+- The `if` median moves between those windows (56.0 and 51.6). The `match` median does not (63.0 and 63.1). The fourteen `if` samples still top out at 62.3, which is under the `match` minimum of 62.9. The gap is small, and the ratio is not stable. `match` is the slower of the two in both windows.
 
 ## [0.37.2] - 2026-10-26
 
