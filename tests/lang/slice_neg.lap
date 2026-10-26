@@ -1,0 +1,10 @@
+fn main() -> i64 {
+    let buf: [i64; 1] = [5];
+    let p: *i64 = buf;
+    let n: i64 = 0;
+    n = n - 1;
+    let s: []i64 = slice(p, n);
+    print_int(s.len);
+    println("");
+    return 0;
+}
