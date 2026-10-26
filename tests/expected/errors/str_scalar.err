@@ -1,0 +1,4 @@
+tests/errors/str_scalar.lap:2:12: error: a slice is not a scalar; read .ptr or .len
+      2 |     return s == 1;
+        |            ^
+1 error, compilation failed

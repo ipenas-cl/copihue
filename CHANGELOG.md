@@ -2,6 +2,39 @@
 
 Todos los cambios importantes del proyecto.
 
+## [0.43.0] - 2026-10-26
+
+### Added
+- `str` is `[]u8`. Sixteen bytes: the pointer at offset 0 and the `i64` length at offset 8. It is not a keyword, not a class, and not a heap string. `sizeof(str)` is 16. `let str = 1` is still a name. There is no libc. `vec` is not rewritten.
+- A literal `"..."` in a `str` or `[]u8` destination stores the label and the decoded length. An interior NUL counts (`"a\0b"` has length 3). The extra trailing NUL that keeps `.ptr` a C string does not. `let p = "..."` and a `*u8` destination stay the pointer. `print("...")` is unchanged. A global `let s: str = "..."` is those two qwords.
+- `s.len` is `i64`. `s[i]` is the existing slice check (`index out of range`, exit 1). Hosted code checks. `--freestanding`, `--flat`, and `--boot` check only with `--checked`. `s.ptr[i]` and `unsafe` do not check.
+- `a == b` and `a != b`, when both names are a `str` or a `[]u8`, compare the length and then the bytes. Before the frame, that is the `if` and the `for i in 0..a.len` a programmer writes. There is no `memcmp`. `let x = a == b` and `if (a == b)` store 0 or 1. A compare in a `while` condition is `'==' on str in a while condition needs a local`. A slice compared with a scalar is still `a slice is not a scalar; read .ptr or .len`. A `[]i64` is not compared by content.
+- `s[i..j]` is a local slice: pointer `s.ptr + i`, length `j - i`, `j` exclusive. The check is unsigned `i <= j` and `j <= s.len`. An empty range is legal. Failure is the same `index out of range`. `-> str` is `a slice cannot be returned`. An enum field is still not a slice, so `Result` does not carry a `str`.
+- Hosted `print(s)` and `println(s)` on a `str` or `[]u8` are `write(1, s.ptr, s.len)`. `println` then writes the newline. The syscall uses the length. It does not call `__strlen`. A `*u8` still does. Freestanding stays `'print' needs the hosted runtime`.
+- `tests/lang/str.lap` prints 5, 104, 1, 0, 0, 1, 3, `ell`, `hello`, 0, 0, `hello`, `via`, 0, 1, 3, 2, 2, 1, 16, 16, 2, and 1 at `-O0` and `-O2`. `tests/lang/str_oob.lap` and `tests/lang/str_range_oob.lap` write `index out of range` and exit 1. `tests/flat/str.lap` is the same image at both levels and is not booted. Two `-c` objects link `slen` (`T slen`, `U slen`, prints 5). `examples/words.lap` counts words and returns `Result<i64, i64>`: `one two three` prints 0 then 3, `  hi  ` prints 0 then 1, an empty string prints 0 then 0, a tab at index 3 prints 1 then 3, the prefix prints `one`, and the comparisons print 1, 1, and 0. The note is `docs/DESIGN_STRINGS.md`.
+
+### Left out
+- UTF-8, a heap `String`, format strings, interpolation, capacity, and `append`.
+- An enum field of type `str`, and `Result` carrying a `str`. The text stays in the `str`. The `Result` carries an integer or a pointer.
+- Returning a `str`. That is still `a slice cannot be returned`.
+- Rewriting every existing `"..."` use into a `str`. An untyped `let` and a `*u8` stay a pointer. `vec` is not rewritten.
+- Content comparison of a slice whose element is not `u8`. `memcmp`. Changing `strlen`, `strcpy`, or `strcmp`.
+- `bits 16` and `bits 32` beyond the existing `[]T is a 64-bit value`.
+- `sizeof([]u8)` as syntax. That form does not parse. `sizeof(str)` and `sizeof` of a slice value are 16.
+- Hoisting `==` out of a `while` condition.
+
+### Changed
+- Language version is 0.43.0, on top of 0.42.1. 0.42.1 changed only the version string. The hosted `-O2` `fib` frame stays the 16-instruction path, and that window was not run again. The 0.42.0 `Result` / `?` lowering is unchanged: it is still the match, with no exceptions and no extra instruction. 0.41.0 traits and static dispatch are unchanged: the copy still calls the impl symbol, and there is still no vtable. The 0.40.1 hosted `-O2` `while` whose equal arm is cold stays: that arm is `je` after the back edge, the tail falls through, and `align 32` is not applied to that shape. The 0.39.1 `while` stays: the not-equal arm falls through, one global array is `[r8+index*scale]`, and that loop label is `align 32`. The 0.38.1 note rejected sharing one register between two scalars whose live ranges do not overlap. That pass is not emitted. The 0.37.2 note rejected aligning `.text` to 16 or 32, and 0.37.1 rejected a direct `arr[i].field` store. Neither is emitted here.
+
+### Measured
+- No timed bench was added to `make test`. `bench/lowlat`, the SPSC ring, `bench/slice`, the 0.39 enum-versus-`if` windows, the 0.40.1 `book` and `match` windows, the 0.41 trait listing, the 0.42 `Result` listing, and the 0.42.1 `fib` window were not run again.
+- NASM listing (`nasm -f elf64 -l`), hosted. Each pair is the same function written with `str` and with `[]u8`. Local labels (`.L0`, `.Lslice_trap_0`) stay inside the function. The bytes are the same, including the cold trap that follows the last `ret`. The counts below stop at that `ret` and leave the trap out of the number. The frame is the slice-parameter frame (the callee copies 16 bytes). It is not the 0.41 slim frame and not the 0.42 enum-return frame. Listing produced 2026-10-26T11:11:12Z. Sources stayed in `/tmp/s43b`.
+- `fn n(s: str) -> i64 { return s.len; }` and the `[]u8` form. `sub rsp` is `4883EC50` (80) at `-O0` and at `-O2`. `-O0`, from the label through the first `ret`: 29 and 29. The whole function through the last `ret` is 34 and 34. Hosted `-O2`: 37 and 37 through the first `ret`, 46 and 46 through the last.
+- `fn nth(s: str, i: i64) -> i64 { return s[i]; }` and the `[]u8` form. The first `ret` is the successful return. `sub rsp` is `4883EC60` (96) at both levels. `-O0`: 55 and 55 through the first `ret`, 60 and 60 through the last. `-O2`: 69 and 69 through the first `ret`, 82 and 82 through the last.
+- `fn eq(a: str, b: str) -> i64 { return a == b; }` against the handwritten `[]u8` function: if the lengths differ, return 0; `for i in 0..a.len`, if the bytes differ, return 0; return 1. The first `ret` is that length mismatch. `sub rsp` is `4883EC70` (112) at both levels. `-O0`: 63 and 63 through the first `ret`, 197 and 197 through the last. `-O2`: 95 and 95 through the first `ret`, 241 and 241 through the last.
+- `let t: str = s[i..j]; return t.len` and the same statements with `[]u8`. `sub rsp` is `4883EC70` (112) at both levels. `-O0`: 83 and 83 through the first `ret`, 88 and 88 through the last. `-O2`: 103 and 103 through the first `ret`, 120 and 120 through the last.
+- `fn show(s: str) -> i64 { print(s); return 0; }` against `write(1, s.ptr, s.len)` on a `[]u8`. `sub rsp` is `4883EC50` (80) at both levels. `-O0`: 56 and 56 through the first `ret`, 61 and 61 through the last. `-O2`: 64 and 64 through the first `ret`, 73 and 73 through the last. No `__strlen` and no extra instruction.
+
 ## [0.42.1] - 2026-10-26
 
 ### Changed

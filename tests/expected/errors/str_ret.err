@@ -1,0 +1,4 @@
+tests/errors/str_ret.lap:1:4: error: a slice cannot be returned
+      1 | fn f() -> str {
+        |    ^
+1 error, compilation failed

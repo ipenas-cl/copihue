@@ -1,5 +1,7 @@
 # Errores con Result y `?` (corte 0.42.0)
 
+**Corte 0.43.0.** Un `str` no cabe en un campo de enum. El texto se queda afuera. El detalle está en [`DESIGN_STRINGS.md`](DESIGN_STRINGS.md).
+
 No hay excepciones, ni pila de desenrollado, ni libc. El error es un `enum` que el programa escribe, y `?` es el `match` que ya existía. El layout y la copia genérica están en [`DESIGN_ENUMS.md`](DESIGN_ENUMS.md) y [`DESIGN_GENERICS.md`](DESIGN_GENERICS.md). `vec` interno no se toca.
 
 ```copihue

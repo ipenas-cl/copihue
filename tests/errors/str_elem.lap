@@ -1,0 +1,4 @@
+fn f() -> i64 {
+    let s: []i64 = "hi";
+    return 0;
+}

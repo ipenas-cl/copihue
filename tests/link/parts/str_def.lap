@@ -1,0 +1,3 @@
+fn slen(s: str) -> i64 {
+    return s.len;
+}

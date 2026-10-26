@@ -1,0 +1,67 @@
+let g: str = "ab";
+
+fn main() -> i64 {
+    let s: str = "hello";
+    print_int(s.len);
+    println("");
+    print_int(s[0]);
+    println("");
+    let t: str = "hello";
+    let u: str = "hellp";
+    print_int(s == t);
+    println("");
+    print_int(s == u);
+    println("");
+    print_int(s != t);
+    println("");
+    print_int(s != u);
+    println("");
+    let sub: str = s[1..4];
+    print_int(sub.len);
+    println("");
+    println(sub);
+    let whole: str = s[0..5];
+    println(whole);
+    let empty: str = s[2..2];
+    print_int(empty.len);
+    println("");
+    let tail: str = s[5..5];
+    print_int(tail.len);
+    println("");
+    print(s);
+    println("");
+    let p = "via";
+    println(p);
+    let e: str = "";
+    let f: str = "";
+    print_int(e.len);
+    println("");
+    print_int(e == f);
+    println("");
+    let z: str = "a\0b";
+    print_int(z.len);
+    println("");
+    let lit: []u8 = "hi";
+    print_int(lit.len);
+    println("");
+    let raw: [u8; 2] = [104, 105];
+    let raw2: [u8; 2] = [104, 105];
+    let sl: []u8 = raw;
+    let sl2: []u8 = raw2;
+    print_int(sl.len);
+    println("");
+    print_int(sl == sl2);
+    println("");
+    print_int(sizeof(str));
+    println("");
+    print_int(sizeof(s));
+    println("");
+    print_int(g.len);
+    println("");
+    {
+        let str = 1;
+        print_int(str);
+        println("");
+    }
+    return 0;
+}

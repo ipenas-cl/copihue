@@ -1,0 +1,4 @@
+tests/errors/str_hide.lap:1:6: error: type parameter 'str' hides a builtin type
+      1 | fn f<str>(a: i64) -> i64 {
+        |      ^
+1 error, compilation failed

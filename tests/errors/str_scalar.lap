@@ -1,0 +1,3 @@
+fn f(s: str) -> i64 {
+    return s == 1;
+}
