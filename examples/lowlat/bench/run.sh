@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# Mide pool, libro y motor. Una calentamiento y siete corridas, taskset -c 0.
-# La mediana es la 4.ª de las siete. Escribe examples/lowlat/RESULTS.md.
+# Mide pool, libro y motor con taskset -c 0, contra C y Rust.
+# Mide false sharing, afinidad y watchdog sin taskset, contra C++ y Rust.
+# Una calentamiento y siete corridas. La mediana es la 4.ª.
+# Escribe examples/lowlat/RESULTS.md.
 set -eu
 cd "$(dirname "$0")/../../.."
 ROOT=$PWD
@@ -12,6 +14,7 @@ make -s copihue
 CC=$ROOT/copihue
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
+NCPU=$(nproc)
 
 tag_of() {
     sed -n 's/.*BENCH: //p' "$1" | head -n 1 | sed 's/[[:space:]]*\*\/.*//; s/[[:space:]]*$//'
@@ -26,7 +29,7 @@ min_of() { sort -n "$1" | head -n 1; }
 max_of() { sort -n "$1" | tail -n 1; }
 ms() { awk -v ns="$1" 'BEGIN { printf "%.1f", ns / 1000000 }'; }
 
-compile_one() { # $1 name
+compile_c() { # $1 name  (C y Rust)
     local name=$1
     local t
     t=$(tag_of "$ROOT/examples/lowlat/bench/$name.lap")
@@ -49,62 +52,104 @@ compile_one() { # $1 name
     echo "bench: $name salida $(cat "$WORK/$name.lap.out")"
 }
 
-measure() { # $1 bin $2 outfile
-    local bin=$1 out=$2 i a b
-    taskset -c 0 "$bin" >/dev/null
+compile_cpp() { # $1 name  (C++ y Rust)
+    local name=$1
+    local t
+    t=$(tag_of "$ROOT/examples/lowlat/bench/$name.lap")
+    for ext in cpp rs; do
+        local u
+        u=$(tag_of "$ROOT/examples/lowlat/bench/$name.$ext")
+        if [ "$t" != "$u" ]; then
+            echo "bench: carga distinta en $name.$ext" >&2
+            exit 1
+        fi
+    done
+    "$CC" -O2 -o "$WORK/$name.lap" "$ROOT/examples/lowlat/bench/$name.lap"
+    g++ -O2 -std=c++17 -Wall -Werror -pthread -o "$WORK/$name.cpp" "$ROOT/examples/lowlat/bench/$name.cpp"
+    rustc -O -o "$WORK/$name.rs" "$ROOT/examples/lowlat/bench/$name.rs"
+    "$WORK/$name.lap" > "$WORK/$name.lap.out"
+    "$WORK/$name.cpp" > "$WORK/$name.cpp.out"
+    "$WORK/$name.rs" > "$WORK/$name.rs.out"
+    cmp -s "$WORK/$name.lap.out" "$WORK/$name.cpp.out"
+    cmp -s "$WORK/$name.lap.out" "$WORK/$name.rs.out"
+    echo "bench: $name salida $(cat "$WORK/$name.lap.out")"
+}
+
+measure() { # $1 bin $2 outfile $3 cpus (empty = sin taskset)
+    local bin=$1 out=$2 cpus=$3 i a b
+    if [ -n "$cpus" ]; then
+        taskset -c "$cpus" "$bin" >/dev/null
+    else
+        "$bin" >/dev/null
+    fi
     : > "$out"
     for i in 1 2 3 4 5 6 7; do
         a=$(ns_now)
-        taskset -c 0 "$bin" >/dev/null
+        if [ -n "$cpus" ]; then
+            taskset -c "$cpus" "$bin" >/dev/null
+        else
+            "$bin" >/dev/null
+        fi
         b=$(ns_now)
         echo $((b - a)) >> "$out"
     done
 }
 
-relate() { # $1 copihue ns file $2 other
-    local a b amin amax bmin bmax
-    amin=$(min_of "$1"); amax=$(max_of "$1")
-    bmin=$(min_of "$2"); bmax=$(max_of "$2")
-    if [ "$amax" -lt "$bmin" ]; then echo "por debajo"
-    elif [ "$amin" -gt "$bmax" ]; then echo "por encima"
-    else echo "se solapan"
-    fi
+cell() { # $1 ns file
+    echo "$(ms "$(median_of "$1")") ($(ms "$(min_of "$1")")–$(ms "$(max_of "$1")"))"
 }
 
 START=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 for name in pool book match; do
-    compile_one "$name"
-    measure "$WORK/$name.lap" "$WORK/$name.lap.ns"
-    measure "$WORK/$name.c" "$WORK/$name.c.ns"
-    measure "$WORK/$name.rs" "$WORK/$name.rs.ns"
+    compile_c "$name"
+    measure "$WORK/$name.lap" "$WORK/$name.lap.ns" 0
+    measure "$WORK/$name.c" "$WORK/$name.c.ns" 0
+    measure "$WORK/$name.rs" "$WORK/$name.rs.ns" 0
+done
+for name in share split pin same free watch; do
+    compile_cpp "$name"
+    measure "$WORK/$name.lap" "$WORK/$name.lap.ns" ""
+    measure "$WORK/$name.cpp" "$WORK/$name.cpp.ns" ""
+    measure "$WORK/$name.rs" "$WORK/$name.rs.ns" ""
 done
 END=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
 OUT=$ROOT/examples/lowlat/RESULTS.md
 {
-    echo "# Baja latencia: pool, libro y motor"
+    echo "# Baja latencia: pool, libro, motor, false sharing, afinidad y watchdog"
     echo
     echo "Generado por \`examples/lowlat/bench/run.sh\`. Muestras $START — $END."
-    echo "Una pasada de calentamiento y siete corridas, \`taskset -c 0\`. La mediana es la 4.ª. stdout se descarta al medir, después de comparar las tres salidas."
-    echo "Copihue \`$($CC --version)\` \`-O2\`. gcc \`-O2 -Wall -Werror\`. rustc \`-O\`."
-    echo "El anillo no se mide aquí. La cola SPSC de un millón de mensajes está en \`bench/lowlat\` (0.32.0). Este archivo mide el pool de punteros, el libro y el motor."
+    echo "Una pasada de calentamiento y siete corridas. La mediana es la 4.ª. stdout se descarta al medir, después de comparar las tres salidas."
+    echo "Copihue \`$($CC --version)\` \`-O2\`. Pool, libro y motor: gcc \`-O2 -Wall -Werror\`, rustc \`-O\`, \`taskset -c 0\`."
+    echo "False sharing, afinidad y watchdog: g++ \`-O2 -std=c++17 -Wall -Werror -pthread\`, rustc \`-O\`, sin \`taskset\`. Esta máquina reporta $NCPU CPU."
+    echo "El anillo no se mide aquí. La cola SPSC de un millón de mensajes está en \`bench/lowlat\` (0.32.0)."
+    echo
+    echo "## Pool, libro y motor"
     echo
     echo "| Programa | Salida | Copihue | C | Rust | frente a C | frente a Rust |"
     echo "|---|---:|---:|---:|---:|---|---|"
     for name in pool book match; do
         out=$(cat "$WORK/$name.lap.out")
-        lm=$(median_of "$WORK/$name.lap.ns")
-        cm=$(median_of "$WORK/$name.c.ns")
-        rm=$(median_of "$WORK/$name.rs.ns")
-        echo "| \`$name\` | $out | $(ms "$lm") ($(ms "$(min_of "$WORK/$name.lap.ns")")–$(ms "$(max_of "$WORK/$name.lap.ns")")) | $(ms "$cm") ($(ms "$(min_of "$WORK/$name.c.ns")")–$(ms "$(max_of "$WORK/$name.c.ns")")) | $(ms "$rm") ($(ms "$(min_of "$WORK/$name.rs.ns")")–$(ms "$(max_of "$WORK/$name.rs.ns")")) | $(relate "$WORK/$name.lap.ns" "$WORK/$name.c.ns") | $(relate "$WORK/$name.rs.ns" "$WORK/$name.lap.ns" | sed 's/por debajo/por encima/; s/por encima/por debajo/') |"
+        echo "| \`$name\` | $out | $(cell "$WORK/$name.lap.ns") | $(cell "$WORK/$name.c.ns") | $(cell "$WORK/$name.rs.ns") | pendiente | pendiente |"
     done
     echo
     echo "\`por debajo\` quiere decir que el máximo de Copihue es menor que el mínimo del otro. \`se solapan\` quiere decir que no se puede afirmar un orden. Un empate de un extremo cuenta como solape."
     echo "Rust del pool usa \`unsafe\` porque la lista libre es de punteros. El libro y el motor son índices, sin \`unsafe\`."
+    echo
+    echo "## False sharing, afinidad y watchdog"
+    echo
+    echo "\`share\` incrementa dos contadores de la misma línea de 64 bytes. \`split\` los separa con \`align(64)\` (el segundo queda en el offset 64). \`pin\` fija las hebras a cpu 0 y cpu 1. \`same\` fija las dos a cpu 0. \`free\` no llama a \`sched_setaffinity\`. Esas tres usan el layout de \`split\`, así que el tiempo no mezcla el false sharing. \`watch\` escribe 4000000 latidos y después exige 1000000 lecturas iguales. Si la afinidad falla, \`pin\` y \`same\` imprimen 0."
+    echo
+    echo "| Programa | Salida | Copihue | C++ | Rust | frente a C++ | frente a Rust |"
+    echo "|---|---:|---:|---:|---:|---|---|"
+    for name in share split pin same free watch; do
+        out=$(cat "$WORK/$name.lap.out")
+        echo "| \`$name\` | $out | $(cell "$WORK/$name.lap.ns") | $(cell "$WORK/$name.cpp.ns") | $(cell "$WORK/$name.rs.ns") | pendiente | pendiente |"
+    done
+    echo
+    echo "Estas seis filas no van bajo \`taskset -c 0\`: ese pin deja las dos hebras en un solo núcleo y apaga el false sharing entre núcleos. El efecto de abajo compara los rangos de Copihue entre sí, y el mismo par en C++ y en Rust. \`por encima\` quiere decir que el mínimo del primero supera el máximo del segundo."
 } > "$OUT"
 
-# The relate against Rust above swapped the files and then swapped the words,
-# which double-swaps. Rewrite that column directly.
 python3 - "$WORK" "$OUT" << 'PY'
 import sys
 from pathlib import Path
@@ -123,13 +168,19 @@ def word(a, b):
         return "por encima"
     return "se solapan"
 
+def other(name):
+    if (work / f"{name}.c.ns").exists():
+        return "c"
+    return "cpp"
+
 rows = []
 for line in text:
     if line.startswith("| `"):
         name = line.split("`")[1]
-        rows.append((name, word(samples(name, "lap"), samples(name, "c")),
+        lang = other(name)
+        rows.append((name, word(samples(name, "lap"), samples(name, lang)),
                      word(samples(name, "lap"), samples(name, "rs"))))
-# rebuild the two verdict columns from scratch by regenerating those cells
+
 new = []
 it = iter(rows)
 for line in text:
@@ -141,6 +192,18 @@ for line in text:
         new.append("| " + " | ".join(parts) + " |")
     else:
         new.append(line)
+
+def effect(title, a, b):
+    bits = [f"{title}: Copihue {word(samples(a, 'lap'), samples(b, 'lap'))}"]
+    for lang, label in (("cpp", "C++"), ("rs", "Rust")):
+        bits.append(f"{label} {word(samples(a, lang), samples(b, lang))}")
+    return ", ".join(bits) + "."
+
+new.append("")
+new.append(effect("`share` frente a `split`", "share", "split"))
+new.append(effect("`same` frente a `pin`", "same", "pin"))
+new.append(effect("`pin` frente a `free`", "pin", "free"))
+new.append(effect("`same` frente a `free`", "same", "free"))
 out.write_text("\n".join(new) + "\n")
 PY
 
