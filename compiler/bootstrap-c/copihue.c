@@ -16,7 +16,7 @@
 
 // ==== NAMING (single place to change when the language is renamed) ====
 #define LANG_NAME     "Copihue"
-#define LANG_VERSION  "0.31.2"
+#define LANG_VERSION  "0.32.1"
 #define COMPILER_BIN  "copihue"
 #define SRC_EXT       ".lap"   /* Lapageria rosea, the copihue */
 #define OLD_SRC_EXT   ".cph"   /* v0.18.x extension, still accepted with a warning */
@@ -132,6 +132,7 @@ typedef struct StructField {
     char* type_name;      // Element or scalar type (e.g., "i64", "u8", "*Token")
     int is_pointer;       // 1 if the field itself is a pointer, 0 otherwise
     int is_volatile;      // Reloaded/stored on every access; never folded or hoisted
+    int align;            // Alignment applied to this field (1, 2, 4, 8, or an explicit align)
 } StructField;
 
 typedef struct StructType {
@@ -140,6 +141,7 @@ typedef struct StructType {
     int field_count;
     int size;             // Laid-out size, including tail padding when not packed
     int align;            // Natural alignment. 0 until the struct is finished. Packed is 1
+    int explicit_align;   // align(N) on the struct itself. 0 if the source did not ask
     int is_packed;        // 1: no padding. Hardware records stay contiguous
 } StructType;
 
@@ -178,6 +180,7 @@ typedef struct AstNode {
     int line, col;        // Source position (for diagnostics)
     const char* file;     // Source file (several files share one program)
     char* section;        // Named section this item is placed in. NULL is the default
+    int align;            // align(N) on a struct, a field, or a global. 0 means none
 } AstNode;
 
 #define AF_PACKED     1
@@ -240,6 +243,7 @@ typedef struct {
     int volatile_pointee; // *volatile T: the pointee access is volatile, not the pointer slot
     char* pointee_type; // Type being pointed to
     char* section;      // Placed in this section, not the default .data or .bss
+    int align;          // align(N) on this global. 0 means the type's own alignment
 } GlobalVar;
 
 typedef struct {
@@ -406,6 +410,7 @@ void typetab_add(TypeTable* tt, char* name) {
     tt->types[tt->count - 1].field_count = 0;
     tt->types[tt->count - 1].size = 0;
     tt->types[tt->count - 1].align = 0;
+    tt->types[tt->count - 1].explicit_align = 0;
     tt->types[tt->count - 1].is_packed = 0;
 }
 
@@ -485,7 +490,8 @@ static int type_layout(TypeTable* tt, const char* name, int is_pointer, int* ali
 // array_len > 0 is [T; N]. array_len < 0 is an array whose count is not a
 // positive integer. 0 is a scalar or a pointer field.
 void typetab_add_field(TypeTable* tt, char* struct_name, char* field_name, char* field_type,
-                       int is_pointer, int is_volatile, int array_len, int line, int col) {
+                       int is_pointer, int is_volatile, int array_len, int req_align,
+                       int line, int col) {
     StructType* st = typetab_lookup(tt, struct_name);
     if (!st) return;
 
@@ -515,10 +521,13 @@ void typetab_add_field(TypeTable* tt, char* struct_name, char* field_name, char*
         al = 1;
         stored_len = 0;
     }
-    // Packed records stay contiguous. An IDT gate is 16 bytes and rsp0 of a
-    // TSS stays at offset 4. Natural alignment would move both.
-    if (st->is_packed) al = 1;
-    else st->size = align_up(st->size, al);
+    // Packed records stay contiguous unless the field asks for align(N).
+    // An IDT gate is 16 bytes and rsp0 of a TSS stays at offset 4.
+    // Natural alignment would move both. align(64) on one field still pads
+    // that field, packed or not, so two counters can sit on distinct lines.
+    if (req_align > 0) al = req_align;
+    else if (st->is_packed) al = 1;
+    st->size = align_up(st->size, al);
     if (al > st->align) st->align = al;
 
     st->field_count++;
@@ -533,6 +542,7 @@ void typetab_add_field(TypeTable* tt, char* struct_name, char* field_name, char*
     f->is_pointer = is_pointer;
     f->is_volatile = is_volatile;
     f->is_signed = (field_type && field_type[0] == 'i' && !is_pointer);
+    f->align = al;
     st->size += fsize;
 }
 
@@ -540,7 +550,11 @@ void typetab_add_field(TypeTable* tt, char* struct_name, char* field_name, char*
 // struct is not rounded: its size is the sum of the field widths.
 static void typetab_finish(StructType* st) {
     if (!st) return;
-    if (st->is_packed) {
+    if (st->explicit_align > st->align) st->align = st->explicit_align;
+    // A packed record with no align(N) stays contiguous: size is the sum of
+    // the fields and the alignment is 1. align(N) on the struct, or on a
+    // field, still rounds the size so an array of them keeps that alignment.
+    if (st->is_packed && st->align <= 1) {
         st->align = 1;
         return;
     }
@@ -924,6 +938,7 @@ void global_symtab_add_full(GlobalSymbolTable* gst, char* name, char* type_name,
     gv->is_extern = 0;
     gv->volatile_pointee = 0;
     gv->section = NULL;
+    gv->align = 0;
     gv->pointee_type = is_pointer ? strdup(type_name) : NULL;
 
     // Calculate size
@@ -1668,10 +1683,16 @@ AstNode* parse_expr(Parser* p) {
 }
 
 AstNode* parse_block(Parser* p);
+static int parse_align_prefix(Parser* p);
 
 static void end_simple_stmt(Parser* p) { if (!g_no_semi) expect(p, T_SEMI); }
 
 AstNode* parse_stmt(Parser* p) {
+    if (peek_word(p, "align") && peek_tok_at(p, 1, T_LPAREN)) {
+        Tok kw = peek_tok(p);
+        diag_error(kw.line, kw.col, "align() applies to a struct, a field, or a global");
+        parse_align_prefix(p);
+    }
     if (check_tok(p, T_LBRACE)) return parse_block(p);
     if (match_tok(p, T_RET)) {
         AstNode* ret = ast_new(AST_RETURN);
@@ -1996,6 +2017,28 @@ static int peek_tok_at(Parser* p, int ahead, TokType t) {
     return p->pos + ahead < p->count && p->tokens[p->pos + ahead].t == t;
 }
 
+static int tok_u64(Tok t, unsigned long long* out);
+
+// align(N) is a power of two from 1 to 4096. Returns 0 when the source
+// has no align clause. A bad N is diagnosed and also returns 0.
+static int parse_align_prefix(Parser* p) {
+    unsigned long long v = 0;
+    Tok num;
+    if (!(peek_word(p, "align") && peek_tok_at(p, 1, T_LPAREN))) return 0;
+    advance_tok(p);
+    expect(p, T_LPAREN);
+    num = peek_tok(p);
+    if (!tok_u64(num, &v) || v < 1 || v > 4096 || (v & (v - 1)) != 0) {
+        diag_error(num.line, num.col, "align() takes a power of two from 1 to 4096");
+        if (num.t != T_RPAREN && num.t != T_EOF && num.t != T_SEMI) advance_tok(p);
+        v = 0;
+    } else {
+        advance_tok(p);
+    }
+    expect(p, T_RPAREN);
+    return (int)v;
+}
+
 AstNode* parse_struct_def(Parser* p) {
     expect(p, T_STRUCT);
     Tok name = advance_tok(p);
@@ -2007,6 +2050,7 @@ AstNode* parse_struct_def(Parser* p) {
         // `volatile name: T` mirrors `let volatile`. A field literally named
         // volatile is still `volatile: T` (the next token is ':', not a name).
         int field_vol = 0;
+        int field_align = parse_align_prefix(p);
         if (peek_word(p, "volatile") && peek_tok_at(p, 1, T_IDENT)) {
             advance_tok(p);
             field_vol = 1;
@@ -2026,6 +2070,7 @@ AstNode* parse_struct_def(Parser* p) {
         // made [u8; 16] occupy one byte and the compiler still exit 0.
         if (field_type.is_array) field->struct_type = strdup("__array__");
         if (field_vol) field->flags |= AF_VOLATILE;
+        field->align = field_align;
         ast_add(struct_def, field);
 
         if (!check_tok(p, T_RBRACE)) expect(p, T_COMMA);
@@ -2768,7 +2813,10 @@ static void parse_section(Parser* p, AstNode* prog) {
 }
 
 static void parse_top_item(Parser* p, AstNode* prog) {
+    int item_align = 0;
     // Contextual words, so `syscall(...)` and a variable named `packed` still parse.
+    if (peek_word(p, "align") && peek_tok_at(p, 1, T_LPAREN))
+        item_align = parse_align_prefix(p);
     if (peek_word(p, "section") && peek_tok_at(p, 1, T_STR)) {
         parse_section(p, prog);
     } else if (peek_word(p, "import") && peek_tok_at(p, 1, T_STR)) {
@@ -2777,6 +2825,7 @@ static void parse_top_item(Parser* p, AstNode* prog) {
         advance_tok(p);
         AstNode* sd = parse_struct_def(p);
         sd->flags |= AF_PACKED;
+        sd->align = item_align;
         add_top(prog, sd);
     } else if (peek_word(p, "interrupt") && peek_tok_at(p, 1, T_FN)) {
         advance_tok(p);
@@ -2798,10 +2847,16 @@ static void parse_top_item(Parser* p, AstNode* prog) {
     } else if (peek_word(p, "bits") || peek_word(p, "naked")) {
         add_top(prog, parse_bits_naked_fn(p));
     } else if (check_tok(p, T_STRUCT)) {
-        add_top(prog, parse_struct_def(p));
+        AstNode* sd = parse_struct_def(p);
+        sd->align = item_align;
+        add_top(prog, sd);
     } else if (check_tok(p, T_LET)) {
-        add_top(prog, parse_global_var(p));
+        AstNode* gv = parse_global_var(p);
+        gv->align = item_align;
+        add_top(prog, gv);
     } else {
+        if (item_align)
+            diag_error(peek_tok(p).line, peek_tok(p).col, "align() applies to a struct or a global");
         add_top(prog, parse_func(p));
     }
 }
@@ -3197,6 +3252,9 @@ static VTy ty_pointer_to(VTy elem) {
 }
 
 static VTy expr_ty(Codegen* cg, AstNode* n);
+static VTy ty_field(Codegen* cg, AstNode* n);
+static int is_atomic_rmw(const char* f);
+static int atomic_pointee(Codegen* cg, AstNode* p, int* bits, int* sg);
 
 static VTy ty_indexed(Codegen* cg, AstNode* base) {
     if (base && base->type == AST_IDENT) {
@@ -3219,7 +3277,7 @@ static VTy ty_addr_of(Codegen* cg, AstNode* n) {
             if (s->is_pointer || (s->type_name && s->type_name[0] == '*')) return sym_vty(cg, s);
             if (s->type_name) {
                 char raw[200];
-                snprintf(raw, sizeof raw, "*%s", s->type_name);
+                snprintf(raw, sizeof raw, "*%s%s", s->is_volatile ? "volatile " : "", s->type_name);
                 return ty_from_spelled(cg, raw);
             }
             return ty_addr();
@@ -3233,10 +3291,21 @@ static VTy ty_addr_of(Codegen* cg, AstNode* n) {
             }
             if (g->type_name) {
                 char raw[200];
-                snprintf(raw, sizeof raw, "*%s", g->type_name);
+                snprintf(raw, sizeof raw, "*%s%s",
+                         (g->is_volatile && !g->is_array) ? "volatile " : "", g->type_name);
                 return ty_from_spelled(cg, raw);
             }
         }
+    }
+    if (c->type == AST_FIELD_ACCESS) {
+        StructField* f = access_field(cg, c);
+        VTy inner = ty_field(cg, c);
+        if (f && f->is_volatile && inner.disp[0] && inner.disp[0] != '*') {
+            char raw[220];
+            snprintf(raw, sizeof raw, "*volatile %s", inner.disp);
+            return ty_from_spelled(cg, raw);
+        }
+        return ty_pointer_to(inner);
     }
     return ty_pointer_to(expr_ty(cg, c));
 }
@@ -3274,6 +3343,12 @@ static int builtin_ret_ty(const char* f, VTy* out) {
         !strcmp(f, "pushfd") || !strcmp(f, "popfd") || !strcmp(f, "push") || !strcmp(f, "pop") ||
         !strcmp(f, "stc") || !strcmp(f, "clc") || !strcmp(f, "cld") || !strcmp(f, "std") || !strcmp(f, "ud2") ||
         !strcmp(f, "sizeof") || !strcmp(f, "offsetof") ||
+        !strcmp(f, "atomic_load_acquire") || !strcmp(f, "atomic_load_seq_cst") ||
+        !strcmp(f, "atomic_store_release") || !strcmp(f, "atomic_store_seq_cst") ||
+        !strcmp(f, "fetch_add") || !strcmp(f, "atomic_add") ||
+        !strcmp(f, "swap") || !strcmp(f, "compare_exchange") || !strcmp(f, "fence") ||
+        !strcmp(f, "cpu_pause") || !strcmp(f, "thread_spawn") || !strcmp(f, "thread_join") ||
+        !strcmp(f, "sched_setaffinity") ||
         !strcmp(f, "rep_stosb") || !strcmp(f, "rep_stosw") || !strcmp(f, "rep_stosd") || !strcmp(f, "rep_stosq") ||
         !strcmp(f, "rep_movsb") || !strcmp(f, "rep_movsw") || !strcmp(f, "rep_movsd") || !strcmp(f, "rep_movsq") ||
         !strcmp(f, "save_context") || !strcmp(f, "restore_context") || !strcmp(f, "label_addr") ||
@@ -3379,6 +3454,10 @@ static VTy expr_ty(Codegen* cg, AstNode* n) {
     if (n->type == AST_COMPARE || n->type == AST_LOGICAL) return ty_i64();
     if (n->type == AST_CALL && n->name) {
         VTy b;
+        if (is_atomic_rmw(n->name) && n->child_count > 0) {
+            int ab = 0, asg = 0;
+            if (atomic_pointee(cg, n->children[0], &ab, &asg)) return ty_named_int(ab, asg);
+        }
         if (builtin_ret_ty(n->name, &b)) return b;
         Symbol* loc = (cg && cg->symtab) ? symtab_lookup_symbol(cg->symtab, n->name) : NULL;
         GlobalVar* gv = (!loc && cg && cg->global_symtab) ? global_symtab_lookup(cg->global_symtab, n->name) : NULL;
@@ -3500,6 +3579,37 @@ static void check_user_args(Codegen* cg, AstNode* n, AstNode* fn) {
     }
 }
 
+static int is_atomic_rmw(const char* f) {
+    return f && (!strcmp(f, "atomic_load_acquire") || !strcmp(f, "atomic_load_seq_cst") ||
+                 !strcmp(f, "fetch_add") || !strcmp(f, "atomic_add") ||
+                 !strcmp(f, "swap") || !strcmp(f, "compare_exchange"));
+}
+
+static int is_atomic_store(const char* f) {
+    return f && (!strcmp(f, "atomic_store_release") || !strcmp(f, "atomic_store_seq_cst"));
+}
+
+// *volatile u32/i32 or *volatile u64/i64. Other pointees, and a pointer that
+// is not volatile, are rejected: a plain mov is not an atomic protocol.
+static int atomic_pointee(Codegen* cg, AstNode* p, int* bits, int* sg) {
+    VTy t;
+    const char* po;
+    if (!p || !bits || !sg) return 0;
+    t = expr_ty(cg, p);
+    if (t.kind != VK_PTR || strncmp(t.disp, "*volatile ", 10)) return 0;
+    po = after_star(t.disp);
+    if (!int_name(po, bits, sg)) return 0;
+    if (*bits != 32 && *bits != 64) return 0;
+    return 1;
+}
+
+static void atomic_ptr_error(Codegen* cg, AstNode* n, AstNode* p) {
+    VTy t = p ? expr_ty(cg, p) : ty_unk();
+    const char* got = (t.disp[0]) ? t.disp : "untyped";
+    diag_error(n->line, n->col, "%s() takes a *volatile u32 or *volatile u64, found %s",
+               n->name ? n->name : "atomic", got);
+}
+
 static void check_builtin_args(Codegen* cg, AstNode* n) {
     const char* f;
     int c;
@@ -3559,6 +3669,43 @@ static void check_builtin_args(Codegen* cg, AstNode* n) {
     }
     if (!strcmp(f, "save_context") || !strcmp(f, "restore_context")) {
         if (c == 1) check_arg(cg, n->children[0], 0, f, ty_mem());
+        return;
+    }
+    if (is_atomic_rmw(f) || is_atomic_store(f)) {
+        int need = is_atomic_store(f) ? 2 : 1;
+        int bits = 0, sg = 0;
+        if (!strcmp(f, "fetch_add") || !strcmp(f, "atomic_add") || !strcmp(f, "swap")) need = 2;
+        if (!strcmp(f, "compare_exchange")) need = 3;
+        if (c != need) {
+            diag_error(n->line, n->col, "%s() takes %d argument%s", f, need, need == 1 ? "" : "s");
+            return;
+        }
+        if (!atomic_pointee(cg, n->children[0], &bits, &sg)) atomic_ptr_error(cg, n, n->children[0]);
+        for (int i = 1; i < c; i++) check_arg(cg, n->children[i], i, f, ty_i64());
+        return;
+    }
+    if (!strcmp(f, "fence") || !strcmp(f, "cpu_pause")) {
+        if (c != 0) diag_error(n->line, n->col, "%s() takes no arguments", f);
+        return;
+    }
+    if (!strcmp(f, "thread_spawn")) {
+        if (c != 3) {
+            diag_error(n->line, n->col, "thread_spawn() takes a function, a stack top, and a tid pointer");
+            return;
+        }
+        check_arg(cg, n->children[0], 0, f, ty_mem());
+        check_arg(cg, n->children[1], 1, f, ty_mem());
+        check_arg(cg, n->children[2], 2, f, ty_mem());
+        return;
+    }
+    if (!strcmp(f, "thread_join")) {
+        if (c != 1) diag_error(n->line, n->col, "thread_join() takes the tid pointer");
+        else check_arg(cg, n->children[0], 0, f, ty_mem());
+        return;
+    }
+    if (!strcmp(f, "sched_setaffinity")) {
+        if (c != 1) diag_error(n->line, n->col, "sched_setaffinity() takes a cpu number");
+        else check_arg(cg, n->children[0], 0, f, ty_i64());
         return;
     }
 }
@@ -3862,7 +4009,8 @@ static void gen_user_call(Codegen* cg, AstNode* n, int indirect) {
 // Helper: Generate builtin function calls
 static const char* hosted_only_builtins[] = {
     "print", "println", "print_int", "malloc", "free", "open", "read", "write",
-    "close", "exit", "syscall", NULL
+    "close", "exit", "syscall", "thread_spawn", "thread_join", "sched_setaffinity",
+    NULL
 };
 
 // Evaluate up to two call arguments into rdx (first) and rax (second)
@@ -4070,10 +4218,84 @@ static int gen_label_addr(Codegen* cg, AstNode* n) {
     return 1;
 }
 
+// x86-64 atomics. A load is a mov (acquire on x86). seq_cst load adds mfence.
+// A release store is a mov. A seq_cst store is xchg, which locks by itself.
+// fetch_add / atomic_add are lock xadd. swap is xchg. compare_exchange is
+// lock cmpxchg and returns the old value, not a boolean. The pointer is in
+// r11 and the addend or the desired value is in r10. Both are caller-saved,
+// and a local lives there only when no call crosses its range.
+static int gen_atomic_builtin(Codegen* cg, AstNode* n) {
+    const char* f = n->name;
+    int bits = 0, sg = 0;
+    int store = is_atomic_store(f);
+    int rmw = is_atomic_rmw(f);
+    const char* width;
+    const char* acc;
+    const char* accd;
+    if (!store && !rmw && strcmp(f, "fence") && strcmp(f, "cpu_pause")) return 0;
+    if (legacy_bits()) {
+        diag_error(n->line, n->col, "%s() is a 64-bit operation", f);
+        return 1;
+    }
+    if (!strcmp(f, "fence")) {
+        emit(cg, "    mfence\n");
+        emit(cg, "    xor eax, eax\n");
+        return 1;
+    }
+    if (!strcmp(f, "cpu_pause")) {
+        emit(cg, "    pause\n");
+        emit(cg, "    xor eax, eax\n");
+        return 1;
+    }
+    if (n->child_count < 1 || !atomic_pointee(cg, n->children[0], &bits, &sg)) return 1;
+    width = (bits == 32) ? "dword" : "qword";
+    acc = (bits == 32) ? "eax" : "rax";
+    accd = (bits == 32) ? "r10d" : "r10";
+    gen_expr(cg, n->children[0]);
+    emit(cg, "    push rax\n");
+    if (!strcmp(f, "atomic_load_acquire") || !strcmp(f, "atomic_load_seq_cst")) {
+        emit(cg, "    pop r11\n");
+        emit(cg, "    mov %s, %s [r11]\n", acc, width);
+        if (!strcmp(f, "atomic_load_seq_cst")) emit(cg, "    mfence\n");
+        return 1;
+    }
+    if (store) {
+        if (n->child_count >= 2) gen_expr(cg, n->children[1]);
+        emit(cg, "    pop r11\n");
+        if (!strcmp(f, "atomic_store_seq_cst")) emit(cg, "    xchg %s [r11], %s\n", width, acc);
+        else emit(cg, "    mov %s [r11], %s\n", width, acc);
+        emit(cg, "    xor eax, eax\n");
+        return 1;
+    }
+    if (!strcmp(f, "compare_exchange")) {
+        if (n->child_count >= 2) {
+            gen_expr(cg, n->children[1]);
+            emit(cg, "    push rax\n");
+        }
+        if (n->child_count >= 3) gen_expr(cg, n->children[2]);
+        emit(cg, "    mov %s, %s\n", accd, acc);
+        emit(cg, "    pop %s\n", acc);
+        emit(cg, "    pop r11\n");
+        emit(cg, "    lock cmpxchg %s [r11], %s\n", width, accd);
+        return 1;
+    }
+    if (n->child_count >= 2) gen_expr(cg, n->children[1]);
+    emit(cg, "    pop r11\n");
+    if (!strcmp(f, "swap")) {
+        emit(cg, "    xchg %s [r11], %s\n", width, acc);
+        return 1;
+    }
+    if (!strcmp(f, "atomic_add")) emit(cg, "    mov %s, %s\n", accd, acc);
+    emit(cg, "    lock xadd %s [r11], %s\n", width, acc);
+    if (!strcmp(f, "atomic_add")) emit(cg, "    add %s, %s\n", acc, accd);
+    return 1;
+}
+
 // Builtins that work everywhere, including --freestanding (kernel) code.
 // Returns 1 if handled.
 static int gen_core_builtin(Codegen* cg, AstNode* n) {
     const char* f = n->name;
+    if (gen_atomic_builtin(cg, n)) return 1;
     if (!strcmp(f, "sizeof")) {
         if (n->child_count != 1) {
             diag_error(n->line, n->col, "sizeof() takes 1 argument");
@@ -4655,6 +4877,107 @@ void gen_builtin_call(Codegen* cg, AstNode* n) {
             emit(cg, ".Lfree_null_%d:\n", cg->label_count - 1);
             emit(cg, "    xor rax, rax\n");   // free(NULL) returns 0
             emit(cg, ".Lfree_done_%d:\n", cg->label_count - 1);
+        }
+    } else if (!strcmp(n->name, "thread_spawn")) {
+        // clone(2) flags: VM|FS|FILES|SIGHAND|THREAD|SYSVSEM|PARENT_SETTID|CHILD_CLEARTID.
+        // The child starts at the next instruction with rsp = stack top, aligned
+        // down to 16 so `call` enters the function at rsp ≡ 8 (mod 16). It calls
+        // the function and exits that thread (syscall 60), which clears the tid
+        // word. The parent returns the tid. r12 is restored only on the parent
+        // path: the push lives on the parent stack, not the child's.
+        int parent = new_label(cg);
+        if (legacy_bits()) {
+            diag_error(n->line, n->col, "thread_spawn() is a 64-bit operation");
+        } else if (n->child_count == 3) {
+            emit(cg, "    push r12\n");
+            gen_expr(cg, n->children[0]);
+            emit(cg, "    push rax\n");
+            gen_expr(cg, n->children[1]);
+            emit(cg, "    push rax\n");
+            gen_expr(cg, n->children[2]);
+            emit(cg, "    mov r10, rax\n");
+            emit(cg, "    mov rdx, rax\n");
+            emit(cg, "    pop rsi\n");
+            emit(cg, "    pop r12\n");
+            emit(cg, "    and rsi, -16\n");
+            emit(cg, "    mov edi, 0x350F00\n");
+            emit(cg, "    xor r8, r8\n");
+            emit(cg, "    mov eax, 56\n");
+            emit(cg, "    syscall\n");
+            emit(cg, "    test rax, rax\n");
+            emit(cg, "    jnz .L%d\n", parent);
+            emit(cg, "    call r12\n");
+            emit(cg, "    xor edi, edi\n");
+            emit(cg, "    mov eax, 60\n");
+            emit(cg, "    syscall\n");
+            emit(cg, "    hlt\n");
+            emit(cg, ".L%d:\n", parent);
+            emit(cg, "    pop r12\n");
+        }
+    } else if (!strcmp(n->name, "thread_join")) {
+        // Wait until the kernel stores 0 in the tid word (CHILD_CLEARTID) and
+        // wakes the futex. FUTEX_WAIT sleeps only while the word still holds
+        // the value we just read, so a clear between the load and the syscall
+        // comes back and the loop sees 0.
+        int loop = new_label(cg);
+        int done = new_label(cg);
+        if (legacy_bits()) {
+            diag_error(n->line, n->col, "thread_join() is a 64-bit operation");
+        } else         if (n->child_count == 1) {
+            // rbx, not r11: syscall clobbers rcx and r11. rbx is scratch
+            // in 64-bit code and is not a local register.
+            gen_expr(cg, n->children[0]);
+            emit(cg, "    mov rbx, rax\n");
+            emit(cg, ".L%d:\n", loop);
+            emit(cg, "    mov eax, dword [rbx]\n");
+            emit(cg, "    test eax, eax\n");
+            emit(cg, "    jz .L%d\n", done);
+            emit(cg, "    mov edx, eax\n");
+            emit(cg, "    mov rdi, rbx\n");
+            emit(cg, "    xor esi, esi\n");
+            emit(cg, "    xor r10, r10\n");
+            emit(cg, "    xor r8, r8\n");
+            emit(cg, "    xor r9, r9\n");
+            emit(cg, "    mov eax, 202\n");
+            emit(cg, "    syscall\n");
+            emit(cg, "    jmp .L%d\n", loop);
+            emit(cg, ".L%d:\n", done);
+            emit(cg, "    xor eax, eax\n");
+        }
+    } else if (!strcmp(n->name, "sched_setaffinity")) {
+        // sched_setaffinity(0, 128, mask). cpu >= 1024 returns -1 and does
+        // not call the kernel. The mask is 16 zero qwords on the stack.
+        int bad = new_label(cg);
+        int out = new_label(cg);
+        if (legacy_bits()) {
+            diag_error(n->line, n->col, "sched_setaffinity() is a 64-bit operation");
+        } else if (n->child_count == 1) {
+            gen_expr(cg, n->children[0]);
+            emit(cg, "    cmp rax, 1024\n");
+            emit(cg, "    jae .L%d\n", bad);
+            emit(cg, "    mov r11, rax\n");
+            emit(cg, "    sub rsp, 128\n");
+            emit(cg, "    xor eax, eax\n");
+            emit(cg, "    mov ecx, 16\n");
+            emit(cg, "    mov rdi, rsp\n");
+            emit(cg, "    cld\n");
+            emit(cg, "    rep stosq\n");
+            emit(cg, "    mov rcx, r11\n");
+            emit(cg, "    and rcx, 7\n");
+            emit(cg, "    shr r11, 3\n");
+            emit(cg, "    mov eax, 1\n");
+            emit(cg, "    shl eax, cl\n");
+            emit(cg, "    mov byte [rsp+r11], al\n");
+            emit(cg, "    xor edi, edi\n");
+            emit(cg, "    mov esi, 128\n");
+            emit(cg, "    mov rdx, rsp\n");
+            emit(cg, "    mov eax, 203\n");
+            emit(cg, "    syscall\n");
+            emit(cg, "    add rsp, 128\n");
+            emit(cg, "    jmp .L%d\n", out);
+            emit(cg, ".L%d:\n", bad);
+            emit(cg, "    mov rax, -1\n");
+            emit(cg, ".L%d:\n", out);
         }
     } else if (!strcmp(n->name, "syscall") || !strcmp(n->name, "syscall6")) {
         // Generic syscall: syscall6(num, arg1, arg2, arg3, arg4, arg5, arg6)
@@ -10752,7 +11075,10 @@ void build_type_table(TypeTable* tt, AstNode* ast) {
             typetab_add(tt, struct_def->name);
             {
                 StructType* added = typetab_lookup(tt, struct_def->name);
-                if (added) added->is_packed = (struct_def->flags & AF_PACKED) ? 1 : 0;
+                if (added) {
+                    added->is_packed = (struct_def->flags & AF_PACKED) ? 1 : 0;
+                    added->explicit_align = struct_def->align;
+                }
             }
 
             for (int j = 0; j < struct_def->child_count; j++) {
@@ -10778,7 +11104,7 @@ void build_type_table(TypeTable* tt, AstNode* ast) {
                 if (field->file) focus_file(field->file);
                 typetab_add_field(tt, struct_def->name, field->name, full_type, is_ptr,
                                   (field->flags & AF_VOLATILE) ? 1 : 0, array_len,
-                                  field->line, field->col);
+                                  field->align, field->line, field->col);
 
                 if (full_type) free(full_type);
             }
@@ -10832,8 +11158,26 @@ static void put_outf(Codegen* cg, FILE* out, const char* fmt, ...) {
 // Same bytes the .data/.bss file pass has always written. `out` NULL appends
 // to the code buffer, which is where a named section other than .data/.bss
 // (and every section of a boot image) has to live.
+static void write_global_align(Codegen* cg, FILE* out, GlobalVar* gv) {
+    int want = gv->align;
+    StructType* st = NULL;
+    if (!gv->is_pointer && gv->type_name)
+        st = typetab_lookup(cg->types, gv->is_array && gv->elem_type ? gv->elem_type : gv->type_name);
+    if (st && st->align > want) want = st->align;
+    // Ordinary scalars and structs are already at most 8. Emitting align 8
+    // in front of every global would pad flat images. align(N) and a type
+    // stricter than 8 (a cache line) are the ones that move the counter.
+    if (gv->align > 1 || want > 8) {
+        int bss = !gv->is_initialized && (!gv->section || !strcmp(gv->section, ".bss"));
+        // `align N` in a nobits section warns: the default fill initializes.
+        // resb is the uninitialized pad. A progbits section uses a zero byte.
+        if (want > 1) put_outf(cg, out, bss ? "align %d, resb 1\n" : "align %d, db 0\n", want);
+    }
+}
+
 static void write_global_def(Codegen* cg, FILE* out, GlobalVar* gv) {
     if (!gv || gv->is_extern) return;
+    write_global_align(cg, out, gv);
     if (gv->is_initialized) {
         if (gv->is_array && gv->array_init_values && gv->array_init_count > 0) {
             const char* directive = type_asm_directive(gv->elem_type);
@@ -11098,6 +11442,7 @@ void codegen(AstNode* ast, const char* file, StringTable* strtab, TypeTable* typ
                 if (added && (gvar->is_pointer & 4))
                     added->volatile_pointee = 1;
                 if (added) added->section = gvar->section;
+                if (added) added->align = gvar->align;
             }
 
             // If array initialization, extract values

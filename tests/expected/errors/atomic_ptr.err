@@ -1,0 +1,4 @@
+tests/errors/atomic_ptr.lap:4:5: error: fetch_add() takes a *volatile u32 or *volatile u64, found *u64
+      4 |     fetch_add(p, 1);
+        |     ^
+1 error, compilation failed

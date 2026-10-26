@@ -87,7 +87,7 @@ OUT=$ROOT/examples/lowlat/RESULTS.md
     echo "Generado por \`examples/lowlat/bench/run.sh\`. Muestras $START — $END."
     echo "Una pasada de calentamiento y siete corridas, \`taskset -c 0\`. La mediana es la 4.ª. stdout se descarta al medir, después de comparar las tres salidas."
     echo "Copihue \`$($CC --version)\` \`-O2\`. gcc \`-O2 -Wall -Werror\`. rustc \`-O\`."
-    echo "El anillo no se mide: es de una hebra y no hay atómicos."
+    echo "El anillo no se mide aquí. La cola SPSC de un millón de mensajes está en \`bench/lowlat\` (0.32.0). Este archivo mide el pool de punteros, el libro y el motor."
     echo
     echo "| Programa | Salida | Copihue | C | Rust | frente a C | frente a Rust |"
     echo "|---|---:|---:|---:|---:|---|---|"

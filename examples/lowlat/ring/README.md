@@ -1,9 +1,9 @@
-# Anillo de una hebra
+# Cola SPSC de dos hebras
 
-[ring.lap](../ring.lap) es la forma de una cola SPSC: buffer de 8, índices `head` y `tail`, máscara `7` en lugar de un resto. Ocho es potencia de 2. Una ranura se deja vacía, así que caben 7 valores. Lleno y vacío no se confunden: vacío es `head == tail`, lleno es `(head + 1) & 7 == tail`.
+[ring.lap](../ring.lap) es la cola de [bench/lowlat/spsc.lap](../../../bench/lowlat/spsc.lap) a escala de prueba. Capacidad 8, potencia de 2. Los índices `write_idx` y `read_idx` son `u64` libres: no se enmascaran al guardarlos. La máscara `7` solo elige la ranura, así que las 8 caben. Lleno es `(write - read) == 8`. Vacío es `write == read`.
 
-`head` y `tail` son `let volatile` de `u32`. Cada lectura y cada escritura del fuente es un acceso a memoria; `-O2` no las saca del bucle ni las pliega. No es un modelo de memoria de C y no hay una barrera más fuerte que la instrucción. Con una sola hebra el resultado es el mismo que con índices normales. La segunda hebra, y el atómico que haría falta para publicarla, no están.
+Cada índice es `align(64) let volatile`, así que no comparten línea de caché. Publicarlos es `atomic_store_release`. Leerlos es `atomic_load_acquire`. En x86 eso es un `mov`: la carga ya es acquire y el store ya es release. El valor entra en la ranura en una sentencia anterior al release, el mismo orden que el banco. `cpu_pause` espera cuando está llena o vacía. `as i64` convierte el `u64` que devuelve la carga; un cast a 64 bits no emite instrucción. El índice del array es ese `i64`.
 
-El índice del array es `i64`, así que el `u32` entra con `as`: `slots[h as i64]`. `ring_pull` escribe el valor por un `*i64`, para que un 0 guardado no se confunda con el fallo. La octava inserción imprime `full 0`. Vaciar del todo imprime `empty 0`.
+Una pasada de una hebra, antes de crear la otra, fija lleno y vacío: la cola vacía devuelve 0, la novena inserción devuelve 0, y vaciar lo que queda suma 44 (2+3+4+5+6+7+8+9). Después `thread_spawn` arranca el productor sobre una pila de 65536 bytes, sin libc. Esa hebra manda 1..24. Main consume, cuenta un valor fuera de orden y suma. La salida es `bad 0` y `sum 300`. `thread_join` espera el futex del `tid`.
 
-No hay banco. Medir este anillo contra C no diría nada de una cola entre dos hebras.
+El tiempo de una cola de un millón de mensajes no se mide aquí. Está en [bench/lowlat/RESULTS.md](../../../bench/lowlat/RESULTS.md) (0.32.0, ventana 2026-10-26T00:18:42Z): Copihue 45.0 ms (18.4–76.1), C++ 34.1 (11.2–44.4), Rust 15.8 (10.5–30.6). Esos tres rangos se solapan. No hay una segunda copia de ese banco.

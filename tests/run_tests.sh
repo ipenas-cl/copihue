@@ -4,8 +4,8 @@
 #   tests/run_tests.sh            run everything
 #   tests/run_tests.sh --update   regenerate golden files (review the diff!)
 #
-# 1. Program tests: every tests/**/*.lap, examples/*.lap, and examples/*/*.lap
-#    (including examples/lowlat and its benches) is compiled at -O0
+# 1. Program tests: every tests/**/*.lap, examples/*.lap, examples/*/*.lap,
+#    and examples/*/*/*.lap (examples/lowlat and its benches) is compiled at -O0
 #    and -O2, run with a timeout, and its stdout + exit code compared with
 #    tests/expected/<path>.out. Both optimization levels must match the same
 #    golden file. Heap/stack addresses (9+ digit numbers) are masked.

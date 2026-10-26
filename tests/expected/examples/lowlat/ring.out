@@ -1,8 +1,11 @@
-mask 7
-1 1 1 1 1 1 1
-full 0
-pop 10
-push 1
-11 12 13 14 15 16 80
 empty 0
+full 0
+first 1
+again 1
+drain 44
+empty 0
+spawn 1
+bad 0
+sum 300
+join 0
 exit=0

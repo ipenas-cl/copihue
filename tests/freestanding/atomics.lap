@@ -1,0 +1,17 @@
+// also-o2
+// Atomics are instructions, not the hosted runtime. The stream must keep
+// lock xadd, xchg, lock cmpxchg, and mfence at -O0 and -O2.
+let volatile cell: u64 = 0;
+
+fn bump() -> i64 {
+    let p: *volatile u64 = &cell;
+    atomic_store_release(p, 1);
+    fetch_add(p, 2);
+    atomic_add(p, 3);
+    swap(p, 4);
+    compare_exchange(p, 4, 5);
+    atomic_store_seq_cst(p, 6);
+    fence();
+    cpu_pause();
+    return atomic_load_seq_cst(p);
+}

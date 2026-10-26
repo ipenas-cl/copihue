@@ -1,62 +1,105 @@
-// Anillo de 8 ranuras, una sola hebra. Una ranura queda vacía para
-// distinguir lleno de vacío. head y tail son volatile: cada lectura y
-// cada escritura es un acceso a memoria. No hay atómicos ni hilos.
+// Cola SPSC de 8 ranuras. Una hebra produce y main consume.
+// Los índices son libres (no se enmascaran al guardar): la máscara 7
+// solo elige la ranura. Lleno es (write - read) == 8, así que las 8
+// ranuras caben. Vacío es write == read.
+// El protocolo es el de bench/lowlat/spsc.lap, en pequeño y con prueba
+// de orden. El banco de un millón de mensajes no se repite aquí.
+align(64) let volatile write_idx: u64 = 0;
+align(64) let volatile read_idx: u64 = 0;
 let slots: [i64; 8];
-let volatile head: u32 = 0;
-let volatile tail: u32 = 0;
+let volatile tid: u32 = 0;
+let stack: [u8; 65536];
 
-fn ring_push(v: i64) -> i64 {
-    let h: u32 = head;
-    let t: u32 = tail;
-    let nxt: u32 = (h + 1) & 7;
-    if (nxt == t) { return 0; }
-    slots[h as i64] = v;
-    head = nxt;
+fn try_push(v: i64) -> i64 {
+    let w = atomic_load_acquire(&write_idx) as i64;
+    let r = atomic_load_acquire(&read_idx) as i64;
+    if ((w - r) == 8) { return 0; }
+    slots[w & 7] = v;
+    atomic_store_release(&write_idx, w + 1);
     return 1;
 }
 
-fn ring_pull(out: *i64) -> i64 {
-    let h: u32 = head;
-    let t: u32 = tail;
-    if (t == h) { return 0; }
-    *out = slots[t as i64];
-    tail = (t + 1) & 7;
+fn try_pop(out: *i64) -> i64 {
+    let r = atomic_load_acquire(&read_idx) as i64;
+    let w = atomic_load_acquire(&write_idx) as i64;
+    if (r == w) { return 0; }
+    *out = slots[r & 7];
+    atomic_store_release(&read_idx, r + 1);
     return 1;
+}
+
+fn producer() -> i64 {
+    let i = 1;
+    while (i <= 24) {
+        while (try_push(i) == 0) { cpu_pause(); }
+        i = i + 1;
+    }
+    return 0;
 }
 
 fn main() -> i32 {
-    let i = 0;
     let v = 0;
     let p: *i64 = &v;
-    print("mask ");
-    print_int(7);
+    let i = 1;
+    let s = 0;
+
+    print("empty ");
+    print_int(try_pop(p));
     println("");
-    while (i < 7) {
-        print_int(ring_push(10 + i));
-        if (i < 6) { print(" "); }
+
+    while (i <= 8) {
+        try_push(i);
         i = i + 1;
     }
-    println("");
     print("full ");
-    print_int(ring_push(99));
+    print_int(try_push(9));
     println("");
-    ring_pull(p);
-    print("pop ");
+
+    try_pop(p);
+    print("first ");
     print_int(v);
     println("");
-    print("push ");
-    print_int(ring_push(80));
+
+    print("again ");
+    print_int(try_push(9));
     println("");
-    i = 0;
-    while (i < 7) {
-        ring_pull(p);
-        print_int(v);
-        if (i < 6) { print(" "); }
-        i = i + 1;
-    }
+
+    while (try_pop(p) == 1) { s = s + v; }
+    print("drain ");
+    print_int(s);
     println("");
+
     print("empty ");
-    print_int(ring_pull(p));
+    print_int(try_pop(p));
+    println("");
+
+    let t = thread_spawn(&producer, stack + 65536, &tid);
+    print("spawn ");
+    print_int(t > 0);
+    println("");
+
+    let expect = 1;
+    let bad = 0;
+    let sum = 0;
+    let got = 0;
+    while (got < 24) {
+        if (try_pop(p) == 0) {
+            cpu_pause();
+        } else {
+            if (v != expect) { bad = bad + 1; }
+            sum = sum + v;
+            expect = expect + 1;
+            got = got + 1;
+        }
+    }
+    print("bad ");
+    print_int(bad);
+    println("");
+    print("sum ");
+    print_int(sum);
+    println("");
+    print("join ");
+    print_int(thread_join(&tid));
     println("");
     return 0;
 }

@@ -1,0 +1,47 @@
+// Treiber freelist of 4096 indexes. compare_exchange is lock cmpxchg.
+// One thread allocates and frees the same way C++ and Rust do.
+// storage[0] ends at 1000000.
+let volatile free_head: u64 = 0;
+let next: [u64; 4096];
+let storage: [u64; 4096];
+
+fn alloc() -> i64 {
+    while (1) {
+        let h = atomic_load_acquire(&free_head);
+        if (h == 4096) { return 0; }
+        let nxt = next[h];
+        let old = compare_exchange(&free_head, h, nxt);
+        if (old == h) { return h; }
+    }
+    return 0;
+}
+
+fn free_block(h: i64) -> i64 {
+    while (1) {
+        let cur = atomic_load_acquire(&free_head);
+        next[h] = cur;
+        let old = compare_exchange(&free_head, cur, h);
+        if (old == cur) { return 0; }
+    }
+    return 0;
+}
+
+fn main() -> i64 {
+    let i = 0;
+    while (i < 4095) {
+        next[i] = i + 1;
+        i = i + 1;
+    }
+    next[4095] = 4096;
+    atomic_store_release(&free_head, 0);
+    i = 0;
+    while (i < 1000000) {
+        let h = alloc();
+        storage[h] = storage[h] + 1;
+        free_block(h);
+        i = i + 1;
+    }
+    print_int(storage[0]);
+    println("");
+    return 0;
+}
