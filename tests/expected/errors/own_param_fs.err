@@ -1,0 +1,4 @@
+tests/errors/own_param_fs.lap:2:6: error: an owning pointer is hosted-only
+      2 | fn f(p: own *i64) -> i64 {
+        |      ^
+1 error, compilation failed

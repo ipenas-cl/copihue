@@ -1,0 +1,4 @@
+// flags: --freestanding
+fn f(p: own *i64) -> i64 {
+    return 0;
+}

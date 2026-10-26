@@ -1,0 +1,9 @@
+fn take(a: own *i64, b: own *i64) -> i64 {
+    return 0;
+}
+
+fn main() -> i64 {
+    let p: own *i64 = malloc(8);
+    take(p, p);
+    return 0;
+}

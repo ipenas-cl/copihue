@@ -1,0 +1,4 @@
+tests/errors/own_into.lap:7:9: error: an owning pointer must be moved into 'own *T'
+      7 |     let q: *i64 = give();
+        |         ^
+1 error, compilation failed
