@@ -16,7 +16,7 @@
 
 // ==== NAMING (single place to change when the language is renamed) ====
 #define LANG_NAME     "Copihue"
-#define LANG_VERSION  "0.42.2"
+#define LANG_VERSION  "0.42.3"
 #define COMPILER_BIN  "copihue"
 #define SRC_EXT       ".lap"   /* Lapageria rosea, the copihue */
 #define OLD_SRC_EXT   ".cph"   /* v0.18.x extension, still accepted with a warning */
@@ -9350,7 +9350,7 @@ static void gen_vec_push(Codegen* cg, AstNode* n) {
     Symbol* s = NULL;
     const char* elem;
     int es, off, is_struct;
-    int dbl, alloc, oom, nocopy, store;
+    int dbl, alloc, oom, nocopy, store, fresh;
     if (!n || n->child_count != 2) {
         diag_error(n ? n->line : 0, n ? n->col : 0, "vec_push() takes a vec and a value");
         return;
@@ -9406,13 +9406,41 @@ static void gen_vec_push(Codegen* cg, AstNode* n) {
     emit(cg, "    push rcx\n");
     emit(cg, "    mov rax, rcx\n");
     if (es > 1) emit_scale_reg(cg, "rax", es);
+    /* rbx = new payload bytes. An existing block is the header mmap
+       (user pointer minus 8, length in that qword plus 8). Extend it
+       with mremap(MAYMOVE) so growth does not copy. A null pointer, or
+       any negative syscall result, keeps the malloc + rep movsb + free
+       path. The header size stays the payload, so free is unchanged. */
+    fresh = new_label(cg);
+    nocopy = new_label(cg);
+    emit(cg, "    mov rbx, rax\n");
+    emit(cg, "    mov rsi, [rbp%d]\n", off);
+    emit(cg, "    test rsi, rsi\n");
+    emit(cg, "    jz .L%d\n", fresh);
+    emit(cg, "    mov rdi, rsi\n");
+    emit(cg, "    sub rdi, 8\n");
+    emit(cg, "    mov rsi, [rdi]\n");
+    emit(cg, "    add rsi, 8\n");
+    emit(cg, "    mov rdx, rbx\n");
+    emit(cg, "    add rdx, 8\n");
+    emit(cg, "    mov r10, 1\n");
+    emit(cg, "    mov rax, 25\n");
+    emit(cg, "    syscall\n");
+    emit(cg, "    test rax, rax\n");
+    emit(cg, "    js .L%d\n", fresh);
+    emit(cg, "    mov [rax], rbx\n");
+    emit(cg, "    add rax, 8\n");
+    emit(cg, "    mov rbx, rax\n");
+    emit(cg, "    pop r8\n");
+    emit(cg, "    jmp .L%d\n", nocopy);
+    emit(cg, ".L%d:\n", fresh);
+    emit(cg, "    mov rax, rbx\n");
     emit_malloc_rax(cg);
     emit(cg, "    pop r8\n");
     oom = new_label(cg);
     emit(cg, "    cmp rax, -1\n");
     emit(cg, "    je .Lslice_oom_%d\n", oom);
     emit(cg, "    mov rbx, rax\n");
-    nocopy = new_label(cg);
     emit(cg, "    mov rsi, [rbp%d]\n", off);
     emit(cg, "    test rsi, rsi\n");
     emit(cg, "    jz .L%d\n", nocopy);

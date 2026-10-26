@@ -2,6 +2,22 @@
 
 Todos los cambios importantes del proyecto.
 
+## [0.42.3] - 2026-10-26
+
+### Changed
+- Language version is 0.42.3, on top of 0.42.2. 0.43.0 (`str`) stays in the history below. 0.44.0 is reserved for slices and `str` as values and is not this version. Hosted `vec_push` of an existing buffer extends that mapping with `mremap` (syscall 25, `MREMAP_MAYMOVE`). The mapping is the header: the user pointer minus 8, and the old length is the qword stored there plus 8. The new length is `new_cap * sizeof(T) + 8`. The header is rewritten with the new payload size, so `free` is still `munmap` of that header. The first growth, a null pointer and capacity 0 becoming 4, is still `mmap`. A negative `mremap` result uses the previous path: `mmap`, `rep movsb` of the live bytes, and `munmap` of the old block. If that `mmap` fails, the program still writes `out of memory` and exits 1. This is every hosted `vec_push`, at `-O0` and at `-O2`, for an integer, a pointer, or a struct. It is not an `-O2` rewrite and not a rule about the loop that pushes the index. `--freestanding`, `--flat`, and `--boot` still reject `vec`. The printed values do not change. 0.42.2's tail accumulator, the 0.40.1 cold-arm `while`, and the 0.39.1 `align 32` loop stay.
+
+### Not shipped
+- A shorter push that does not grow. The 0.42.2 fast path reloads the length, the capacity, and the pointer, then `shl` and `add`. Hand-patched on that binary, checksum `499999 500000 1000000` every run. Window 2026-10-26T12:14:40Z, `taskset -c 0`, one warmup and seven runs, alternating. Milliseconds, median (min–max). The unmodified bench is 7.95 (7.59–8.54). A SIB store `[rbx+rax*8]` with no push/pop of the value is 7.76 (7.51–7.89). The pointer, the length, and the capacity kept in registers across the fast path is 7.49 (7.16–7.88). Those maxima are not under 7.59. Not emitted.
+- An end pointer, which is what `g++ -O2` emits for `std::vector`. In the compiler window below, g++ is 6.89 (6.69–7.09) against the 0.42.2 copy 7.22 (6.98–7.35). The ranges overlap. The same overlap was measured in 0.39.1 and 0.40.1. Not emitted.
+- Using the loop index as the length. This bench pushes `i` into an empty vec, so the two numbers match. A push of any other value does not. Not emitted.
+- An SSE2 `paddq` sum, which is what `rustc -O` emits. In the 12:14:40Z window the push with no sum is 6.83 (6.68–7.12). rustc `-O` of the whole bench, sum included, is 4.52 (4.26–4.67). The push-only minimum is above rustc's maximum. The sum is about a millisecond. gcc's four-instruction pointer walk is the same fact. Not emitted.
+- The matching engine. `cross` still computes the address of `asks[li]` and `bids[li]` twice. That is a few instructions on a call, not the copy of a growing buffer, and it is not a rule for every `vec_push`. Hosted `-O2` `.text` of `match`, `book`, `fib`, and `parse` matches 0.42.2 (`cmp` after `objcopy -O binary -j .text`): 5005, 3793, 383, and 618. They were not retimed.
+
+### Measured
+- `examples/lowlat/bench/vec.lap`. Every binary printed `499999 500000 1000000` (the sum divided by 1000000, the remainder, then `v.len`). `taskset -c 0`, one warmup and seven runs, alternating inside each round. Milliseconds, median (min–max). Window 2026-10-26T12:21:45Z — 2026-10-26T12:21:46Z. 0.42.2 is 7.22 (6.98–7.35), `.text` 961. 0.42.3 is 4.50 (4.32–4.81), `.text` 1032. The new maximum is under the old minimum. g++ `-O2` is 6.89 (6.69–7.09); 0.42.3's maximum is under that minimum. rustc `-O` is 3.99 (3.89–4.32). 0.42.3's minimum equals rustc's maximum, so the rest of the gap is not cleared. In this window the median ratio to rustc is 1.81 for 0.42.2 and 1.13 for 0.42.3. The fast path that does not grow is the 0.42.2 sequence. The time that moved is the doubling.
+- A packed 12-byte struct pushed 1000 times, then summed, prints 999000, 1000, and 1024 at `-O0` and at `-O2`. A `vec u8` of 300 elements prints 33586, 300, and 512 at both levels. Those two programs stayed in `/tmp`.
+
 ## [0.42.2] - 2026-10-26
 
 ### Changed
