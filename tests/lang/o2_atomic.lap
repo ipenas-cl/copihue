@@ -1,0 +1,31 @@
+// A used fetch_add still returns the old value. A statement fetch_add
+// of a global and of a struct field only adds. Same lines at -O0 and -O2.
+let volatile cell: u64 = 0;
+
+struct Pair {
+    volatile a: u64,
+    volatile b: u64,
+}
+let pair: Pair;
+
+fn main() -> i64 {
+    let p: *volatile u64 = &cell;
+    let i = 0;
+    print_int(fetch_add(p, 5));
+    println("");
+    fetch_add(&cell, 1);
+    fetch_add(&pair.b, 2);
+    while (i < 10) {
+        fetch_add(&pair.a, 1);
+        i = i + 1;
+    }
+    print_int(atomic_load_acquire(&cell));
+    println("");
+    print_int(atomic_load_acquire(&pair.a));
+    println("");
+    print_int(atomic_load_acquire(&pair.b));
+    println("");
+    print_int(atomic_add(&cell, 3));
+    println("");
+    return 0;
+}

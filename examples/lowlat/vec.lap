@@ -1,0 +1,22 @@
+// Acumula 0..99 en un vec vacío y recorre la suma.
+// El primer crecimiento reserva 4 y después dobla: 100 elementos caben en 128.
+// El tiempo está en bench/vec.lap.
+fn main() -> i32 {
+    let v: vec i64;
+    let i = 0;
+    let s = 0;
+    while (i < 100) {
+        vec_push(v, i);
+        i = i + 1;
+    }
+    for x in v {
+        s = s + x;
+    }
+    print_int(v.len);
+    print(" ");
+    print_int(s);
+    print(" ");
+    print_int(v.cap);
+    println("");
+    return 0;
+}
