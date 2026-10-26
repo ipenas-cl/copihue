@@ -1,0 +1,92 @@
+// Pool de bloques fijos. alloc y free son O(1): la lista libre es un puntero.
+// Block ocupa 24 bytes: next en 0, tag en 8, val en 16.
+struct Block {
+    next: *Block,
+    tag: u8,
+    val: i64
+}
+
+let slots: [Block; 4];
+let free_head: *Block = 0;
+
+fn slot_index(p: *Block) -> i64 {
+    let base = &slots as i64;
+    let addr = p as i64;
+    return (addr - base) / sizeof(Block);
+}
+
+fn pool_init() -> i64 {
+    let i = 0;
+    free_head = 0;
+    while (i < 4) {
+        slots[i].tag = 0;
+        slots[i].val = 0;
+        slots[i].next = free_head;
+        free_head = &slots[i];
+        i = i + 1;
+    }
+    return sizeof(Block);
+}
+
+fn alloc() -> *Block {
+    let p = free_head;
+    if (p == 0) { return 0; }
+    free_head = p->next;
+    p->next = 0;
+    p->tag = 1;
+    return p;
+}
+
+fn release(p: *Block) -> i64 {
+    p->tag = 0;
+    p->val = 0;
+    p->next = free_head;
+    free_head = p;
+    return 0;
+}
+
+fn main() -> i32 {
+    let a: *Block = 0;
+    let b: *Block = 0;
+    let c: *Block = 0;
+    let d: *Block = 0;
+    let full: *Block = 0;
+    let e: *Block = 0;
+    print("size ");
+    print_int(pool_init());
+    println("");
+    a = alloc();
+    b = alloc();
+    c = alloc();
+    d = alloc();
+    print("idx ");
+    print_int(slot_index(a));
+    println("");
+    print("idx ");
+    print_int(slot_index(b));
+    println("");
+    print("idx ");
+    print_int(slot_index(c));
+    println("");
+    print("idx ");
+    print_int(slot_index(d));
+    println("");
+    full = alloc();
+    print("full ");
+    if (full == 0) { print_int(0); } else { print_int(1); }
+    println("");
+    a->val = 11;
+    release(b);
+    e = alloc();
+    print("again ");
+    print_int(slot_index(e));
+    println("");
+    e->val = 22;
+    print("kept ");
+    print_int(a->val);
+    println("");
+    print("fresh ");
+    print_int(e->val);
+    println("");
+    return 0;
+}

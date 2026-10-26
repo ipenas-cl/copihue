@@ -1,0 +1,309 @@
+// BENCH: match ORD=256 LEV=32 OPS=600000
+// Mismo motor que examples/lowlat/match.lap, sin imprimir cada cruce.
+// Motor: límite y mercado sobre el libro. Precio primero, tiempo dentro del nivel.
+struct Order { id: i32, qty: i32, next: i32 }
+struct Level { price: i32, head: i32, tail: i32, live: u8 }
+
+let orders: [Order; 256];
+let bids: [Level; 32];
+let asks: [Level; 32];
+let free_ord: i32 = 0;
+let nbid: i32 = 0;
+let nask: i32 = 0;
+let filled: i64 = 0;
+let rng: u64 = 1;
+
+fn book_init() -> i64 {
+    let i = 0;
+    while (i < 256) {
+        orders[i].id = 0;
+        orders[i].qty = 0;
+        orders[i].next = (i + 1) as i32;
+        i = i + 1;
+    }
+    orders[255].next = -1;
+    free_ord = 0;
+    nbid = 0;
+    nask = 0;
+    return sizeof(Order) * 100 + sizeof(Level);
+}
+
+fn take() -> i32 {
+    let oi: i32 = free_ord;
+    if (oi < 0) { return -1; }
+    free_ord = orders[oi].next;
+    return oi;
+}
+
+fn give(oi: i32) -> i64 {
+    orders[oi].id = 0;
+    orders[oi].qty = 0;
+    orders[oi].next = free_ord;
+    free_ord = oi;
+    return 0;
+}
+
+fn find_level(side: i64, price: i64) -> i32 {
+    let n = nbid;
+    let i = 0;
+    if (side != 0) { n = nask; }
+    while (i < n) {
+        if (side == 0) {
+            if (bids[i].price == price) { return i as i32; }
+        } else {
+            if (asks[i].price == price) { return i as i32; }
+        }
+        i = i + 1;
+    }
+    return -1;
+}
+
+fn add_level(side: i64, price: i64) -> i32 {
+    let n = nbid;
+    if (side != 0) { n = nask; }
+    if (n >= 32) { return -1; }
+    if (side == 0) {
+        bids[n].price = price as i32;
+        bids[n].head = -1;
+        bids[n].tail = -1;
+        bids[n].live = 1;
+        nbid = (n + 1) as i32;
+    } else {
+        asks[n].price = price as i32;
+        asks[n].head = -1;
+        asks[n].tail = -1;
+        asks[n].live = 1;
+        nask = (n + 1) as i32;
+    }
+    return n as i32;
+}
+
+fn drop_level(side: i64, li: i32) -> i64 {
+    let n = nbid;
+    let last = 0;
+    if (side != 0) { n = nask; }
+    last = n - 1;
+    if (li != last) {
+        if (side == 0) { bids[li] = bids[last]; }
+        else { asks[li] = asks[last]; }
+    }
+    if (side == 0) { nbid = last as i32; }
+    else { nask = last as i32; }
+    return 0;
+}
+
+fn insert(side: i64, id: i64, price: i64, qty: i64) -> i64 {
+    let li: i32 = find_level(side, price);
+    let oi: i32 = 0;
+    if (li < 0) {
+        li = add_level(side, price);
+        if (li < 0) { return 2; }
+    }
+    oi = take();
+    if (oi < 0) { return 3; }
+    orders[oi].id = id as i32;
+    orders[oi].qty = qty as i32;
+    orders[oi].next = -1;
+    if (side == 0) {
+        if (bids[li].head < 0) {
+            bids[li].head = oi;
+            bids[li].tail = oi;
+        } else {
+            orders[bids[li].tail].next = oi;
+            bids[li].tail = oi;
+        }
+    } else {
+        if (asks[li].head < 0) {
+            asks[li].head = oi;
+            asks[li].tail = oi;
+        } else {
+            orders[asks[li].tail].next = oi;
+            asks[li].tail = oi;
+        }
+    }
+    return 0;
+}
+
+fn cancel(id: i64) -> i64 {
+    let side = 0;
+    while (side < 2) {
+        let n = nbid;
+        let li = 0;
+        if (side != 0) { n = nask; }
+        while (li < n) {
+            let prev = -1;
+            let cur = 0;
+            if (side == 0) { cur = bids[li].head; }
+            else { cur = asks[li].head; }
+            while (cur >= 0) {
+                if (orders[cur].id == id) {
+                    let nxt: i32 = orders[cur].next;
+                    if (prev < 0) {
+                        if (side == 0) { bids[li].head = nxt; }
+                        else { asks[li].head = nxt; }
+                    } else {
+                        orders[prev].next = nxt;
+                    }
+                    if (side == 0) {
+                        if (bids[li].tail == cur) { bids[li].tail = prev as i32; }
+                        if (bids[li].head < 0) { drop_level(0, li as i32); }
+                    } else {
+                        if (asks[li].tail == cur) { asks[li].tail = prev as i32; }
+                        if (asks[li].head < 0) { drop_level(1, li as i32); }
+                    }
+                    give(cur as i32);
+                    return 0;
+                }
+                prev = cur;
+                cur = orders[cur].next;
+            }
+            li = li + 1;
+        }
+        side = side + 1;
+    }
+    return 1;
+}
+
+fn best_bid() -> i64 {
+    let i = 0;
+    let best = 0;
+    let seen = 0;
+    while (i < nbid) {
+        let px = bids[i].price;
+        if (seen == 0 || px > best) { best = px; seen = 1; }
+        i = i + 1;
+    }
+    return best;
+}
+
+fn best_ask() -> i64 {
+    let i = 0;
+    let best = 0;
+    let seen = 0;
+    while (i < nask) {
+        let px = asks[i].price;
+        if (seen == 0 || px < best) { best = px; seen = 1; }
+        i = i + 1;
+    }
+    return best;
+}
+
+fn best_bid_li() -> i32 {
+    let i = 0;
+    let best = 0;
+    let at: i32 = -1;
+    while (i < nbid) {
+        let px = bids[i].price;
+        if (at < 0 || px > best) { best = px; at = i as i32; }
+        i = i + 1;
+    }
+    return at;
+}
+
+fn best_ask_li() -> i32 {
+    let i = 0;
+    let best = 0;
+    let at: i32 = -1;
+    while (i < nask) {
+        let px = asks[i].price;
+        if (at < 0 || px < best) { best = px; at = i as i32; }
+        i = i + 1;
+    }
+    return at;
+}
+
+fn cross(is_buy: i64, limit_px: i64, qty: i64, is_market: i64, taker: i64) -> i64 {
+    let left = qty;
+    let go = 1;
+    while (left > 0 && go == 1) {
+        let li: i32 = -1;
+        let px = 0;
+        let oi: i32 = -1;
+        if (is_buy != 0) { li = best_ask_li(); }
+        else { li = best_bid_li(); }
+        if (li < 0) {
+            go = 0;
+        } else {
+            if (is_buy != 0) {
+                px = asks[li].price;
+                oi = asks[li].head;
+            } else {
+                px = bids[li].price;
+                oi = bids[li].head;
+            }
+            if (is_market == 0) {
+                if (is_buy != 0 && px > limit_px) { go = 0; }
+                if (is_buy == 0 && px < limit_px) { go = 0; }
+            }
+            if (go == 1) {
+                let avail = orders[oi].qty;
+                let takeq = left;
+                let maker = orders[oi].id;
+                if (takeq > avail) { takeq = avail; }
+                filled = filled + takeq;
+                orders[oi].qty = (avail - takeq) as i32;
+                left = left - takeq;
+                if (orders[oi].qty == 0) { cancel(maker); }
+            }
+        }
+    }
+    return left;
+}
+
+fn limit(side: i64, id: i64, price: i64, qty: i64) -> i64 {
+    let is_buy = 0;
+    let left = 0;
+    if (side == 0) { is_buy = 1; }
+    left = cross(is_buy, price, qty, 0, id);
+    if (left > 0) { insert(side, id, price, left); }
+    return left;
+}
+
+fn market(side: i64, id: i64, qty: i64) -> i64 {
+    let is_buy = 0;
+    let left = 0;
+    if (side == 0) { is_buy = 1; }
+    left = cross(is_buy, 0, qty, 1, id);
+    return left;
+}
+
+
+fn rnd() -> i64 {
+    rng = rng * 1103515245 + 12345;
+    return ((rng >> 16) & 32767) as i64;
+}
+
+fn main() -> i32 {
+    let acc = 0;
+    let n = 0;
+    let id = 1;
+    book_init();
+    while (n < 600000) {
+        let op = rnd() % 10;
+        if (op < 5) {
+            let side = rnd() & 1;
+            let px = (rnd() % 32) + 1;
+            let qty = (rnd() % 4) + 1;
+            acc = acc + limit(side, id, px, qty);
+        } else {
+            if (op < 8) {
+                let side = rnd() & 1;
+                let qty = (rnd() % 4) + 1;
+                acc = acc + market(side, id, qty);
+            } else {
+                if (op < 9) {
+                    let which = 1;
+                    if (id > 1) { which = (rnd() % (id - 1)) + 1; }
+                    acc = acc + cancel(which);
+                } else {
+                    acc = acc + best_bid() + best_ask();
+                }
+            }
+        }
+        id = id + 1;
+        n = n + 1;
+    }
+    print_int((acc + filled) & 16777215);
+    println("");
+    return 0;
+}
