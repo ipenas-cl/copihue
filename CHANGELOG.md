@@ -2,6 +2,21 @@
 
 Todos los cambios importantes del proyecto.
 
+## [0.31.1] - 2026-10-26
+
+### Added
+- Hosted 64-bit `-O2` rewrites the loop `i = 0; while (i < lim) { sum = sum + a[i]; b[i] = (b[i] + imm) & 255; i = i + 1; }` when `lim` is a proved multiple of 16 inside both lengths and `a` is `u8`. The old bytes are summed with SSE2 `psadbw` and the addend's low byte is `paddb`. `i` becomes `lim`. An `i8` sum stays scalar. `(e) as u8` around the add is the same low byte. A byte store `a[i] = (a[i] + imm) & 255`, `a[i] = a[i] + imm`, or `dst[i] = src[i] + imm` that is not that loop is `add byte` when both sides are the same array, and `movzx` / `add al` / `mov byte` when they differ. The two `movzx` that follow a narrow add and a narrow mask are not emitted for that store.
+- `tests/lang/o2_mem.lap` adds a 16-byte sum-then-increment (same array and two arrays), a 15-byte `add byte`, a cross-array `dst[i] = src[i] + 1`, and `add byte` of 200. `-O0` and `-O2` print the same lines. The `-O2` assembly must also contain `psadbw` and `add byte`.
+- `bench/src/copy.lap`, `fill.lap`, `hash.lap`, and `parse.lap` store the byte with `as u8`. 0.31.0 rejected the wider integer. The bytes are the same.
+
+### Changed
+- Language version is 0.31.1, on top of 0.31.0. `-O0`, `--freestanding`, `--flat`, `--boot`, and `bits 16` / `bits 32` do not take the new rewrites. `fill`, `list`, `hash`, `sort`, `fold`, `chain`, `parse`, and `fib` keep the 0.31.0 instruction stream aside from the version line and, where a bench only needed `as u8` on the setup store, that cast.
+- On this machine, the 00:11:59–00:12:47 UTC window (the binary prints 0.31.1). `copy` is 4.7 ms (4.4–5.2), against the 23:29:22–23:30:09 UTC window 42.0 ms (41.5–42.2). Those ranges do not overlap. `text` is 557 → 602. In this window `copy` is below C (9.7–10.6), Rust (17.2–19.5), and OCaml (163.6–164.7). The ratio to C is 0.47. The first loop is still `rep movsb`. gcc still calls `memcpy` for that copy. `fill` is 17.5 ms (16.7–17.6) against 17.2 (16.6–17.7). Those ranges overlap. It is still 1.52× C. `list` is 41.0 ms (40.7–41.4) against 40.4 (40.3–41.0). Those ranges overlap. It is still above C and, in this row and these runs, below Rust (42.0–42.3). The ratio to Rust is 0.97. `parse` is 22.3 ms (21.9–23.1) against 22.5 (22.2–24.1). Those ranges overlap. It is still 1.60× C. `fib` is 393.4 ms (392.9–397.3), 3.00× C. The prologue stays 16 instructions.
+
+### Not shipped
+- The `fib` prologue stayed 16 instructions. Placing `fib(n - 2)` before reusing `r12` for `fib(n - 1)` removes the second callee-saved register and the alignment pad and still makes two calls. On this machine, one warmup and seven runs, `taskset -c 0`: 0.31.0 was 393, 393, 393, 393, 393, 393, 394 (median 393) and the reuse form was 393, 394, 394, 394, 394, 396, 397 (median 394). That overlaps 0.31.0 and the 0.30.1 window 392.7–394.0. gcc `-O2` still splits even and odd arguments and makes one recursive call; that changes the call count and is not emitted.
+- `parse` stays `imul`. Four programs with the same `n` and `reps`, same method: the real loop 22 ms (22–22); load, compare, and `v = v * 10 + 1` 22 ms (22–24); load, compare, and `v = v + 1` 22 ms (22–23); nine dependent `imul`s and a reset, with no byte load, 10 ms (10–14). Dropping the `imul` does not move the per-byte loop. The load and the compare are the cost that shows up, and no rewrite of that loop was shown faster on the official bench, so the code stays.
+
 ## [0.31.0] - 2026-10-25
 
 ### Added

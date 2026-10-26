@@ -16,7 +16,7 @@ fn main() -> i32 {
         if ((i % 10) == 9) {
             buf[i] = 44;
         } else {
-            buf[i] = 48 + (i % 10);
+            buf[i] = (48 + (i % 10)) as u8;
         }
         i = i + 1;
     }
