@@ -16,7 +16,7 @@
 
 // ==== NAMING (single place to change when the language is renamed) ====
 #define LANG_NAME     "Copihue"
-#define LANG_VERSION  "0.40.0"
+#define LANG_VERSION  "0.40.1"
 #define COMPILER_BIN  "copihue"
 #define SRC_EXT       ".lap"   /* Lapageria rosea, the copihue */
 #define OLD_SRC_EXT   ".cph"   /* v0.18.x extension, still accepted with a warning */
@@ -932,6 +932,12 @@ static char g_garr_name[64];
 static int g_fwd_hold;
 static char g_fwd_arr[96];
 static char g_fwd_idx[96];
+// Element address kept in r10 across a cold-equal loop's compare and the
+// straight tail. NULL when the tail must compute the address itself.
+static int g_elem_capture;
+static const char* g_elem_reg;
+static char g_elem_arr[96];
+static char g_elem_idx[96];
 
 // A callee-saved register that is not a local, saved in the prologue, used
 // to hold a value across a call so the caller does not push it.
@@ -12389,8 +12395,29 @@ void gen_expr(Codegen* cg, AstNode* n) {
             }
         } else {
             // Field access from expression (e.g., array[index].field)
-            // Generate the expression first (should leave struct address in rax)
-            gen_expr(cg, obj);
+            // Generate the expression first (should leave struct address in rax).
+            // A cold-equal loop may already hold that address in r10, or ask
+            // this load to keep it there for a later field of the same element.
+            int elem_held = 0;
+            if (g_elem_reg && obj->type == AST_INDEX && obj->child_count >= 2 &&
+                obj->children[0] && obj->children[0]->type == AST_IDENT &&
+                obj->children[0]->name && !strcmp(obj->children[0]->name, g_elem_arr) &&
+                obj->children[1] && obj->children[1]->type == AST_IDENT &&
+                obj->children[1]->name && !strcmp(obj->children[1]->name, g_elem_idx)) {
+                if (strcmp(g_elem_reg, "rax"))
+                    emit(cg, "    mov rax, %s\n", g_elem_reg);
+                elem_held = 1;
+            }
+            if (!elem_held) gen_expr(cg, obj);
+            if (!elem_held && g_elem_capture && obj->type == AST_INDEX && obj->child_count >= 2 &&
+                obj->children[0] && obj->children[0]->type == AST_IDENT &&
+                obj->children[0]->name && !strcmp(obj->children[0]->name, g_elem_arr) &&
+                obj->children[1] && obj->children[1]->type == AST_IDENT &&
+                obj->children[1]->name && !strcmp(obj->children[1]->name, g_elem_idx)) {
+                emit(cg, "    mov r10, rax\n");
+                g_elem_reg = "r10";
+                g_elem_capture = 0;
+            }
 
             // Now rax contains the address of the struct
             // We need to know the struct type to get field offset
@@ -13757,6 +13784,7 @@ static int can_branch_cond(Codegen* cg, AstNode* n) {
 
 static void emit_cond_fail(Codegen* cg, AstNode* n, int fail_lab);
 static void emit_cond_succeed(Codegen* cg, AstNode* n, int ok_lab);
+static void branch_succeed(Codegen* cg, AstNode* n, int ok_lab);
 
 static void note_fwd_index(AstNode* ix) {
     g_fwd_ok = 0;
@@ -15413,6 +15441,29 @@ static int node_has_ctrl(AstNode* n) {
     return 0;
 }
 
+static int node_has_return(AstNode* n) {
+    if (!n) return 0;
+    if (n->type == AST_RETURN) return 1;
+    for (int i = 0; i < n->child_count; i++)
+        if (node_has_return(n->children[i])) return 1;
+    return 0;
+}
+
+// Every path through n leaves the loop or the function. An if counts only
+// when both arms do. A later sibling is then unreachable.
+static int node_always_leaves(AstNode* n) {
+    if (!n) return 0;
+    if (n->type == AST_RETURN || n->type == AST_BREAK) return 1;
+    if (n->type == AST_BLOCK) {
+        for (int i = 0; i < n->child_count; i++)
+            if (node_always_leaves(n->children[i])) return 1;
+        return 0;
+    }
+    if (n->type == AST_IF && n->child_count >= 3 && n->children[2])
+        return node_always_leaves(n->children[1]) && node_always_leaves(n->children[2]);
+    return 0;
+}
+
 // `header; if (x == k) { A } else { B }; tail` inside a while body.
 // The equal arm is the one a direct compare branches to. The not-equal arm
 // falls through, so that path has one taken branch (the jump back) instead
@@ -15488,6 +15539,270 @@ static void emit_eq_fall_body(Codegen* cg, AstNode* body, int if_at, int start_l
     }
     emit_drops(cg, base, cg->symtab->count);
     emit(cg, "    jmp .L%d\n", start_lab);
+    g_prev_stmt = NULL;
+    g_prev2_stmt = NULL;
+    symtab_leave(cg->symtab);
+    g_unsafe = saved_unsafe;
+}
+
+// `if (x == k) { complex }` inside a while, with a straight tail. The equal
+// arm is cold (it has a nested if, a loop, a call, a break, or a return) and
+// currently sits between the compare and the tail, so the common not-equal
+// path takes a branch over it. Move that arm past the back edge. The tail
+// falls through. An else, when present, is straight and stays on that path.
+// The straight `else` form is eq_fall_if, not this one. A field compare is
+// not a direct leaf branch (`can_branch_cond`); it still has a jcc, so it
+// belongs here too. A return is cold the same way a nested if or a call is.
+static int eq_outline_if(Codegen* cg, AstNode* body, int* if_at) {
+    int seen = -1;
+    AstNode* iff;
+    AstNode* cond;
+    AstNode* els;
+    if (!o2_hosted() || !cg || !cg->symtab || !body || body->type != AST_BLOCK) return 0;
+    for (int i = 0; i < body->child_count; i++) {
+        AstNode* s = body->children[i];
+        if (!s || s->type != AST_IF) continue;
+        if (seen >= 0) return 0;
+        seen = i;
+    }
+    if (seen < 0) return 0;
+    iff = body->children[seen];
+    if ((iff->flags & AF_CARRY) || iff->child_count < 2 || !iff->children[1]) return 0;
+    cond = iff->children[0];
+    if (!cond || cond->type != AST_COMPARE || !cond->op || strcmp(cond->op, "==")) return 0;
+    if (!cmp_fail_jcc(cond->op)) return 0;
+    if (!node_has_ctrl(iff->children[1]) && !node_has_call(iff->children[1]) &&
+        !node_has_return(iff->children[1])) return 0;
+    // A let in the tail is registered when that statement is emitted. The
+    // equal arm is emitted after the tail, so a return there would drop a
+    // slot the arm never allocated. Keep that loop on the ordinary layout.
+    for (int i = seen + 1; i < body->child_count; i++) {
+        if (body->children[i] && body->children[i]->type == AST_LET) return 0;
+    }
+    els = iff->child_count > 2 ? iff->children[2] : NULL;
+    if (els && (node_has_ctrl(els) || node_has_call(els))) return 0;
+    for (int i = 0; i < body->child_count; i++) {
+        if (i == seen) continue;
+        if (node_has_ctrl(body->children[i]) || node_has_call(body->children[i])) return 0;
+    }
+    *if_at = seen;
+    return 1;
+}
+
+// The equal arm never reaches the tail, and the tail loads another field of
+// the same element before it writes the index. Keep that address in r10.
+// r10 is caller-saved and the cold arm does not see it: the arm returns or
+// breaks. A second global, a volatile array, or r10 already holding the
+// index or the other compare operand stays on two address calculations.
+static int outline_elem_reuse(Codegen* cg, AstNode* body, int if_at) {
+    AstNode* iff = body->children[if_at];
+    AstNode* cond = iff->children[0];
+    AstNode* other;
+    const char* arr = NULL;
+    const char* idx = NULL;
+    const char* fname = NULL;
+    Symbol* si;
+    const char* ir;
+    int saw = 0;
+    g_elem_capture = 0;
+    g_elem_reg = NULL;
+    g_elem_arr[0] = 0;
+    g_elem_idx[0] = 0;
+    if (!node_always_leaves(iff->children[1])) return 0;
+    if (field_of_arr(cond->children[0], &arr, &idx, &fname)) other = cond->children[1];
+    else if (field_of_arr(cond->children[1], &arr, &idx, &fname)) other = cond->children[0];
+    else return 0;
+    if (!other || node_has_call(other)) return 0;
+    {
+        GlobalVar* gv = global_symtab_lookup(cg->global_symtab, (char*)arr);
+        Symbol* loc = symtab_lookup_symbol(cg->symtab, (char*)arr);
+        if (gv && (gv->is_volatile || !gv->is_array)) return 0;
+        if (!gv && !(loc && loc->is_array && !loc->is_volatile)) return 0;
+    }
+    si = symtab_lookup_symbol(cg->symtab, (char*)idx);
+    ir = si ? local_reg(si) : NULL;
+    if (ir && !strcmp(ir, "r10")) return 0;
+    if (other->type == AST_IDENT && other->name) {
+        Symbol* so = symtab_lookup_symbol(cg->symtab, other->name);
+        const char* rr = so ? local_reg(so) : NULL;
+        if (rr && !strcmp(rr, "r10")) return 0;
+    }
+    for (int i = if_at + 1; i < body->child_count; i++) {
+        AstNode* s = body->children[i];
+        AstNode* rhs;
+        const char* a2 = NULL;
+        const char* i2 = NULL;
+        const char* f2 = NULL;
+        if (!s || s->type != AST_ASSIGN || s->child_count != 1 || node_has_call(s)) break;
+        rhs = s->children[0];
+        if (!rhs || (rhs->type != AST_IDENT && rhs->type != AST_NUMBER &&
+                     rhs->type != AST_FIELD_ACCESS))
+            break;
+        if (rhs->type == AST_FIELD_ACCESS && field_of_arr(rhs, &a2, &i2, &f2) &&
+            !strcmp(a2, arr) && !strcmp(i2, idx))
+            saw = 1;
+        if (s->name && !strcmp(s->name, idx)) break;
+    }
+    if (!saw) return 0;
+    snprintf(g_elem_arr, sizeof g_elem_arr, "%s", arr);
+    snprintf(g_elem_idx, sizeof g_elem_idx, "%s", idx);
+    return 1;
+}
+
+static void emit_sized_load_reg(Codegen* cg, const char* reg, const char* mem, int size, int is_signed) {
+    if (!reg || !strcmp(reg, "rax")) {
+        emit_sized_load_mark(cg, mem, size, is_signed, 0);
+        return;
+    }
+    if (size <= 1)
+        emit(cg, is_signed ? "    movsx %s, byte [%s]\n" : "    movzx %s, byte [%s]\n", reg, mem);
+    else if (size == 2)
+        emit(cg, is_signed ? "    movsx %s, word [%s]\n" : "    movzx %s, word [%s]\n", reg, mem);
+    else if (size == 4) {
+        if (is_signed) emit(cg, "    movsxd %s, dword [%s]\n", reg, mem);
+        else emit(cg, "    mov %s, [%s]\n", reg_dword(reg), mem);
+    } else emit(cg, "    mov %s, [%s]\n", reg, mem);
+}
+
+static int held_field_mem(Codegen* cg, AstNode* fld, char* mem, int nmem) {
+    const char* arr = NULL;
+    const char* idx = NULL;
+    const char* fname = NULL;
+    char* et;
+    int off = 0, sz = 0, sg = 0, vol = 0;
+    if (!g_elem_reg || !field_of_arr(fld, &arr, &idx, &fname)) return 0;
+    if (strcmp(arr, g_elem_arr) || strcmp(idx, g_elem_idx)) return 0;
+    et = array_elem_type_name(cg, fld->children[0]->children[0]);
+    if (!et || !field_mem_info(cg, et, fname, &off, &sz, &sg, &vol) || vol) return 0;
+    if (off) snprintf(mem, nmem, "%s+%d", g_elem_reg, off);
+    else snprintf(mem, nmem, "%s", g_elem_reg);
+    return sz | (sg ? 0x100 : 0);
+}
+
+// Address of the compared element stays in rax. The field value is in rbx.
+// Returns 0 without emitting when the other operand is not a leaf.
+static int emit_outline_field_je(Codegen* cg, AstNode* cond, int then_lab) {
+    AstNode* fld;
+    AstNode* other;
+    AstNode* ix;
+    const char* arr = NULL;
+    const char* idx = NULL;
+    const char* fname = NULL;
+    char mem[64];
+    int info;
+    if (field_of_arr(cond->children[0], &arr, &idx, &fname)) {
+        fld = cond->children[0];
+        other = cond->children[1];
+    } else if (field_of_arr(cond->children[1], &arr, &idx, &fname)) {
+        fld = cond->children[1];
+        other = cond->children[0];
+    } else return 0;
+    if (other->type == AST_NUMBER) {
+        long long v;
+        if (!parse_i64(other->value, &v) || !fits_imm32_val(v)) return 0;
+    } else if (other->type != AST_IDENT) return 0;
+    else {
+        OpLeaf L;
+        if (!scalar_leaf(cg, other, &L) || (L.kind != 1 && L.kind != 2)) return 0;
+    }
+    ix = fld->children[0];
+    g_elem_reg = "rax";
+    info = held_field_mem(cg, fld, mem, (int)sizeof mem);
+    g_elem_reg = NULL;
+    if (!info) return 0;
+    gen_expr(cg, ix);
+    g_elem_reg = "rax";
+    emit_sized_load_reg(cg, "rbx", mem, info & 0xff, (info & 0x100) != 0);
+    if (other->type == AST_NUMBER) {
+        long long v;
+        parse_i64(other->value, &v);
+        emit(cg, "    cmp rbx, %lld\n", v);
+    } else {
+        OpLeaf L;
+        scalar_leaf(cg, other, &L);
+        if (L.kind == 1) emit(cg, "    cmp rbx, %s\n", L.reg);
+        else emit(cg, "    cmp rbx, [%s]%s\n", L.mem, L.vol ? "  ; volatile" : "");
+    }
+    emit(cg, "    je .L%d\n", then_lab);
+    return 1;
+}
+
+// `name = arr[idx].field` from the address still in rax. One load into name's
+// register. A name that is not in a register stays on the ordinary field load.
+static int emit_held_assign(Codegen* cg, AstNode* n) {
+    char mem[64];
+    int info;
+    Symbol* s;
+    const char* r;
+    if (!n || n->type != AST_ASSIGN || !n->name || n->child_count != 1) return 0;
+    if (!g_elem_reg || !n->children[0] || n->children[0]->type != AST_FIELD_ACCESS) return 0;
+    s = symtab_lookup_symbol(cg->symtab, n->name);
+    r = s ? local_reg(s) : NULL;
+    if (!r || !strcmp(r, "rax") || !strcmp(r, g_elem_reg)) return 0;
+    info = held_field_mem(cg, n->children[0], mem, (int)sizeof mem);
+    if (!info) return 0;
+    check_assign_types(cg, n);
+    emit_sized_load_reg(cg, r, mem, info & 0xff, (info & 0x100) != 0);
+    return 1;
+}
+
+// Same body scope as emit_eq_fall_body. The tail runs on the fall-through
+// and, if the equal arm does not return, after that arm. Drops run once,
+// at the end of the tail, not on both arms.
+static void emit_eq_outline_body(Codegen* cg, AstNode* body, int if_at, int start_lab) {
+    AstNode* iff = body->children[if_at];
+    int then_lab = new_label(cg);
+    int tail_lab = new_label(cg);
+    int saved_unsafe = g_unsafe;
+    int base;
+    if (body->flags & AF_UNSAFE) g_unsafe++;
+    symtab_enter(cg->symtab);
+    base = cg->symtab->scope_base[cg->symtab->scope_depth - 1];
+    for (int i = 0; i < if_at; i++) {
+        g_prev2_stmt = i > 1 ? body->children[i - 2] : NULL;
+        g_prev_stmt = i > 0 ? body->children[i - 1] : NULL;
+        emit_eq_stmt(cg, body->children[i]);
+    }
+    g_fwd_ok = 0;
+    if (!outline_elem_reuse(cg, body, if_at)) {
+        if (can_branch_cond(cg, iff->children[0]))
+            emit_cond_succeed(cg, iff->children[0], then_lab);
+        else
+            branch_succeed(cg, iff->children[0], then_lab);
+    } else if (!emit_outline_field_je(cg, iff->children[0], then_lab)) {
+        g_elem_reg = NULL;
+        g_elem_capture = 1;
+        if (can_branch_cond(cg, iff->children[0]))
+            emit_cond_succeed(cg, iff->children[0], then_lab);
+        else
+            branch_succeed(cg, iff->children[0], then_lab);
+    }
+    g_nonneg_reg = NULL;
+    g_fwd_hold = 1;
+    g_prev_stmt = if_at > 0 ? body->children[if_at - 1] : NULL;
+    if (iff->child_count > 2 && iff->children[2])
+        gen_stmt(cg, iff->children[2]);
+    emit(cg, ".L%d:\n", tail_lab);
+    for (int i = if_at + 1; i < body->child_count; i++) {
+        g_prev2_stmt = i > if_at + 1 ? body->children[i - 2] : iff;
+        g_prev_stmt = i == if_at + 1 ? iff : body->children[i - 1];
+        if (!(g_elem_reg && emit_held_assign(cg, body->children[i])))
+            emit_eq_stmt(cg, body->children[i]);
+        if (g_elem_idx[0] && body->children[i] && body->children[i]->name &&
+            !strcmp(body->children[i]->name, g_elem_idx)) {
+            g_elem_reg = NULL;
+            g_elem_capture = 0;
+        }
+    }
+    g_elem_reg = NULL;
+    g_elem_capture = 0;
+    emit_drops(cg, base, cg->symtab->count);
+    emit(cg, "    jmp .L%d\n", start_lab);
+    emit(cg, ".L%d:\n", then_lab);
+    g_fwd_ok = 0;
+    g_prev_stmt = if_at > 0 ? body->children[if_at - 1] : NULL;
+    gen_stmt(cg, iff->children[1]);
+    emit(cg, "    jmp .L%d\n", tail_lab);
     g_prev_stmt = NULL;
     g_prev2_stmt = NULL;
     symtab_leave(cg->symtab);
@@ -15954,6 +16269,7 @@ void gen_stmt(Codegen* cg, AstNode* n) {
         int end_lab = new_label(cg);
         int cont_lab = new_label(cg);
         int if_at = -1;
+        int outline_at = -1;
         int hoist = 0;
         char gname[64];
         const char* saved_base = g_garr_base;
@@ -15972,12 +16288,24 @@ void gen_stmt(Codegen* cg, AstNode* n) {
         } else {
             if_at = -1;
         }
+        // The equal arm is cold and the tail is straight. Calls live in that
+        // arm, so the whole-body call check above does not apply.
+        if (if_at < 0 && !g_reg_asm && n->child_count >= 2 &&
+            !node_has_call(n->children[0]) &&
+            eq_outline_if(cg, n->children[1], &outline_at)) {
+            /* outline_at set */
+        } else {
+            outline_at = -1;
+        }
         if (hoist) emit(cg, "    lea r8, [%s]\n", gname);
         // The back edge must start a 32-byte chunk. On this Xeon the same
         // bytes are ~21 ms when the test shares its chunk with the lea, and
         // ~13.7 ms when the label is at or past the next boundary. NASM
         // `align 32` is that boundary. It is not the 0.37.2 align of every
         // function and every while.
+        // align 32 stays on the eq_fall loop (the 0.39.1 parse cliff). The
+        // outlined arm does not hoist a lea in front of the test, and padding
+        // that loop moved later functions enough to slow `match`.
         if (if_at >= 0) emit(cg, "align 32\n");
         emit(cg, ".L%d:\n", start_lab);
         int branched = 0;
@@ -16026,6 +16354,8 @@ void gen_stmt(Codegen* cg, AstNode* n) {
         }
         if (if_at >= 0)
             emit_eq_fall_body(cg, n->children[1], if_at, start_lab);
+        else if (outline_at >= 0)
+            emit_eq_outline_body(cg, n->children[1], outline_at, start_lab);
         else
             gen_stmt(cg, n->children[1]);
         g_garr_base = saved_base;
