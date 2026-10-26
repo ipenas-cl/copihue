@@ -12,10 +12,31 @@ Todos los cambios importantes del proyecto.
 - `tests/lang/slice.lap` prints 4, 10, 20, 100, 100, 100, 100, 4, 0, 30, 40, 1, 16 at `-O0` and `-O2`. `tests/lang/slice_oob.lap` prints `index out of range` and exits 1. `tests/lang/slice_neg.lap` prints `negative slice length` and exits 1. `tests/errors/slice.lap` is the seven diagnostics above that apply to a field, a return, an array parameter, a mismatched array, a write of `.len`, a negative literal, and a bad initializer. `tests/freestanding/slice.lap` assembles with no `syscall` and no slice trap, at `-O0` and `-O2`, and is not booted. `tests/link/parts/slice_chk.lap` is not a program test: hosted `-O0` and `-O2` each emit three `jae .Lslice_trap_`, `--freestanding` and `--flat` emit none and no `syscall`, and `--checked` brings the three traps back.
 
 ### Changed
-- Language version is 0.34.0, on top of 0.33.0.
+- Language version is 0.34.0, on top of 0.33.1. The 0.33.1 pointer registers and immediate field stores stay.
 
 ### Measured
 - `bench/slice/` is the same `while (j < n)` over 1024 `i64`s, 100000 times, with `s[j]` and with `s.ptr[j]`. It is not part of `make test`. The sum is 52377600000. On this machine, 2026-10-26T02:51:32Z, `taskset -c 0`, one warmup and seven runs, `python3` `time.perf_counter`. Milliseconds, median (min–max). `-O2` checked 59.9 (59.5–60.8), unchecked 53.1 (51.9–53.6). Those ranges do not overlap. `-O0` checked 134.7 (134.1–136.1), unchecked 134.7 (133.3–136.0). Those ranges overlap. The `-O2` checked loop reloads the length, `cmp`s, and `jae`s to the trap; the unchecked loop does not. Both still reload the pointer.
+
+## [0.33.1] - 2026-10-26
+
+### Added
+- Hosted `-O2` can keep a pointer local or a pointer parameter in `r12`–`r15`, `r10`, or `r11`, under the same plan as a scalar. An array, a struct, a `volatile` local, or a name whose address is taken stays in its slot. Callee-saved registers are still filled first. A field load or store through a pointer already in a register is one memory operand. A numeric constant of that width is an immediate (`mov qword [r12], 0`, `mov byte [r12+8], 1` in `alloc`). `sum = sum + a[i].field` and `sum = sum - a[i].field` add or subtract that load into `sum` when `sum` is already in a callee-saved register and the field is a scalar.
+- `tests/lang/o2_leaf.lap` prints the same 21 lines at `-O0` and `-O2`. That covers an early return, a call on the right of `&&` (the right-hand side does not run), and a call in a `while` condition (it is not hoisted).
+
+### Changed
+- Language version is 0.33.1, on top of 0.33.0. The 0.33.0 module rules are unchanged. `-O0`, `--freestanding`, `--flat`, `--boot`, and `bits 16` / `bits 32` do not put pointers in those registers.
+
+### Measured
+- `examples/lowlat/RESULTS.md` is the 2026-10-26T02:32:11Z — 2026-10-26T02:32:14Z window. The binary prints 0.33.1. One warmup and seven runs, `taskset -c 0`. The checksums are 2052000, 2160927, and 2853449. Milliseconds, median (min–max).
+- Pool 14.2 (13.6–15.1). The previous examples window, 2026-10-26T00:51:15Z — 00:51:19Z, binary 0.32.1, was 20.8 (20.6–20.9). The new maximum is below the old minimum. Copihue is still above C 8.8 (8.5–9.1) and Rust 8.9 (8.4–9.3). The ratio to C is 1.61. It was about 2.3. gcc `-O2` inlines `alloc` and `release` and walks the blocks with `addq $24`. Copihue still calls both, and the release loop computes `i * 24` twice (`imul`). `* 24` is not a SIB scale.
+- Book 49.5 (49.1–51.6) against 49.3 (49.2–49.8) in that earlier window. The ranges overlap. Copihue is still above C 38.6 (38.1–38.7) and Rust 33.2 (32.9–33.6). The ratio to C is 1.28. The ratio to Rust is 1.49.
+- Match 47.1 (47.0–47.3) against 47.1 (46.8–47.4). The ranges overlap. Copihue is still above C 33.0 (32.5–33.1) and Rust 33.3 (33.1–33.6). The ratio to C is 1.43. The ratio to Rust is 1.41.
+- `bench/lowlat` was not run again. The timed SPSC, SPMC, MPMC, and thread pool stay the 0.32.2 numbers.
+
+### Not shipped
+- Filling `r10` and `r11` before `r12`–`r15` for locals that do not cross a call. Same method, interleaved with the plan that fills callee-saved registers first: the book went from 49.61 (49.39–50.07) to 54.48 (54.23–55.35). `insert`, `cancel`, and `main` kept the same instructions. The leaf loops moved into caller-saved registers. The pool did not need that order, so the old plan stays.
+- A hosted `-O2` leaf inliner. A direct call, no nested user call, at most six scalar or pointer parameters, no struct passed or returned by value, body weight at most 40, four passes, and a pointer, `i64`, or `u64` result written straight into the destination local. With the register plan above, the book was 57.21 (56.77–57.45) against 49.74 (49.29–50.12) without the inliner, and the pool was 14.94 (14.87–15.56) against 14.25 (14.10–14.39). Both are worse. gcc inlines those leaves. Copihue does not.
+- Sharing one physical register across names whose recorded ranges do not overlap. That miscompiled the order book (the checksum left 2160927) and the matcher did not finish. A name used in a `while` condition stays live through the body, and a straight walk records that use before the body.
 
 ## [0.33.0] - 2026-10-26
 
