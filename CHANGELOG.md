@@ -2,6 +2,29 @@
 
 Todos los cambios importantes del proyecto.
 
+## [0.35.1] - 2026-10-26
+
+### Added
+- Hosted `-O2` rewrites a struct-array index in a loop that contains a call. The index must be the only write of an `i64`, `u64`, or untyped local, and that write must be `i = i + K` or `i = i - K` with `K` a positive constant. The element size must not be a power of two (8, 16, and 32 stay `shl` or a SIB scale). The loop then keeps a pointer and adds `sizeof(element) * K` on the back edge. `sum = sum + p->field` through that pointer still adds into a callee-saved sum. A local array is rewritten only when `i` starts at a nonnegative constant, the condition is `i < N`, and `N` fits the declared length. A name that starts with `__`, a name whose address is taken, a narrow integer, a volatile array, and a whole-element load or store stay indexed. A loop with no call stays indexed.
+- `tests/lang/o2_stride.lap` prints 36, 36, 16, 36, 18, 46, 8 at `-O0` and `-O2`. The two loops that call another function are the ones the rewrite applies to. `tests/lang/o2_stride_oob.lap` loads past a local `[Cell; 4]` and exits 1 with `Array bounds error` at both levels. `tests/lang/o2_ix12.lap` walks `orders[cur].next` on a 12-byte struct and prints 120 at both levels. That walk is data-dependent, so it stays an index.
+
+### Changed
+- Language version is 0.35.1, on top of 0.35.0. The 0.35.0 `--flat --elf` output and the `--checked` local-array trap are unchanged. `-O0`, `--freestanding`, `--flat`, `--boot`, and `bits 16` / `bits 32` do not do this rewrite.
+
+### Measured
+- `examples/lowlat/RESULTS.md` is the 2026-10-26T04:05:14Z — 2026-10-26T04:05:17Z window. The binary prints 0.35.1. One warmup and seven runs, `taskset -c 0`. The checksums are 2052000, 2160927, and 2853449. Milliseconds, median (min–max).
+- Pool 13.0 (12.6–13.2). The previous examples window, 2026-10-26T02:32:11Z — 02:32:14Z, binary 0.33.1, was 14.2 (13.6–15.1). The new maximum is below the old minimum. Copihue is still above C 8.8 (8.5–9.1) and Rust 9.1 (8.7–9.5). The ratio to C is 1.48. It was 1.61. The release loop is now one `imul` before the loop and `add r14, 24` on the back edge. `alloc` and `release` are still calls. gcc `-O2` still inlines both and walks with `addq $24`.
+- Book 49.4 (49.1–49.9) against 49.5 (49.1–51.6). The ranges overlap. The book binary is the same as 0.35.0. Copihue is still above C 38.6 (38.3–38.9) and Rust 33.4 (32.9–33.5). The ratio to C is 1.28. The ratio to Rust is 1.48.
+- Match 47.1 (46.9–47.5) against 47.1 (47.0–47.3). The ranges overlap. The match binary is the same as 0.35.0. Copihue is still above C 33.0 (32.8–33.3) and Rust 33.2 (32.8–33.5). The ratio to C is 1.43. The ratio to Rust is 1.42.
+- `bench/lowlat` and `bench/slice` were not run again.
+
+### Not shipped
+- The same pointer walk for a power-of-two element. On this machine, before the call gate, a millisecond pass moved the pool from 14 to 13 and the book from 49 to 57 (57–58). The level scans (`find_level`, `best_bid`, `best_ask`) gained an `add` of 16 on the back edge. They stay `shl`.
+- The same walk in a loop with no call. With power-of-two sizes excluded, that pass left the pool at 13 and moved the book from 49–50 to 62–64 and the match from 47 to 48. `book_init` got about 30 bytes shorter and `insert` / `cancel` moved earlier by those 30 bytes. Their instructions were the ones from 0.34.0. Putting the 30 bytes back as `nop`s, so those functions stayed at the same addresses, restored 49–50. The walk stays off unless the loop contains a call, which is where the address is recomputed on both sides of the call.
+- `i * 12` and `i * 24` as `lea reg, [reg+reg*2]` plus a SIB scale, instead of `imul`. Against the call-gated compiler, the book went from 49.759 (49.435–50.113) to 55.799 (55.776–56.373) and the match from 47.290 (46.960–47.528) to 48.023 (47.703–48.181). The pool ranges overlapped. The index stays `imul`.
+- Hoisting a loop-invariant load out of a `while` condition (`i < nbid`, `i < g.n`, `i < p->n`), including a struct field through a pointer that is not written. A call, a store that might alias, a volatile, or an address-taken name keeps the load. Against the call-gated compiler the book was 49.176 (48.626–49.418) against 49.581 (49.401–50.240) and the match was 47.020 (46.695–47.288) against 47.229 (47.108–47.613). Both overlap. The pool binary did not change. `insert` and `cancel` do not reload a field through a pointer that stays put: `orders[cur].next` changes `cur`, and `bids[i].price` changes `i`.
+- The comparisons in `insert`, `cancel`, `best_bid`, and `main` already branch on flags. They do not materialize 0/1. `insert` spills `id` and `qty` because `r12`–`r15` hold `side`, the level, the order, and the price across `find_level` and `take`. `cancel`'s fast path computes `cur * 12` twice (`id`, then `next`). gcc `-O2` and rustc `-O` inline the book into `main`, keep the generator and the free list in registers, walk levels by adding 16, and address a 12-byte order with `lea` of `*3` and a scale of 4. `% 10` in the driver is a multiply there and `idiv` here. None of that was a separate win once the inliner (0.33.1) and the `*12` `lea` above had been measured.
+
 ## [0.35.0] - 2026-10-26
 
 ### Added
