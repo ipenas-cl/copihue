@@ -2,6 +2,26 @@
 
 Todos los cambios importantes del proyecto.
 
+## [0.42.2] - 2026-10-26
+
+### Changed
+- Language version is 0.42.2, on top of 0.42.1. At `-O2`, including `--freestanding` and `--flat`, a return `expr + f(args)` whose last call is that same function becomes an accumulator and a jump back to the start. `f(args) + expr` is the same when `expr` has no effect and does not read a global or a pointer the call could change. The non-call operand runs first, then the arguments, then the jump, so a side effect on the right stays after the call. The accumulator starts at zero. Every other return in that function is `acc + value`, which is the old value on the first entry. When the body is only `if (cond) { return v; }` and that tail return, the step falls through and the back edge is one taken branch. A base `if (param <op> leaf) { return param; }` still compares the incoming register before the frame. `*` is not rewritten. A return narrower than 64 bits is not rewritten. `-O0`, `bits 16` / `bits 32`, `naked`, `interrupt`, `syscall`, and a body that contains `asm()` are not rewritten. The symbol stays the System V call (`rdi`/`rsi`/… in, `rax` out). `tests/lang/o2_tail.lap` prints the same lines at `-O0` and `-O2`. 0.42.0 `Result` and `?` are unchanged. The 0.40.1 cold-arm `while` and the 0.39.1 `align 32` loop stay.
+
+### Not shipped
+- `*`. `fact` and `factb` in the same test still `call` and `imul`. Wrapping multiply is associative too, and the output would match, so the assembly is the check.
+- A side effect on the right of the call. `up` prints 1, then 2, then 3. `see` reads `g` after the call writes it and prints 9, then `g` is 3. Both stay calls.
+- `i32`. `narrow` stays a call.
+- Calling `fib(n - 2)` before `fib(n - 1)`. That was the 0.42.1 measurement (373.95 against 393.21). A call can have effects. It is not emitted.
+- The twelve-instruction form that reuses one callee-saved register across both calls. The 0.42.1 ranges overlapped. It is not emitted.
+- rustc's `cmp $3` / `ja` and the leftover add of `n - 2`. That exit is true for `fib` because the base returns `n` and the tail argument is `n - 2`, so when `n` is 2 or 3 the leftover is the base value. It is not the general rule. Hand-patched onto the 0.42.2 prologue, same addresses, in the 2026-10-26T11:51:00Z window: 230.83 (230.42–232.47) against the general loop 231.07 (230.60–233.02). The ranges overlap. Comparing the staged register before the move into the home was 231.51 (230.51–232.93) in that same window. Neither is the gap to rustc.
+- `align 32` on the tail-loop head. The same bytes with the head at `0x401100` had median about 199 ms, and a head at `0x401110` (16-byte aligned, not 32) was 337.90 (331.05–344.76) in the 2026-10-26T11:52:02Z window. Two later windows of the `0x401100` head, alternating with 0.42.1, gcc, and rustc, were 198.71 (197.49–267.65) and 198.70 (196.51–268.25). The slow runs sit above the unaligned minimum below. Not emitted. The 0.39.1 `align 32` on the other loop stays.
+- gcc `-O2`'s even/odd split (`sub rsp, 200`, one recursive `call`). That is the C `fib`, not a rule for `expr + self(args)`. It is not emitted.
+
+### Measured
+- `bench/src/fib.lap`, `fib(40)`, checksum 102334155 on every binary. `taskset -c 0`, one warmup and seven runs, alternating inside each round. Milliseconds, median (min–max). Window 2026-10-26T11:54:44Z — 2026-10-26T11:54:52Z. 0.42.1 is 392.22 (392.07–396.86), `.text` 385, `main` at `0x401123`. 0.42.2 is 230.71 (230.45–233.13), `.text` 383, `fib` still at `0x4010df`, `main` at `0x401121`. The new maximum is under the old minimum. gcc `-O2` is 130.07 (129.66–132.16). rustc `-O` is 192.92 (192.68–194.50). 0.42.2's minimum is above rustc's maximum.
+- The hot path is `lea rdi, [r12-1]`, `call fib`, `add r13, rax`, `lea rdi, [r12-2]`, `mov r12, rdi`, `cmp r12, 2`, `jge`. Seven instructions, one taken branch. `n < 2` on entry is still `cmp` / `jl` / `mov rax, rdi` / `ret` before the pushes.
+- `examples/lowlat/bench/book.lap` and `bench/src/parse.lap`, hosted `-O2`, `.text` via `objcopy -O binary -j .text` matches 0.42.1 (`cmp`). Neither source has this return shape, so the pass does not move them. They were not retimed.
+
 ## [0.42.1] - 2026-10-26
 
 ### Changed

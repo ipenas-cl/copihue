@@ -16,7 +16,7 @@
 
 // ==== NAMING (single place to change when the language is renamed) ====
 #define LANG_NAME     "Copihue"
-#define LANG_VERSION  "0.42.1"
+#define LANG_VERSION  "0.42.2"
 #define COMPILER_BIN  "copihue"
 #define SRC_EXT       ".lap"   /* Lapageria rosea, the copihue */
 #define OLD_SRC_EXT   ".cph"   /* v0.18.x extension, still accepted with a warning */
@@ -328,6 +328,7 @@ typedef struct AstNode {
 #define AF_DIAG      32768 // this node already reported a generic error
 #define AF_METHOD    65536 // x.f() parsed as f(x); resolve it to an impl, or error
 #define AF_TRY      131072 // match lowered from `?`; value is the return enum name
+#define AF_TAIL_ACC 262144 // return is `expr + self(...)` turned into acc + jmp
 
 // Symbol table
 typedef struct {
@@ -459,6 +460,18 @@ static int g_fn_bits = 0;   // 0 or 64: rax. 16 or 32: eax (legacy mode)
 static int g_cmp_unsigned = 0;
 static char g_fn_name[256];
 static AstNode* g_cur_fn = NULL;   // Function whose body is being generated
+// -O2 tail accumulator. Wrapping integer `+` is associative, so
+// `return expr + self(args)` (and `return self(args) + expr` when expr
+// cannot observe the call) reuses one frame: acc starts at 0, the non-call
+// side is added, args are stored into the parameters, and a jump goes to
+// the first body statement. The entry ABI is unchanged. -O0 does not set
+// this. The name is not a source identifier (`$`).
+static int g_tail_acc = 0;
+static int g_tail_bits = 64;
+static int g_tail_sg = 1;
+static const char g_tail_acc_name[] = "__tail_acc$";
+static int g_tail_param_idx[16];
+static int g_tail_nparam = 0;
 // A naked local is a labeled slot in the image. A stack frame at the first
 // instruction would use the BIOS stack, and `ss = 0` would then point bp at
 // the wrong segment. Arrays and structs stay rejected.
@@ -6317,9 +6330,32 @@ static int node_has_call(AstNode* n) {
     return 0;
 }
 
+// AF_TAIL_ACC: offset 0 means the right child is the self call (`expr + self`).
+// offset 1 means the left child is the self call (`self + expr`).
+static AstNode* tail_acc_binop(AstNode* ret) {
+    if (!ret || ret->type != AST_RETURN || ret->child_count != 1) return NULL;
+    if (!(ret->flags & AF_TAIL_ACC)) return NULL;
+    return ret->children[0];
+}
+
+static AstNode* tail_acc_expr(AstNode* ret) {
+    AstNode* b = tail_acc_binop(ret);
+    if (!b || b->child_count != 2) return NULL;
+    return b->children[ret->offset == 1 ? 1 : 0];
+}
+
+static AstNode* tail_acc_call(AstNode* ret) {
+    AstNode* b = tail_acc_binop(ret);
+    if (!b || b->child_count != 2) return NULL;
+    return b->children[ret->offset == 1 ? 0 : 1];
+}
+
 // How many callee-saved temps are live at once to hold a value across a call.
 static int expr_tmp_depth(AstNode* n) {
     if (!n) return 0;
+    // The self call is a jump, not a value live across a call.
+    if (n->type == AST_RETURN && (n->flags & AF_TAIL_ACC))
+        return expr_tmp_depth(tail_acc_expr(n));
     if (n->type == AST_BINOP && n->child_count == 2) {
         int ld = expr_tmp_depth(n->children[0]);
         int rd = expr_tmp_depth(n->children[1]);
@@ -14312,6 +14348,19 @@ static void plan_reg_locals(Codegen* cg, AstNode* fn) {
     }
     reg_walk(cg, fn->children[pc]);
     if (g_reg_asm) return;
+    // The accumulator is not a source local. It is live from the entry add
+    // through every call the walk recorded, including the call the jump
+    // replaces, so it takes a callee-saved register when one is free.
+    if (g_tail_acc) {
+        RegCand* c;
+        reg_note_decl(g_tail_acc_name, 0);
+        reg_note_use(g_tail_acc_name);
+        c = reg_cand(g_tail_acc_name);
+        if (c) {
+            c->lo = -1;
+            if (c->hi < g_tick + 1) c->hi = g_tick + 1;
+        }
+    }
     int taken[MAX_REG_CAND];
     memset(taken, 0, sizeof taken);
     int slot = 0;
@@ -14652,6 +14701,20 @@ static int slim_stmt_ok(Codegen* cg, AstNode* n) {
         return 1;
     }
     if (n->type == AST_RETURN) {
+        if (n->flags & AF_TAIL_ACC) {
+            AstNode* e = tail_acc_expr(n);
+            AstNode* c = tail_acc_call(n);
+            int i;
+            // The jump stores arguments with moves. A call inside an
+            // argument would push or need a stack slot, so the frame
+            // stays the ordinary rbp frame.
+            if (!c || expr_pushes(cg, e)) return 0;
+            for (i = 0; i < c->child_count; i++) {
+                if (node_has_call(c->children[i])) return 0;
+                if (expr_pushes(cg, c->children[i])) return 0;
+            }
+            return 1;
+        }
         if (n->child_count == 0) return 1;
         return !expr_pushes(cg, n->children[0]);
     }
@@ -14691,6 +14754,8 @@ static void prepare_frame(Codegen* cg, AstNode* fn) {
     g_slim_pad = 0;
     g_slim_nsave = 0;
     if (!o2_hosted() || !fn || g_reg_asm || fn->child_count < 1) return;
+    // A stack accumulator needs rbp. Slim has no slot for it.
+    if (g_tail_acc && !regplan_has(g_tail_acc_name)) return;
     // The hidden return pointer is saved at [rbp-N]. A slim frame has no rbp.
     if (!(fn->is_pointer & 1) && fn->value && enum_lookup(fn->value)) return;
     int pc = fn->child_count - 1;
@@ -16865,6 +16930,177 @@ static void branch_succeed(Codegen* cg, AstNode* n, int ok_lab) {
     }
 }
 
+static Symbol* tail_param_sym(Codegen* cg, int i) {
+    if (!cg || !cg->symtab || i < 0 || i >= g_tail_nparam) return NULL;
+    if (i >= 16 || g_tail_param_idx[i] < 0 || g_tail_param_idx[i] >= cg->symtab->count)
+        return NULL;
+    return &cg->symtab->symbols[g_tail_param_idx[i]];
+}
+
+static int tail_reg_taken(Codegen* cg, const char* reg) {
+    Symbol* a;
+    int i;
+    if (!reg) return 1;
+    a = symtab_lookup_symbol(cg->symtab, (char*)g_tail_acc_name);
+    if (a && local_reg(a) && !strcmp(local_reg(a), reg)) return 1;
+    for (i = 0; i < g_tail_nparam; i++) {
+        Symbol* p = tail_param_sym(cg, i);
+        const char* r = p ? local_reg(p) : NULL;
+        if (r && !strcmp(r, reg)) return 1;
+    }
+    return 0;
+}
+
+// Move src into the parameter's home. A narrow integer truncates the way
+// the original call would have truncated the incoming register.
+static void emit_move_to_sym(Codegen* cg, Symbol* dst, const char* src) {
+    const char* rr;
+    int bits = 64, sg = 1;
+    if (!dst || !src) return;
+    if (dst->type_name && !dst->is_pointer && int_name(dst->type_name, &bits, &sg) && bits < 64) {
+        if (strcmp(src, "rax")) emit(cg, "    mov rax, %s\n", src);
+        emit_width_trunc(cg, bits, sg);
+        src = "rax";
+    }
+    rr = local_reg(dst);
+    if (rr) {
+        if (strcmp(rr, src)) emit(cg, "    mov %s, %s\n", rr, src);
+    } else if (dst->mem && legacy_bits()) {
+        emit(cg, "    mov [%s], eax\n", dst->mem);
+    } else if (dst->mem) {
+        emit(cg, "    mov [%s], %s\n", dst->mem, src);
+    } else {
+        emit(cg, "    mov [rbp%d], %s\n", dst->offset, src);
+    }
+}
+
+// Stage every argument before any parameter is overwritten. `f(b, a)` still
+// reads the old homes. Caller-saved scratches are not parameter homes.
+static void emit_tail_args(Codegen* cg, AstNode* call) {
+    static const char* pool[] = {"rdi", "rsi", "rdx", "rcx", "r8", "r9", "r10", "r11"};
+    const char* dest[16];
+    int offs[16];
+    int i, n, nd = 0, ok = 1;
+    if (!call) return;
+    n = call->child_count;
+    if (n < 0 || n > 16 || n != g_tail_nparam) return;
+    for (i = 0; i < 8 && nd < n; i++) {
+        if (!tail_reg_taken(cg, pool[i])) dest[nd++] = pool[i];
+    }
+    if (nd >= n) {
+        for (i = 0; i < n; i++) {
+            if (!can_place(cg, call->children[i], dest[i])) ok = 0;
+        }
+        if (ok) {
+            for (i = 0; i < n; i++) place_in(cg, call->children[i], dest[i]);
+            for (i = 0; i < n; i++) emit_move_to_sym(cg, tail_param_sym(cg, i), dest[i]);
+            return;
+        }
+    }
+    if (!g_slim) {
+        for (i = 0; i < n; i++) {
+            gen_expr(cg, call->children[i]);
+            offs[i] = symtab_add(cg->symtab, (char*)"__targ$", 1);
+            emit(cg, "    mov [rbp%d], rax\n", offs[i]);
+        }
+        for (i = 0; i < n; i++) {
+            emit(cg, "    mov rax, [rbp%d]\n", offs[i]);
+            emit_move_to_sym(cg, tail_param_sym(cg, i), "rax");
+        }
+        return;
+    }
+    // Slim, and an argument is not a direct place. No call sits inside
+    // those arguments, so the pushes are popped before the next call.
+    for (i = 0; i < n; i++) {
+        gen_expr(cg, call->children[i]);
+        emit(cg, "    push rax\n");
+    }
+    for (i = n - 1; i >= 0; i--) {
+        emit(cg, "    pop rax\n");
+        emit_move_to_sym(cg, tail_param_sym(cg, i), "rax");
+    }
+}
+
+static void emit_acc_add_rax(Codegen* cg) {
+    Symbol* s = cg->symtab ? symtab_lookup_symbol(cg->symtab, (char*)g_tail_acc_name) : NULL;
+    const char* rr = s ? local_reg(s) : NULL;
+    if (!s) return;
+    if (rr) {
+        emit(cg, "    add %s, rax\n", rr);
+        if (g_tail_bits < 64) emit_reg_trunc(cg, rr, g_tail_bits, g_tail_sg);
+    } else {
+        emit(cg, "    add qword [rbp%d], rax\n", s->offset);
+        if (g_tail_bits < 64) {
+            emit(cg, "    mov rax, [rbp%d]\n", s->offset);
+            emit_width_trunc(cg, g_tail_bits, g_tail_sg);
+            emit(cg, "    mov [rbp%d], rax\n", s->offset);
+        }
+    }
+}
+
+// expr, then acc += rax, then the arguments into the parameter homes.
+// do_jmp jumps to the body. A rotated loop tests the base condition instead.
+static void emit_tail_step(Codegen* cg, AstNode* n, int do_jmp) {
+    AstNode* expr = tail_acc_expr(n);
+    AstNode* call = tail_acc_call(n);
+    if (g_cur_fn && !(g_cur_fn->struct_type && !strcmp(g_cur_fn->struct_type, "__array__"))) {
+        VTy dst_ty = ty_decl(cg, 1, g_cur_fn->is_pointer, g_cur_fn->value);
+        check_types(n->children[0], "return value", dst_ty, expr_ty(cg, n->children[0]));
+    }
+    if (expr) gen_expr(cg, expr);
+    else emit(cg, "    xor rax, rax\n");
+    emit_acc_add_rax(cg);
+    emit_tail_args(cg, call);
+    if (do_jmp) emit(cg, "    jmp .Ltail_%s\n", g_fn_name);
+}
+
+// `if (cond) { return v; }` with no else. Outlined so the tail body
+// falls through and the base return sits after the epilogue.
+static int tail_base_return(AstNode* thenb) {
+    AstNode* ret;
+    if (!thenb) return 0;
+    if (thenb->type == AST_RETURN) ret = thenb;
+    else if (thenb->type == AST_BLOCK && thenb->child_count == 1)
+        ret = thenb->children[0];
+    else return 0;
+    if (!ret || ret->type != AST_RETURN) return 0;
+    if (ret->flags & AF_TAIL_ACC) return 0;
+    return 1;
+}
+
+// `if (cond) { return v; } return expr + self(args)` and nothing else.
+// The step falls through and the back edge is the taken branch. A let or
+// any other statement before the if stays top-tested: it must run again
+// with the updated parameters, and the base return is not the next instruction.
+static int tail_rotate_body(AstNode* fn) {
+    AstNode* body;
+    AstNode* iff;
+    AstNode* ret;
+    int pc;
+    if (!g_tail_acc || !fn) return 0;
+    pc = fn->child_count - 1;
+    if (pc < 1) return 0;
+    body = fn->children[pc];
+    if (!body || body->type != AST_BLOCK || body->child_count != 2) return 0;
+    iff = body->children[0];
+    ret = body->children[1];
+    if (!iff || iff->type != AST_IF || (iff->flags & AF_CARRY) || iff->child_count != 2)
+        return 0;
+    if (!tail_base_return(iff->children[1])) return 0;
+    if (!ret || ret->type != AST_RETURN || !(ret->flags & AF_TAIL_ACC) || ret->child_count != 1)
+        return 0;
+    return 1;
+}
+
+static void emit_acc_plus_rax(Codegen* cg) {
+    Symbol* s = cg->symtab ? symtab_lookup_symbol(cg->symtab, (char*)g_tail_acc_name) : NULL;
+    const char* rr = s ? local_reg(s) : NULL;
+    if (!s) return;
+    if (rr) emit(cg, "    add rax, %s\n", rr);
+    else emit(cg, "    add rax, [rbp%d]\n", s->offset);
+    if (g_tail_bits < 64) emit_width_trunc(cg, g_tail_bits, g_tail_sg);
+}
+
 void gen_stmt(Codegen* cg, AstNode* n) {
     if (!n) return;  // Null safety
     int keep = g_fwd_hold;
@@ -16919,6 +17155,13 @@ void gen_stmt(Codegen* cg, AstNode* n) {
     }
     if (n->type == AST_RETURN) {
         int keep_rax = 0;
+        // The self call does not return here. expr runs first (the same
+        // order as `expr + call`), then the arguments, then the jump.
+        // `call + expr` already swapped the side into expr when expr is pure.
+        if (g_tail_acc && (n->flags & AF_TAIL_ACC) && n->child_count == 1) {
+            emit_tail_step(cg, n, 1);
+            return;
+        }
         if (n->child_count > 0 && n->children[0] && n->children[0]->type == AST_IDENT &&
             n->children[0]->name && cg->symtab) {
             Symbol* rs = symtab_lookup_symbol(cg->symtab, n->children[0]->name);
@@ -16973,6 +17216,10 @@ void gen_stmt(Codegen* cg, AstNode* n) {
         emit_drops(cg, 0, cg->symtab ? cg->symtab->count : 0);
         if (keep_rax) emit(cg, "    pop rax\n");
         else if (n->child_count == 0) emit(cg, "    xor rax, rax\n");
+        // Eliminated frames added their expr into acc. A value return is
+        // acc + value. Acc is 0 on the first entry, so this is the old value.
+        if (g_tail_acc && !(g_fn_flags & (AF_INTERRUPT | AF_SYSCALL | AF_NAKED)))
+            emit_acc_plus_rax(cg);
         if (g_fn_flags & (AF_INTERRUPT | AF_SYSCALL))
             emit(cg, "    jmp .Lret_%s\n", g_fn_name);
         else if (g_fn_flags & AF_NAKED)
@@ -17219,6 +17466,35 @@ void gen_stmt(Codegen* cg, AstNode* n) {
     } else if (n->type == AST_IF) {
         int else_lab = new_label(cg);
         int end_lab = new_label(cg);
+        // The base return is taken once per chain. The tail body is the
+        // loop. Jump to the return and fall through, instead of taking a
+        // branch around the return on every iteration.
+        if (g_tail_acc && !(n->flags & AF_CARRY) && n->child_count == 2 &&
+            tail_base_return(n->children[1])) {
+            int lab = new_label(cg);
+            char* saved_buf;
+            int saved_len, saved_cap;
+            g_fwd_ok = 0;
+            g_nonneg_reg = NULL;
+            g_fwd_hold = 1;
+            if (o2_hosted() && can_branch_cond(cg, n->children[0]))
+                emit_cond_succeed(cg, n->children[0], lab);
+            else
+                branch_succeed(cg, n->children[0], lab);
+            saved_buf = cg->code_buf;
+            saved_len = cg->code_len;
+            saved_cap = cg->code_cap;
+            cg->code_buf = NULL;
+            cg->code_len = 0;
+            cg->code_cap = 0;
+            gen_stmt(cg, n->children[1]);
+            cold_emit(".L%d:\n%s", lab, cg->code_buf ? cg->code_buf : "");
+            free(cg->code_buf);
+            cg->code_buf = saved_buf;
+            cg->code_len = saved_len;
+            cg->code_cap = saved_cap;
+            return;
+        }
         if (n->flags & AF_CARRY) {
             emit(cg, "    jnc .L%d\n", else_lab);
             gen_stmt(cg, n->children[0]);
@@ -18280,7 +18556,189 @@ static void lower_tries(AstNode* fn) {
     lower_block(body);
 }
 
+static int tail_param_ok(Codegen* cg, AstNode* p) {
+    if (!p || !p->name) return 0;
+    if (p->flags & (AF_VOLATILE | AF_OWN)) return 0;
+    if (p->struct_type && !strcmp(p->struct_type, "__slice__")) return 0;
+    if (!p->is_pointer && p->value && cg->types && typetab_lookup(cg->types, p->value)) return 0;
+    if (!p->is_pointer && p->value && enum_lookup(p->value)) return 0;
+    return 1;
+}
+
+static int tail_fn_int(AstNode* fn, int* bits, int* sg) {
+    if (!fn || (fn->is_pointer & 1)) return 0;
+    if (enum_ret_allowed(fn)) return 0;
+    if (fn->struct_type && !strcmp(fn->struct_type, "__array__")) return 0;
+    if (!fn->value) { *bits = 64; *sg = 1; return 1; }
+    return int_name(fn->value, bits, sg);
+}
+
+static int is_direct_self(Codegen* cg, AstNode* fn, AstNode* n) {
+    AstNode* hit;
+    if (!n || n->type != AST_CALL || !n->name) return 0;
+    if (!strcmp(n->name, "asm")) return 0;
+    hit = find_func(cg, n->name);
+    if (hit != fn) return 0;
+    return n->child_count == fn->child_count - 1;
+}
+
+static int is_tail_param_name(AstNode* fn, const char* name) {
+    int pc, i;
+    if (!fn || !name) return 0;
+    pc = fn->child_count - 1;
+    for (i = 0; i < pc; i++) {
+        AstNode* p = fn->children[i];
+        if (p && p->name && !strcmp(p->name, name))
+            return (p->flags & AF_VOLATILE) ? 0 : 1;
+    }
+    return 0;
+}
+
+static int is_tail_let_name(AstNode* n, const char* name) {
+    int i;
+    if (!n || !name) return 0;
+    if (n->type == AST_FUNCTION) {
+        if (n->child_count < 1) return 0;
+        return is_tail_let_name(n->children[n->child_count - 1], name);
+    }
+    if (n->type == AST_LET && n->name && !strcmp(n->name, name))
+        return (n->flags & AF_VOLATILE) ? 0 : 1;
+    for (i = 0; i < n->child_count; i++)
+        if (is_tail_let_name(n->children[i], name)) return 1;
+    return 0;
+}
+
+static int mentions_addr_of(AstNode* n, const char* name) {
+    int i;
+    AstNode* a;
+    if (!n || !name) return 0;
+    if (n->type == AST_ADDR_OF && n->child_count > 0) {
+        a = n->children[0];
+        if (a && a->type == AST_IDENT && a->name && !strcmp(a->name, name)) return 1;
+    }
+    for (i = 0; i < n->child_count; i++)
+        if (mentions_addr_of(n->children[i], name)) return 1;
+    return 0;
+}
+
+static int call_takes_addr(AstNode* call, const char* name) {
+    int i;
+    if (!call || !name) return 0;
+    for (i = 0; i < call->child_count; i++)
+        if (mentions_addr_of(call->children[i], name)) return 1;
+    return 0;
+}
+
+// Pure enough to evaluate before the self call. No call, store, deref, or
+// global: the recursive call can write a global or anything reached by a
+// pointer argument. A parameter or a local is the same value before the
+// call unless an argument is that name's address.
+static int expr_pure_acc(AstNode* fn, AstNode* n, AstNode* call) {
+    int i;
+    if (!n) return 1;
+    if (n->flags & AF_VOLATILE) return 0;
+    if (n->type == AST_NUMBER) return 1;
+    if (n->type == AST_IDENT) {
+        if (!n->name || n->qual) return 0;
+        if (call_takes_addr(call, n->name)) return 0;
+        return is_tail_param_name(fn, n->name) || is_tail_let_name(fn, n->name);
+    }
+    if (n->type == AST_UNARY && n->op && n->child_count == 1 &&
+        (n->op[0] == '-' || n->op[0] == '!' || n->op[0] == '~') && !n->op[1])
+        return expr_pure_acc(fn, n->children[0], call);
+    if (n->type == AST_CAST || n->type == AST_BINOP || n->type == AST_COMPARE) {
+        for (i = 0; i < n->child_count; i++)
+            if (!expr_pure_acc(fn, n->children[i], call)) return 0;
+        return 1;
+    }
+    return 0;
+}
+
+// 0: right child is the self call. 1: left child is, and the right is pure.
+// -1: not this pattern. `*` is not `+`.
+static int tail_form_side(Codegen* cg, AstNode* fn, AstNode* n) {
+    if (!n || n->type != AST_BINOP || !n->op || strcmp(n->op, "+") || n->child_count != 2)
+        return -1;
+    if (is_direct_self(cg, fn, n->children[1])) return 0;
+    if (is_direct_self(cg, fn, n->children[0]) &&
+        expr_pure_acc(fn, n->children[1], n->children[0]))
+        return 1;
+    return -1;
+}
+
+static int body_has_asm(AstNode* n) {
+    int i;
+    if (!n || n->type == AST_FUNCTION) return 0;
+    if (n->type == AST_CALL && n->name && !strcmp(n->name, "asm")) return 1;
+    for (i = 0; i < n->child_count; i++)
+        if (body_has_asm(n->children[i])) return 1;
+    return 0;
+}
+
+static void clear_tail_flags(AstNode* n) {
+    int i;
+    if (!n || n->type == AST_FUNCTION) return;
+    if (n->type == AST_RETURN) n->flags &= ~AF_TAIL_ACC;
+    for (i = 0; i < n->child_count; i++)
+        clear_tail_flags(n->children[i]);
+}
+
+static void mark_tail_returns(Codegen* cg, AstNode* fn, AstNode* n, int* ntail) {
+    int i, side;
+    if (!n || n->type == AST_FUNCTION) return;
+    if (n->type == AST_RETURN && (n->flags & AF_TAIL_ACC)) {
+        (*ntail)++;
+    } else if (n->type == AST_RETURN && n->child_count == 1) {
+        side = tail_form_side(cg, fn, n->children[0]);
+        if (side >= 0) {
+            n->flags |= AF_TAIL_ACC;
+            n->offset = side;
+            (*ntail)++;
+        }
+    }
+    for (i = 0; i < n->child_count; i++)
+        mark_tail_returns(cg, fn, n->children[i], ntail);
+}
+
+// Hosted, freestanding, and flat. Not -O0, not bits 16/32, not naked.
+// The exported entry still receives rdi..r9 and returns rax.
+static void mark_tail_acc(Codegen* cg, AstNode* fn) {
+    int bits = 64, sg = 1, pc, i, ntail = 0;
+    AstNode* body;
+    g_tail_acc = 0;
+    g_tail_bits = 64;
+    g_tail_sg = 1;
+    g_tail_nparam = 0;
+    for (i = 0; i < 16; i++) g_tail_param_idx[i] = -1;
+    if (optimization_level < 2 || legacy_bits()) return;
+    if (!fn || fn->is_forward_decl) return;
+    if (fn->flags & (AF_NAKED | AF_INTERRUPT | AF_SYSCALL | AF_OWN)) return;
+    if (fn->bits == 16 || fn->bits == 32) return;
+    if (!tail_fn_int(fn, &bits, &sg)) return;
+    // A narrower `+` truncates each sum. The accumulator below adds in
+    // rax's width, which matches i64 and u64 and not i32. Leave those calls.
+    if (bits < 64) return;
+    pc = fn->child_count - 1;
+    if (pc < 0) return;
+    body = fn->children[pc];
+    if (!body || body->type != AST_BLOCK) return;
+    for (i = 0; i < pc; i++)
+        if (!tail_param_ok(cg, fn->children[i])) return;
+    if (body_has_asm(body)) return;
+    mark_tail_returns(cg, fn, body, &ntail);
+    if (ntail < 1) {
+        clear_tail_flags(body);
+        return;
+    }
+    g_tail_acc = 1;
+    g_tail_bits = bits;
+    g_tail_sg = sg;
+    g_tail_nparam = pc;
+}
+
 void gen_func(Codegen* cg, AstNode* n) {
+    g_tail_acc = 0;
+    g_tail_nparam = 0;
     g_eret_off = 0;
     g_enum_dst_kind = 0;
     g_reg_local_n = 0;
@@ -18343,6 +18801,7 @@ void gen_func(Codegen* cg, AstNode* n) {
         diag_error(par0->line, par0->col, "an interrupt frame parameter must be a pointer");
     }
     int has_err = is_int && param_count == 1 && par0 && !(par0->is_pointer & 1) && !frame_ptr;
+    int tail_spun = 0;
     // A struct passed by value already diagnosed; do not also copy an error code.
     if (is_int && par0 && !par0->is_pointer && par0->value &&
         cg->types && typetab_lookup(cg->types, par0->value))
@@ -18440,10 +18899,13 @@ void gen_func(Codegen* cg, AstNode* n) {
         emit(cg, "    push rbp\n    mov rbp, rsp\n");
         emit(cg, "    sub rsp, __frame_%s\n", g_fn_name);
     } else {
-        if (optimization_level >= 2 && !g_freestanding) {
+        if (optimization_level >= 2 && !g_freestanding)
             stride_function(cg, n);
+        // After stride, so the walk sees the body that will be emitted.
+        // Freestanding and flat take the same jump; they keep the rbp frame.
+        mark_tail_acc(cg, n);
+        if (optimization_level >= 2 && !g_freestanding)
             plan_reg_locals(cg, n);
-        }
         prepare_frame(cg, n);
         EarlyRet early = match_early_ret(cg, n);
         if (early.ok) {
@@ -18559,38 +19021,99 @@ void gen_func(Codegen* cg, AstNode* n) {
         }
         {
             int nreg = param_count < nreg_max ? param_count : nreg_max;
-            for (int i = 0; i < nreg; i++)
+            for (int i = 0; i < nreg; i++) {
+                int before = cg->symtab->count;
                 bind_param(cg, n->children[i], g_eret_off ? sret_regs[i] : regs[i], 0, 0);
-            for (int i = nreg_max; i < param_count && i < 16; i++)
+                if (g_tail_acc && i < 16 && cg->symtab->count > before)
+                    g_tail_param_idx[i] = cg->symtab->count - 1;
+            }
+            for (int i = nreg_max; i < param_count && i < 16; i++) {
+                int before = cg->symtab->count;
                 bind_param(cg, n->children[i], NULL, 16 + (i - nreg_max) * 8, 1);
+                if (g_tail_acc && cg->symtab->count > before)
+                    g_tail_param_idx[i] = cg->symtab->count - 1;
+            }
         }
+    }
+
+    if (g_tail_acc && cg->symtab) {
+        // Once, after the parameters are in their homes. The jump lands
+        // below this, so a later iteration does not clear acc and does not
+        // copy rdi again. The entry compare above still returns before the
+        // pushes when acc would be zero.
+        int aoff = symtab_add(cg->symtab, (char*)g_tail_acc_name, 1);
+        Symbol* as = &cg->symtab->symbols[cg->symtab->count - 1];
+        const char* ar;
+        as->type_name = strdup("i64");
+        ar = local_reg(as);
+        if (ar) emit(cg, "    xor %s, %s\n", ar, ar);
+        else emit(cg, "    mov qword [rbp%d], 0\n", aoff);
+        // A rotated body places .Ltail after the one-time entry test.
+        if (!tail_rotate_body(n))
+            emit(cg, ".Ltail_%s:\n", g_fn_name);
     }
 
     AstNode* body = n->children[param_count];
     EarlyRet early_body = match_early_ret(cg, n);
     int body_from = early_body.ok ? 1 : 0;
+    // Keep the base if in the body. The entry jl returns the raw parameter;
+    // a jump back with a nonzero acc must return acc + that parameter.
+    if (g_tail_acc) body_from = 0;
     if (early_body.ok && g_cur_fn &&
         !(g_cur_fn->struct_type && !strcmp(g_cur_fn->struct_type, "__array__"))) {
         AstNode* ret = body->children[0]->children[1]->children[0];
         VTy dst_ty = ty_decl(cg, 1, g_cur_fn->is_pointer, g_cur_fn->value);
         check_types(ret->children[0], "return value", dst_ty, expr_ty(cg, ret->children[0]));
     }
-    for (int i = body_from; i < body->child_count; i++) {
-        int sunk;
-        g_prev2_stmt = i > 1 ? body->children[i - 2] : NULL;
-        g_prev_stmt = i > 0 ? body->children[i - 1] : NULL;
-        sunk = try_sink_masks(cg, body, i);
-        if (sunk >= 2) {
-            i += sunk - 1;
-            continue;
+    if (g_tail_acc && tail_rotate_body(n)) {
+        // Bottom test. The hot edge is one taken branch back to the step.
+        // When the entry compare already proved cond false, do not test
+        // again before the first step. Otherwise jump to the base return
+        // once, before the loop, when cond is already true (acc is still 0).
+        AstNode* iff = body->children[0];
+        AstNode* retn = body->children[1];
+        int exit_lab = new_label(cg);
+        int loop_lab = new_label(cg);
+        tail_spun = 1;
+        if (!early_body.ok) {
+            g_fwd_ok = 0;
+            g_nonneg_reg = NULL;
+            g_fwd_hold = 1;
+            if (o2_hosted() && can_branch_cond(cg, iff->children[0]))
+                emit_cond_succeed(cg, iff->children[0], exit_lab);
+            else
+                branch_succeed(cg, iff->children[0], exit_lab);
         }
-        sunk = try_insert_shift(cg, body, i);
-        if (sunk >= 2) {
-            i += sunk - 1;
-            continue;
+        emit(cg, ".Ltail_%s:\n", g_fn_name);
+        emit(cg, ".L%d:\n", loop_lab);
+        emit_tail_step(cg, retn, 0);
+        g_fwd_ok = 0;
+        g_nonneg_reg = NULL;
+        g_fwd_hold = 1;
+        if (o2_hosted() && can_branch_cond(cg, iff->children[0]))
+            emit_cond_fail(cg, iff->children[0], loop_lab);
+        else
+            branch_fail(cg, iff->children[0], loop_lab);
+        emit(cg, ".L%d:\n", exit_lab);
+        gen_stmt(cg, iff->children[1]);
+    } else {
+        for (int i = body_from; i < body->child_count; i++) {
+            int sunk;
+            g_prev2_stmt = i > 1 ? body->children[i - 2] : NULL;
+            g_prev_stmt = i > 0 ? body->children[i - 1] : NULL;
+            sunk = try_sink_masks(cg, body, i);
+            if (sunk >= 2) {
+                i += sunk - 1;
+                continue;
+            }
+            sunk = try_insert_shift(cg, body, i);
+            if (sunk >= 2) {
+                i += sunk - 1;
+                continue;
+            }
+            if (!try_hosted_rewrite(cg, body->children[i]))
+                gen_stmt(cg, body->children[i]);
         }
-        if (!try_hosted_rewrite(cg, body->children[i]))
-            gen_stmt(cg, body->children[i]);
     }
     g_prev_stmt = NULL;
     g_prev2_stmt = NULL;
@@ -18639,6 +19162,14 @@ void gen_func(Codegen* cg, AstNode* n) {
         if (cg->symtab->stack_size != g_naked_slot_bytes)
             diag_error(n->line, n->col, "a naked function cannot have local variables");
         emit(cg, "    ret\n");
+    } else if (tail_spun) {
+        // The rotated base return already emitted its epilogue. The entry
+        // compare still returns the raw parameter before the frame.
+        EarlyRet early_tail = match_early_ret(cg, n);
+        if (early_tail.ok) {
+            emit(cg, ".Lbase_%s:\n", g_fn_name);
+            emit(cg, "    mov rax, %s\n    ret\n", early_tail.ret_reg);
+        }
     } else {
         emit(cg, "    xor rax, rax\n");
         emit_hosted_epilogue(cg);
@@ -18649,6 +19180,8 @@ void gen_func(Codegen* cg, AstNode* n) {
         }
     }
     cold_flush(cg);
+    g_tail_acc = 0;
+    g_tail_nparam = 0;
     g_reg_local_n = 0;
     g_reg_callee_n = 0;
     g_slim = 0;
