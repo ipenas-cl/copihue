@@ -2,6 +2,23 @@
 
 Todos los cambios importantes del proyecto.
 
+## [0.37.2] - 2026-10-26
+
+### Changed
+- Language version is 0.37.2, on top of 0.37.1. The only edit in `compiler/bootstrap-c/copihue.c` on top of 0.37.1 is that version string. No instruction selection changed.
+
+### Not shipped
+- Hosted `-O2` NASM `align` before every function (`_start`, the four hosted helpers, and each user function) at 16 bytes and, separately, at 32 bytes. The head of each `while`, the `thread_join` spin, and the hosted rewrites that still have a counted back edge (the dot product, the link walk, the byte bump, the byte sum, and the insertion shift) were `align 16` in both builds. `-O0`, `--freestanding`, `--flat`, and `--boot` were not aligned. The padding is `nop`. It is not emitted.
+- Displacement window 2026-10-26T05:44:30Z — 2026-10-26T05:44:45Z, `taskset -c 0`, one warmup and seven runs, rotating the three compilers and six pads (`times N nop` immediately after `section .text`, `N` in 0, 5, 11, 17, 23, 29). Milliseconds, median. Book spread of those six medians: 0.37.1 was 47.0 to 56.2 (9.1). Align 16 was 47.9 to 56.4 (8.5). Align 32 was 48.9 to 60.6 (11.8). Match spread fell: 47.3 to 48.4 (1.1), then 47.7 to 48.2 (0.5), then 47.6 to 47.8 (0.2). Checksums stayed 2160927 and 2853449.
+- Align 32 does not pin the book. `insert` stays 0 mod 32, but two addresses 32 bytes apart are different mod 64. The binary this compiler emitted puts `insert` at `0x401720` (32 mod 64) and the median is 60.6 (60.2–60.9). The other five pads share `insert` at `0x401740` (0 mod 64) and the medians are 48.9 to 49.0. Same alignment class, different cache line slot, about 12 ms. Align 16 still has two slots mod 32, and the emitted one (`insert` at `0x4016c0`) is the slow one, 56.4.
+- Paired window 2026-10-26T05:45:36Z — 2026-10-26T05:46:11Z, one warmup and seven runs, rotating 0.37.1, align 16, and align 32. These are the emitted binaries, not the pads. Milliseconds, median (min–max). `book`, `match`, `pool`, `fib`, `parse`, `sort`, and `list` use `taskset -c 0`. `spsc` uses `0,1`. `spmc`, `mpmc`, and `tpool` use `0,1,2,3`. `lpool` is `bench/lowlat/pool.lap` on cpu 0. Checksums stayed 2160927, 2853449, 2052000, 102334155, 41421435022848, 1070217027633, 274869518336, 500000500000, and 1000000.
+- `book` 49.7 (49.4–50.7), align 16 is 56.6 (56.2–56.9), align 32 is 60.5 (60.2–61.1). Both new minimums are above the old maximum.
+- `parse` 22.8 (22.6–23.1), align 16 is 29.5 (29.3–30.0), align 32 is 27.2 (26.8–27.7). Both new minimums are above the old maximum.
+- `fib` 393.8 (393.3–394.6), align 16 is 346.2 (345.8–348.0), align 32 is 395.6 (395.1–404.0). Align 16 is below the old minimum. Align 32's minimum is above the old maximum. `.text` is 385, 430, and 478 bytes.
+- `match` 47.7 (47.3–49.1), 48.2 (47.8–48.3), 48.0 (47.7–48.4). The ranges overlap. `pool` 13.3 (13.1–13.5), 13.4 (13.1–14.0), 13.7 (13.3–13.9). Overlap. `sort` 53.4 (52.9–54.1), 53.2 (53.0–54.0), 53.3 (53.3–53.8). Overlap. `list` 41.3 (40.8–41.6), 41.1 (40.8–41.3), 41.0 (40.8–41.4). Overlap. `lpool` 21.2 (20.9–21.8), 21.3 (20.9–21.6), 21.2 (20.8–21.9). Overlap.
+- `spsc` 58.4 (34.1–76.1), align 16 is 8.3 (7.0–28.5), align 32 is 24.2 (7.3–78.9). Align 16's maximum is below the old minimum in this window. The run is a two-thread ring and the ranges are wide. `spmc` 298.4 (241.4–361.2), 281.0 (265.9–329.0), 249.9 (229.8–384.6). Overlap. `mpmc` 201.4 (172.3–235.0), 198.9 (189.7–251.2), 210.2 (188.0–237.7). Overlap. `tpool` 291.5 (257.2–332.2), 290.5 (222.7–300.6), 275.3 (244.6–303.2). Overlap.
+- `.text` bytes, 0.37.1 then align 16 then align 32: book 3812, 3976, 4088; match 5024, 5240, 5384; pool 869, 944, 992; parse 586, 648, 680; sort 659, 718, 750; list 586, 640, 672; spsc 706, 783, 815; spmc 1663, 1805, 1853; mpmc 1932, 2085, 2133; tpool 1506, 1612, 1644; lpool 775, 864, 896. The book spread did not fall, and `book` and `parse` got slower at both alignments, so neither build is kept. `fib` at 16 bytes is not kept on its own.
+
 ## [0.37.1] - 2026-10-26
 
 ### Changed
