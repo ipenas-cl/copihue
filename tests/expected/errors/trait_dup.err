@@ -1,0 +1,4 @@
+tests/errors/trait_dup.lap:7:1: error: type 'i64' already implements 'Ord'
+      7 | impl Ord for i64 {
+        | ^
+1 error, compilation failed

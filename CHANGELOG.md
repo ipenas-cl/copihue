@@ -2,6 +2,32 @@
 
 Todos los cambios importantes del proyecto.
 
+## [0.41.0] - 2026-10-26
+
+### Added
+- `trait Ord { fn lt(a: Self, b: Self) -> bool }`, `impl Ord for i64`, and `fn max<T: Ord>(a: T, b: T) -> T`. The bound is checked when the copy is generated. That copy calls the impl by its symbol (`lt$Ord$i64`, `call lt$Ord$i64`). There is no vtable and no extra instruction. `T: Ord + Eq` is two bounds, and both must hold. A failed bound is `type 'Point' does not implement 'Ord'`: the message names the type and the trait, and the copy is not created. An unknown trait name on the template is `unknown trait 'Nope'`, once.
+- `a.lt(b)` is sugar for `lt(a, b)`. `p->f(a)` is `f(*p, a)`. The `(` is what makes it a call: `p.x` stays a field. If no user function has that name, one matching impl rewrites the call to the impl symbol. None, on a dot call, is `no method 'lt' for 'Point'`. Two is `ambiguous method 'lt' for 'i64'`. A user function named `lt` wins, including `a.lt(b)`.
+- `bool` is a 64-bit signed integer, the same width as `i64`. A comparison used as a value is still `i64`. `if` tests nonzero in `rax`, so `print_int` of that `bool` prints 0 or 1. `trait`, `impl`, `Self`, and `bool` are not keywords.
+- `enum Option<T> { None, Some(T) }` when the substituted field is an integer or a pointer. `Option<i64>::Some(7)`, `Option<*u8>::Some("hi")`, and `fn wrap<T>(v: T) -> Option<T>` use the existing enum return (hidden pointer in `rdi`). `sizeof(Option<i64>)` is 16. A field that becomes a struct is `an enum field must be an integer or a pointer`. A bare name is `enum 'Option' needs type arguments`. An enum is still not a type argument. The concrete `enum Option { None, Some(i64) }` tests are unchanged. `vec` is not rewritten.
+- A mismatched method is `method 'lt' of impl 'Ord' for 'i64' does not match the trait`. A second impl is `type 'i64' already implements 'Ord'`. A missing method is `impl 'Ord' for 'i64' is missing method 'lt'`. Traits and impls are flat only (`a trait must be in the flat namespace`, `an impl must be in the flat namespace`). `--freestanding` and `--flat` call `max$1$i64` and `lt$Ord$i64` with no `syscall`. The note is `docs/DESIGN_TRAITS.md`.
+
+### Left out
+- Default method bodies, associated types, `trait Foo<T>`, `where` clauses, specialization, trait objects, and a vtable.
+- UFCS (`Ord::lt`), a generic method, and `x.f::<T>()`.
+- An impl for a slice, an array, a `vec`, or `own *T`.
+- Rewriting `vec`, or rewriting every existing `Option`. The generic enum is one proof. `match` of a call still needs a local enum.
+- A trait or an impl inside a module, `pub trait`, and a method with no parameter. Resolution needs the receiver.
+- Const generics, higher-kinded types, and using a trait name as a value.
+
+### Changed
+- Language version is 0.41.0, on top of 0.40.1. 0.40.0 monomorphization is unchanged. The 0.40.1 hosted `-O2` `while` whose equal arm is cold stays: that arm is `je` after the back edge, the tail falls through, and `align 32` is not applied to that shape. The 0.39.1 `while` stays: the not-equal arm falls through, one global array is `[r8+index*scale]`, and that loop label is `align 32`. The 0.38.1 note rejected sharing one register between two scalars whose live ranges do not overlap. That pass is not emitted. The 0.37.2 note rejected aligning `.text` to 16 or 32, and 0.37.1 rejected a direct `arr[i].field` store. Neither is emitted here.
+
+### Measured
+- No timed bench was added to `make test`. `bench/lowlat`, the SPSC ring, `bench/slice`, the 0.39 enum-versus-`if` windows, and the 0.40.1 `book` and `match` windows were not run again. The sources stayed in `/tmp/gbytes`.
+- NASM listing (`nasm -f elf64 -l`), hosted, after merging 0.40.1. Handwritten `fn lt_i64(a: i64, b: i64) -> i64 { return a < b; }` and `fn max_i64` that calls it, against `impl Ord for i64` (`lt$Ord$i64`) and `fn max<T: Ord>` instantiated as `max<i64>` (`max$1$i64`), whose body is `if (lt(a, b)) { return b; } return a;`. Local labels (`.L0`, `.L1`) stay inside the function. Listing produced 2026-10-26T09:33:41Z.
+- `lt_i64` and `lt$Ord$i64` are the same bytes. `-O0`, from the label through the first `ret`: 41 and 41. The whole function through the last `ret` is 46 and 46. Hosted `-O2`: 33 and 33 through the first `ret`, 45 and 45 through the last. Both `-O0` frames are `sub rsp` with immediate `4883EC50` (80). Both `-O2` frames are the slim frame, `sub rsp, 8` (`4883EC08`).
+- `max_i64` and `max$1$i64` are the same length and the same instructions. The only differing bytes are the 4-byte displacement of `call` (`E8`). In the generic file `main` sits between `lt$Ord$i64` and `max$1$i64`. The handwritten file emits `max_i64` immediately after `lt_i64`. Masking that displacement makes the bytes identical. `-O0`: 44 and 44 through the first `ret` (they differ at offset 29), 57 and 57 through the last. `-O2`: 42 and 42 through the first `ret` (they differ at offset 21), 68 and 68 through the last. Both `-O2` bodies are `push r12`, `push r13`, `sub rsp, 8`, the two moves into those registers, `call`, `test rax, rax`, `jz`, `mov rax, r13`, `add rsp, 8`, `pop r13`, `pop r12`, `ret`. No vtable and no extra instruction.
+
 ## [0.40.1] - 2026-10-26
 
 ### Changed

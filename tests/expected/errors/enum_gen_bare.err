@@ -1,0 +1,4 @@
+tests/errors/enum_gen_bare.lap:3:6: error: enum 'Option' needs type arguments
+      3 | fn f(x: Option) -> i64 { return 0; }
+        |      ^
+1 error, compilation failed

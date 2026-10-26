@@ -1,0 +1,4 @@
+tests/errors/trait_amb.lap:15:12: error: ambiguous method 'lt' for 'i64'
+     15 |     return lt(a, b);
+        |            ^
+1 error, compilation failed

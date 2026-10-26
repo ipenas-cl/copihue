@@ -1,0 +1,4 @@
+tests/errors/trait_method.lap:5:14: error: no method 'lt' for 'Point'
+      5 |     return p.lt(p);
+        |              ^
+1 error, compilation failed

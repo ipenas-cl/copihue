@@ -1,0 +1,37 @@
+struct Point { x: i64, y: i64 }
+
+trait Ord { fn lt(a: Self, b: Self) -> bool }
+
+impl Ord for i64 {
+    fn lt(a: Self, b: Self) -> bool {
+        return a < b;
+    }
+}
+
+fn max<T: Ord>(a: T, b: T) -> T {
+    if (a.lt(b)) { return b; }
+    return a;
+}
+
+fn main() -> i64 {
+    let a: i64 = 3;
+    let b: i64 = 9;
+    let p = Point { x: 4, y: 5 };
+    let trait = 1;
+    let impl = 2;
+    print_int(a.lt(b));
+    println("");
+    print_int(b.lt(a));
+    println("");
+    print_int(lt(a, b));
+    println("");
+    print_int(max(a, b));
+    println("");
+    print_int(max<i64>(b, a));
+    println("");
+    print_int(p.x + p.y);
+    println("");
+    print_int(trait + impl);
+    println("");
+    return 0;
+}

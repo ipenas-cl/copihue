@@ -1,0 +1,4 @@
+tests/errors/trait_miss.lap:3:1: error: impl 'Ord' for 'i64' is missing method 'lt'
+      3 | impl Ord for i64 {
+        | ^
+1 error, compilation failed

@@ -1,0 +1,4 @@
+tests/errors/trait_sig.lap:4:8: error: method 'lt' of impl 'Ord' for 'i64' does not match the trait
+      4 |     fn lt(a: Self, b: i32) -> bool { return a < b; }
+        |        ^
+1 error, compilation failed
