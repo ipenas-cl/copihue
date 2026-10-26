@@ -1,0 +1,4 @@
+fn main() -> i64 {
+    let v: vec []i64;
+    return 0;
+}

@@ -1,0 +1,24 @@
+packed struct Cell { a: i64, b: i32 }
+
+fn main() -> i64 {
+    let v: vec Cell;
+    let c: Cell;
+    c.a = 10;
+    c.b = 3;
+    vec_push(v, c);
+    c.a = 7;
+    c.b = 4;
+    vec_push(v, c);
+    let s: []Cell = v;
+    print_int(v[0].a);
+    println("");
+    print_int(v[0].b);
+    println("");
+    print_int(s[1].a);
+    println("");
+    print_int(s[1].b);
+    println("");
+    print_int(v.len);
+    println("");
+    return 0;
+}

@@ -1,6 +1,4 @@
-struct Point { x: i64 }
-
 fn main() -> i64 {
-    let v: vec Point;
+    let v: vec NoSuch;
     return 0;
 }

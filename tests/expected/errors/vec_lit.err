@@ -1,0 +1,4 @@
+tests/errors/vec_lit.lap:5:23: error: cannot copy this struct value
+      5 |     vec_push(v, Point { x: 1 });
+        |                       ^
+1 error, compilation failed

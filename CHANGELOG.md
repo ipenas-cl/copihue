@@ -2,10 +2,10 @@
 
 Todos los cambios importantes del proyecto.
 
-## [0.36.2] - 2026-10-26
+## [0.37.1] - 2026-10-26
 
 ### Changed
-- Language version is 0.36.2, on top of 0.36.1. The only edit in `compiler/bootstrap-c/copihue.c` is that version string. No instruction selection changed. The 0.36.1 `lock add` and direct `&name` operand stay.
+- Language version is 0.37.1, on top of 0.37.0. The only edit in `compiler/bootstrap-c/copihue.c` on top of 0.37.0 is that version string. No instruction selection changed. The 0.37.0 struct `vec`, owning move, and slice view stay. The 0.36.1 `lock add` and direct `&name` operand stay.
 
 ### Not shipped
 - Hosted `-O2` store of `arr[i].field = v` as one memory operand. The index had no call and no assignment. The value was an immediate, a callee-saved register (`r12`–`r15`), or a scalar slot. The index was scaled once (`shl` for a power of two, `imul` otherwise, including `*12`) and the store was `mov dword [orders+reg+off], …`. A call, an assignment in the index, a volatile immediate, and any other value stayed on the push path. `-O0`, `--freestanding`, `--flat`, and `--boot` were unchanged. This is not the 0.33.1 leaf inliner, not a fifth callee-saved register, and not the `*12` `lea`.
@@ -17,6 +17,27 @@ Todos los cambios importantes del proyecto.
 - `bench/lowlat`, `taskset -c 0,1,2,3`: `mpmc` 163.7 (158.0–170.9) to 162.8 (140.7–171.3), `spmc` 236.6 (207.2–287.5) to 264.1 (214.6–285.4), `tpool` 219.1 (205.5–255.1) to 230.5 (202.9–256.8). All three ranges overlap. `spsc` was the same bytes and was not retimed.
 - The same bytes as 0.36.1, so not retimed: `bench/src` `fib`, `parse`, `matmul`, `arith`, `chain`, `fold`, `array`, `array_global`, `sort`, `fill`, `copy`, `hash`, `sieve`, and `examples/lowlat/bench` `vec`, `share`, `split`, `pin`, `same`, `free`, `watch`. `fib` stays about 3× C. `parse` and `vec` were not this change.
 - A diagnostic pass, not the compiler, put 462 `nop`s in that book assembly so `book_init`, `take`, `give`, `find_level`, `add_level`, `drop_level`, `insert`, `cancel`, `best_bid`, `best_ask`, `rnd`, and `main` start at the 0.36.1 addresses. Checksum still 2160927. Against 0.36.1, `taskset -c 0`, one warmup and seven runs, alternating: 49.7 (49.3–50.1) and 49.4 (49.1–49.8). The ranges overlap. The shorter stores are not a win once the later functions stay put, and the unpadded form is a regression. The `nop`s are not emitted. This is the same address shift as the 0.35.1 note that kept the pointer walk off a loop with no call.
+
+## [0.37.0] - 2026-10-26
+
+### Added
+- `let v: vec T` accepts a struct. `vec_push(v, x)` copies `sizeof(T)` bytes from an addressable value (a local, an index, or a field) into `ptr + len * sizeof(T)`. Growth is unchanged: capacity 4, then double, `rep movsb`, `free` of the old buffer. A struct literal is `cannot copy this struct value`. A name that is not an integer, a pointer, or a struct is `a vec element must be an integer, a pointer, or a struct`. A slice, an array, a `vec`, or `own *T` is `a vec element cannot be a slice, an array, a vec, or an owning pointer`. `for x in` of a struct element stays `for in of a struct element; index the slice`, and that diagnostic points at the loop name.
+- `let s: []T = v` copies the pointer and the length. The slice does not own the buffer. A later `vec_push` that reallocates, or the vec's drop, leaves it dangling. There is no lifetime check. A different element type is `expected []U, found vec T`.
+- `fn give() -> own *T` and `fn take(p: own *T)` move an owning pointer. `return p` loads it and stores null before the callee's drops, so that drop is `free` of null. Passing an owning local stores null after the pointer is in the argument register. The same owner twice in one call, or a borrow beside that move, is `an owning pointer cannot be moved twice`. A raw `*T` is `an owning parameter takes an owning pointer`. `let q: *T = give()`, a discarded `give();`, and passing `give()` to `*T` are `an owning pointer must be moved into 'own *T'`. `let q: own *T = give()` and `take(give())` are the move. Passing an owning local to `*T` still borrows it and does not store null. `let q: own *T = p` is still `an owning pointer cannot be copied`. `return p` from a function that is not `-> own *T` is still `an owning pointer cannot be returned`. `--freestanding`, `--flat`, `--boot`, `bits 16`, `bits 32`, `naked`, `interrupt fn`, and `syscall fn` still reject both.
+
+### Left out
+- Inferring a pointer parameter from an index or a dereference. `fn sumar(datos, n) { return datos[0]; }` is still `cannot index 'datos'`. A load used as an integer does not fix the pointee: a narrower integer still type-checks in a wider destination, `*i8` and `*u8` are the same width, and `*p` of a non-volatile pointer is a 64-bit load. A field does not pick one struct. Declaring `: *T` is the type. `vec` and `own` are still not globals or struct fields. A `vec` is still not a parameter or a return. An indirect call does not move. A second drop after an explicit `return` is still emitted and is not executed. `let q: own *T = p` does not move; it is still a copy error. Reassignment still does not free and replace.
+
+### Changed
+- Language version is 0.37.0, on top of 0.36.1. The 0.36.1 `lock add` and direct field address are unchanged.
+
+### Measured
+- No timed bench was added to `make test`. `bench/slice` and `bench/lowlat` were not run again.
+- NASM listing (`nasm -f elf64 -l`), `-O0`, of `give` / `take` / `go`. `give(n)` does `let p: own *i64 = malloc(8); *p = n; return p` with `-> own *i64`, against the same function returning `*i64` and not freeing. Live bytes until the first `ret`: 163 versus 106, a difference of 57. That is `mov qword [rbp-16], 0` (8) and the drop of that null, which runs before `ret` (`push rax` / `pop rax`, the `free` of null, and the slot clear). After that `ret` the unreachable second drop is 52 bytes. The explicit function's dead epilogue is 5 (`xor rax` / `leave` / `ret`).
+- `take(p: own *i64)` against `take(p: *i64)` that `free`s and returns the word: 78 versus 64, a difference of 14. That is `push rax` / `pop rax` (1 + 1), `push r11` / `pop r11` (2 + 2), and `mov qword [rbp-8], 0` (8). The explicit `free` does not save `r11` and does not clear a slot. Its dead tail is 5 bytes; the owning parameter's unreachable second drop is 52.
+- `go` does `let p: own *i64 = give(1); return take(p)` against `let p: *i64 = give(1); let n = take(p); p = 0; return n`. Live bytes: 94 versus 54, a difference of 40. Eight of those are `mov qword [rbp-8], 0` after the pointer is in the argument register and before `call take`. The rest is the exit drop of that now-null local. The explicit `p = 0` is `mov rax, 0` and `mov [rbp-8], rax` and does not free.
+- Hosted `-O2`, `taskset -c 0`, one warmup and seven runs. Window 2026-10-26T05:05:54Z — 2026-10-26T05:05:59Z. Both struct programs print 20000100000. `vec_push` of a packed 12-byte `Cell` (`i64` plus `i32`), 200000 times, then a sum of the fields: samples 3.3, 3.8, 3.7, 3.9, 3.7, 4.0, 3.5 ms, median 3.7 (3.3–4.0). The same growth written with `malloc`, a copy of whole qwords and a byte tail, and `free`: 4.4, 4.1, 4.1, 4.3, 4.3, 4.2, 4.3 ms, median 4.3 (4.1–4.4). The ranges do not overlap. The ratio of the medians is 1.16. The explicit copy is a call; the vec growth is `rep movsb` and the element copy is inlined. The gap is one tenth of a millisecond at the edges (4.0 against 4.1), so this is not a large or stable advantage.
+- The same window, 100000 moves of `take(give(i))`. Both print 4999950000. Owning return and parameter: 354.5, 357.3, 356.0, 356.0, 358.9, 360.0, 360.2 ms, median 357.3 (354.5–360.2). The explicit `*i64` return and `free` in `take`: 361.4, 361.0, 360.4, 362.2, 361.0, 361.1, 349.6 ms, median 361.0 (349.6–362.2). The ranges overlap. The time is `mmap` and `munmap`. The null stores are not visible in the run time.
 
 ## [0.36.1] - 2026-10-26
 

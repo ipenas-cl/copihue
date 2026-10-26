@@ -1,0 +1,4 @@
+tests/errors/own_disc.lap:7:5: error: an owning pointer must be moved into 'own *T'
+      7 |     give();
+        |     ^
+1 error, compilation failed
