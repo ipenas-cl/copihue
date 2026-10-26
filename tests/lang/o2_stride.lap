@@ -1,0 +1,114 @@
+// Hosted -O2 walks a struct array with a pointer when the index is i = i ± K
+// and the element size is not a power of two (that size is already shl).
+// -O0 keeps the index. Both print the same lines. Cell and Fat are 24 bytes.
+
+struct Cell { n: i64, tag: u8, pad: i64 }
+struct Fat { a: i64, b: i64, c: i64 }
+
+let g: [Cell; 8];
+let fat: [Fat; 4];
+
+fn fill() -> i64 {
+    let i = 0;
+    let s = 0;
+    while (i < 8) {
+        g[i].n = i + 1;
+        g[i].tag = 1;
+        s = s + g[i].n;
+        i = i + 1;
+    }
+    return s;
+}
+
+fn sum() -> i64 {
+    let i = 0;
+    let s = 0;
+    while (i < 8) {
+        s = s + g[i].n;
+        i = i + 1;
+    }
+    return s;
+}
+
+fn step2() -> i64 {
+    let i = 0;
+    let s = 0;
+    while (i < 8) {
+        s = s + g[i].n;
+        i = i + 2;
+    }
+    return s;
+}
+
+fn down() -> i64 {
+    let i = 7;
+    let s = 0;
+    while (i >= 0) {
+        s = s + g[i].n;
+        i = i - 1;
+    }
+    return s;
+}
+
+fn addn(p: *Cell) -> i64 {
+    return p->n;
+}
+
+fn localp() -> i64 {
+    let a: [Cell; 4];
+    let i = 0;
+    let s = 0;
+    while (i < 4) {
+        a[i].n = i + 3;
+        a[i].tag = 1;
+        s = s + addn(&a[i]);
+        i = i + 1;
+    }
+    return s;
+}
+
+fn takea(p: *Fat) -> i64 {
+    p->b = p->b + 1;
+    return p->a;
+}
+
+fn fat_sum() -> i64 {
+    let i = 0;
+    let s = 0;
+    while (i < 4) {
+        fat[i].a = i + 10;
+        fat[i].b = 1;
+        fat[i].c = 0;
+        s = s + takea(&fat[i]);
+        i = i + 1;
+    }
+    return s;
+}
+
+fn tags() -> i64 {
+    let i = 0;
+    let s = 0;
+    while (i < 8) {
+        s = s + g[i].tag;
+        i = i + 1;
+    }
+    return s;
+}
+
+fn main() -> i32 {
+    print_int(fill());
+    println("");
+    print_int(sum());
+    println("");
+    print_int(step2());
+    println("");
+    print_int(down());
+    println("");
+    print_int(localp());
+    println("");
+    print_int(fat_sum());
+    println("");
+    print_int(tags());
+    println("");
+    return 0;
+}

@@ -1,0 +1,27 @@
+// Hosted -O2. Order is 12 bytes, so the index is not a SIB scale.
+// The walk is data-dependent (cur = orders[cur].next), not i = i + 1,
+// so it stays an index. -O0 multiplies; -O2 uses lea. Same print.
+
+struct Order { id: i32, qty: i32, next: i32 }
+
+let orders: [Order; 8];
+
+fn main() -> i32 {
+    let i = 0;
+    let s = 0;
+    let cur = 0;
+    while (i < 8) {
+        orders[i].id = (i + 1) as i32;
+        orders[i].qty = (i * 3) as i32;
+        orders[i].next = (i + 1) as i32;
+        i = i + 1;
+    }
+    orders[7].next = -1;
+    while (cur >= 0) {
+        s = s + orders[cur].id + orders[cur].qty;
+        cur = orders[cur].next;
+    }
+    print_int(s);
+    println("");
+    return 0;
+}

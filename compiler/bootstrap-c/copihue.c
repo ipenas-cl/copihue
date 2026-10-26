@@ -1464,6 +1464,9 @@ int get_log2(long n) {
 
 // Scale an index that is already in reg. Hosted -O2 uses shl for a power of
 // two (sal is the same opcode). -O0, freestanding, and bits 16/32 keep imul.
+// A 3/5/9 multiply (12, 24, …) was also tried as lea plus a SIB scale.
+// On the order book it moved insert/cancel and the run went from 49.8 ms
+// to 55.8 ms, so the index stays imul.
 static void emit_scale_reg(Codegen* cg, const char* reg, int stride) {
     int sh;
     if (stride <= 1 || !reg) return;
@@ -8046,6 +8049,35 @@ static int scalar_index_field(Codegen* cg, AstNode* n) {
     return 1;
 }
 
+// (*p).field or p->field when the field is a scalar and the object does not
+// call. The load stays in rax, so a callee-saved sum can add it in place.
+static int scalar_ptr_field(Codegen* cg, AstNode* n) {
+    StructField* f;
+    AstNode* obj;
+    AstNode* id;
+    Symbol* s;
+    if (!n || n->type != AST_FIELD_ACCESS || !n->name || n->child_count != 1) return 0;
+    if (node_has_call(n)) return 0;
+    obj = n->children[0];
+    if (!obj) return 0;
+    id = NULL;
+    if (obj->type == AST_DEREF && obj->child_count == 1) id = obj->children[0];
+    else if (obj->type == AST_IDENT) id = obj;
+    if (!id || id->type != AST_IDENT || !id->name) return 0;
+    s = symtab_lookup_symbol(cg->symtab, id->name);
+    if (!s || !s->is_pointer) return 0;
+    f = access_field(cg, n);
+    if (!f || f->array_len > 0) return 0;
+    if (f->is_pointer) return 1;
+    if (!f->type_name) return 0;
+    if (cg->types && typetab_lookup(cg->types, f->type_name)) return 0;
+    return 1;
+}
+
+static int scalar_addend(Codegen* cg, AstNode* n) {
+    return n && (n->type == AST_INDEX || scalar_index_field(cg, n) || scalar_ptr_field(cg, n));
+}
+
 static void place_in(Codegen* cg, AstNode* n, const char* dest) {
     place_k(cg, n, dest, 1);
 }
@@ -8095,7 +8127,7 @@ static int can_place_k(Codegen* cg, AstNode* n, const char* dest, int allow) {
     // is still the old value.
     if ((n->op[0] == '+' || (n->op[0] == '-' && !n->op[1])) && !is_shift_op(n->op) &&
         ident_is_dest(cg, L, dest) && !node_has_call(R) && callee_saved_reg(dest) &&
-        (R->type == AST_INDEX || scalar_index_field(cg, R)))
+        scalar_addend(cg, R))
         return 1;
     return 0;
 }
@@ -8175,7 +8207,7 @@ static void place_k_raw(Codegen* cg, AstNode* n, const char* dest, int allow) {
     const char* op = n->op;
     if ((op[0] == '+' || (op[0] == '-' && !op[1])) && !is_shift_op(op) &&
         ident_is_dest(cg, L, dest) && !node_has_call(R) && callee_saved_reg(dest) &&
-        (R->type == AST_INDEX || scalar_index_field(cg, R))) {
+        scalar_addend(cg, R)) {
         if (R->type == AST_INDEX) gen_array_index(cg, R);
         else gen_expr(cg, R);
         if (op[0] == '+') emit(cg, "    add %s, rax\n", dest);
@@ -12717,6 +12749,534 @@ static void bind_param(Codegen* cg, AstNode* par, const char* src_reg, int stack
     }
 }
 
+// Hosted -O2: a loop that only does `i = i ± K` and indexes a struct array
+// with that i recomputes i * sizeof on every field. One pointer, started at
+// &arr[i] and advanced by K * sizeof next to that assignment, is the same
+// address. Globals have no bounds trap. A local array is rewritten only when
+// the trip is inside the declared length, so dropping the per-access trap
+// cannot fire on an index the original loop could not reach. The pointer is
+// a real local, so the register plan sees it. Byte loops are not struct
+// arrays and stay on their own rewrites.
+typedef struct {
+    AstNode* block;
+    int idx;
+} StrideFrame;
+
+typedef struct {
+    char name[96];
+    AstNode* as;
+    AstNode* parent;
+    int step;
+    int dir;
+} StrideIv;
+
+typedef struct {
+    char name[96];
+    char qual[96];
+    int has_qual;
+    char elem[96];
+    char pname[32];
+    int elem_size;
+    int uses;
+    int bad;
+    int is_local;
+    int local_len;
+    int iv;
+} StrideArr;
+
+static void stride_copy_pos(AstNode* dst, AstNode* src) {
+    if (!dst || !src) return;
+    dst->line = src->line;
+    dst->col = src->col;
+    dst->file = src->file;
+}
+
+static int stride_mentions(AstNode* n, const char* name) {
+    int i;
+    if (!n || !name) return 0;
+    if (n->name && !strcmp(n->name, name)) return 1;
+    for (i = 0; i < n->child_count; i++)
+        if (stride_mentions(n->children[i], name)) return 1;
+    return 0;
+}
+
+static int g_iv_seq;
+
+static void stride_fresh(AstNode* fn, char* buf, int cap) {
+    do {
+        snprintf(buf, cap, "__iv%d", g_iv_seq++);
+    } while (stride_mentions(fn, buf));
+}
+
+static void ast_insert(AstNode* p, int at, AstNode* c) {
+    int i;
+    if (!p || !c || at < 0) return;
+    p->child_count++;
+    p->children = safe_realloc(p->children, sizeof(AstNode*) * p->child_count);
+    if (at >= p->child_count) at = p->child_count - 1;
+    for (i = p->child_count - 1; i > at; i--)
+        p->children[i] = p->children[i - 1];
+    p->children[at] = c;
+}
+
+static int ast_child_index(AstNode* p, AstNode* c) {
+    int i;
+    if (!p || !c) return -1;
+    for (i = 0; i < p->child_count; i++)
+        if (p->children[i] == c) return i;
+    return -1;
+}
+
+static int stride_find(AstNode* n, AstNode* target, StrideFrame* st, int* nfr, int max) {
+    int i;
+    if (!n) return 0;
+    if (n == target) return 1;
+    if (n->type == AST_FUNCTION) return 0;
+    if (n->type == AST_BLOCK) {
+        for (i = 0; i < n->child_count; i++) {
+            if (*nfr >= max) return 0;
+            st[*nfr].block = n;
+            st[*nfr].idx = i;
+            (*nfr)++;
+            if (stride_find(n->children[i], target, st, nfr, max)) return 1;
+            (*nfr)--;
+        }
+        return 0;
+    }
+    for (i = 0; i < n->child_count; i++)
+        if (stride_find(n->children[i], target, st, nfr, max)) return 1;
+    return 0;
+}
+
+static AstNode* stride_dom_let(StrideFrame* st, int nfr, const char* name) {
+    AstNode* found = NULL;
+    int f, j;
+    for (f = 0; f < nfr; f++) {
+        AstNode* b = st[f].block;
+        int lim;
+        if (!b || b->type != AST_BLOCK) continue;
+        lim = st[f].idx;
+        if (lim > b->child_count) lim = b->child_count;
+        for (j = 0; j < lim; j++) {
+            AstNode* s = b->children[j];
+            if (s && s->type == AST_LET && s->name && !strcmp(s->name, name))
+                found = s;
+        }
+    }
+    return found;
+}
+
+static int stride_let_inside(AstNode* n, const char* name) {
+    int i;
+    if (!n || !name) return 0;
+    if (n->type == AST_LET && n->name && !strcmp(n->name, name)) return 1;
+    if (n->type == AST_FUNCTION) return 0;
+    for (i = 0; i < n->child_count; i++)
+        if (stride_let_inside(n->children[i], name)) return 1;
+    return 0;
+}
+
+static int stride_iv_wide(StrideFrame* st, int nfr, const char* name) {
+    AstNode* let = stride_dom_let(st, nfr, name);
+    const char* ty = NULL;
+    int bits = 64, sg = 1;
+    int i, pc;
+    if (let) {
+        if (let->is_pointer) return 0;
+        ty = let->value;
+    } else if (g_cur_fn) {
+        pc = g_cur_fn->child_count - 1;
+        for (i = 0; i < pc; i++) {
+            AstNode* p = g_cur_fn->children[i];
+            if (!p || !p->name || strcmp(p->name, name)) continue;
+            if (p->is_pointer) return 0;
+            ty = p->value;
+            break;
+        }
+    }
+    if (!ty || !ty[0]) return 1;
+    if (!int_name(ty, &bits, &sg)) return 0;
+    return bits == 64;
+}
+
+static int is_iv_step(AstNode* n, int* step, int* dir) {
+    AstNode* e;
+    AstNode* a;
+    AstNode* b;
+    AstNode* num = NULL;
+    long long k;
+    int plus, minus;
+    if (!n || n->type != AST_ASSIGN || !n->name || n->child_count != 1) return 0;
+    if (n->name[0] == '_' && n->name[1] == '_' ) return 0;
+    e = n->children[0];
+    if (!e || e->type != AST_BINOP || !e->op || e->child_count != 2) return 0;
+    plus = e->op[0] == '+' && !e->op[1];
+    minus = e->op[0] == '-' && !e->op[1];
+    if (!plus && !minus) return 0;
+    a = e->children[0];
+    b = e->children[1];
+    if (plus) {
+        if (a && a->type == AST_IDENT && a->name && !strcmp(a->name, n->name) &&
+            b && b->type == AST_NUMBER)
+            num = b;
+        else if (b && b->type == AST_IDENT && b->name && !strcmp(b->name, n->name) &&
+                 a && a->type == AST_NUMBER)
+            num = a;
+        else return 0;
+        *dir = 1;
+    } else {
+        if (!(a && a->type == AST_IDENT && a->name && !strcmp(a->name, n->name))) return 0;
+        if (!(b && b->type == AST_NUMBER)) return 0;
+        num = b;
+        *dir = -1;
+    }
+    if (!parse_i64(num->value, &k) || k <= 0 || k > 1000000) return 0;
+    *step = (int)k;
+    return 1;
+}
+
+static void stride_collect_iv(AstNode* n, AstNode* parent, StrideIv* ivs, int* niv, int cap) {
+    int i, step = 0, dir = 0;
+    if (!n || *niv >= cap) return;
+    if (n->type == AST_FUNCTION) return;
+    if (n->type == AST_BLOCK) {
+        for (i = 0; i < n->child_count && *niv < cap; i++) {
+            AstNode* c = n->children[i];
+            if (c && is_iv_step(c, &step, &dir)) {
+                int k, seen = 0;
+                for (k = 0; k < *niv; k++)
+                    if (!strcmp(ivs[k].name, c->name)) { seen = 1; break; }
+                if (!seen) {
+                    snprintf(ivs[*niv].name, sizeof ivs[*niv].name, "%s", c->name);
+                    ivs[*niv].as = c;
+                    ivs[*niv].parent = n;
+                    ivs[*niv].step = step;
+                    ivs[*niv].dir = dir;
+                    (*niv)++;
+                }
+            }
+            stride_collect_iv(c, n, ivs, niv, cap);
+        }
+        return;
+    }
+    for (i = 0; i < n->child_count; i++)
+        stride_collect_iv(n->children[i], parent, ivs, niv, cap);
+}
+
+static int stride_index_iv(AstNode* ix, const char* iv) {
+    AstNode* a;
+    AstNode* id;
+    if (!ix || ix->type != AST_INDEX || ix->child_count < 2) return 0;
+    a = ix->children[0];
+    id = ix->children[1];
+    if (!a || a->type != AST_IDENT || !a->name) return 0;
+    if (!id || id->type != AST_IDENT || !id->name || strcmp(id->name, iv)) return 0;
+    return 1;
+}
+
+static int stride_same_base(AstNode* id, StrideArr* h) {
+    if (!id || !id->name || strcmp(id->name, h->name)) return 0;
+    if (h->has_qual) return id->qual && !strcmp(id->qual, h->qual);
+    return !id->qual;
+}
+
+static int stride_loop_upper(AstNode* wh, const char* iv, long long* bound) {
+    AstNode* cond;
+    AstNode* rhs;
+    long long v = 0;
+    int nc = 0, no = 0, w = 0;
+    if (!wh || wh->child_count < 1) return 0;
+    cond = wh->children[0];
+    if (!cond || cond->type != AST_COMPARE || !cond->op || strcmp(cond->op, "<") ||
+        cond->child_count != 2)
+        return 0;
+    if (!cond->children[0] || cond->children[0]->type != AST_IDENT ||
+        !cond->children[0]->name || strcmp(cond->children[0]->name, iv))
+        return 0;
+    rhs = cond->children[1];
+    if (rhs && rhs->type == AST_NUMBER) {
+        if (!parse_i64(rhs->value, &v) || v < 0) return 0;
+        *bound = v;
+        return 1;
+    }
+    if (!rhs || rhs->type != AST_IDENT || !rhs->name) return 0;
+    tally_defs(g_cur_fn, rhs->name, &v, &nc, &no);
+    if (nc != 1 || no != 0 || v < 0) return 0;
+    count_writes(wh, rhs->name, &w);
+    if (w) return 0;
+    *bound = v;
+    return 1;
+}
+
+static int stride_bind(Codegen* cg, StrideFrame* st, int nfr, AstNode* wh, StrideArr* h, AstNode* base) {
+    AstNode* let;
+    if (!base->name || strlen(base->name) >= sizeof h->name) return 0;
+    snprintf(h->name, sizeof h->name, "%s", base->name);
+    h->has_qual = base->qual != NULL;
+    if (base->qual) {
+        if (strlen(base->qual) >= sizeof h->qual) return 0;
+        snprintf(h->qual, sizeof h->qual, "%s", base->qual);
+    }
+    if (stride_let_inside(wh, base->name)) { h->bad = 1; return 1; }
+    let = stride_dom_let(st, nfr, base->name);
+    if (let) {
+        StructType* sty;
+        if (!(let->struct_type && !strcmp(let->struct_type, "__array__"))) { h->bad = 1; return 1; }
+        if (let->flags & AF_VOLATILE) { h->bad = 1; return 1; }
+        if (!let->value || strlen(let->value) >= sizeof h->elem) { h->bad = 1; return 1; }
+        sty = typetab_lookup(cg->types, let->value);
+        if (!sty || sty->size <= 0) { h->bad = 1; return 1; }
+        h->is_local = 1;
+        h->local_len = let->array_size;
+        h->elem_size = sty->size;
+        snprintf(h->elem, sizeof h->elem, "%s", let->value);
+        return 1;
+    }
+    {
+        GlobalVar* g = global_symtab_lookup(cg->global_symtab, base->name);
+        StructType* sty;
+        if (!g || !g->is_array || g->is_slice || g->is_volatile || !g->elem_type) { h->bad = 1; return 1; }
+        if (strlen(g->elem_type) >= sizeof h->elem) { h->bad = 1; return 1; }
+        sty = typetab_lookup(cg->types, g->elem_type);
+        if (!sty || sty->size <= 0) { h->bad = 1; return 1; }
+        h->elem_size = sty->size;
+        snprintf(h->elem, sizeof h->elem, "%s", g->elem_type);
+        return 1;
+    }
+}
+
+static StrideArr* stride_arr(Codegen* cg, StrideFrame* st, int nfr, AstNode* wh,
+                             StrideArr* arrs, int* narr, int cap, AstNode* base) {
+    int i;
+    if (!base || base->type != AST_IDENT || !base->name) return NULL;
+    for (i = 0; i < *narr; i++)
+        if (stride_same_base(base, &arrs[i])) return &arrs[i];
+    if (*narr >= cap) return NULL;
+    memset(&arrs[*narr], 0, sizeof arrs[*narr]);
+    if (!stride_bind(cg, st, nfr, wh, &arrs[*narr], base)) return NULL;
+    (*narr)++;
+    return &arrs[*narr - 1];
+}
+
+static int stride_scan(Codegen* cg, StrideFrame* st, int nfr, AstNode* wh, AstNode* n,
+                        const char* iv, StrideArr* arrs, int* narr, int cap) {
+    int i;
+    if (!n) return 1;
+    if (n->type == AST_FUNCTION) return 1;
+    if ((n->type == AST_FIELD_ACCESS || n->type == AST_FIELD_ASSIGN) && n->child_count > 0 &&
+        stride_index_iv(n->children[0], iv)) {
+        StrideArr* h = stride_arr(cg, st, nfr, wh, arrs, narr, cap, n->children[0]->children[0]);
+        if (!h) return 0;
+        h->uses++;
+        if (n->type == AST_FIELD_ASSIGN && n->child_count > 1)
+            return stride_scan(cg, st, nfr, wh, n->children[1], iv, arrs, narr, cap);
+        return 1;
+    }
+    if (n->type == AST_ADDR_OF && n->child_count > 0 && stride_index_iv(n->children[0], iv)) {
+        StrideArr* h = stride_arr(cg, st, nfr, wh, arrs, narr, cap, n->children[0]->children[0]);
+        if (!h) return 0;
+        h->uses++;
+        return 1;
+    }
+    if (n->type == AST_ARRAY_ASSIGN && n->child_count >= 2 &&
+        n->children[1] && n->children[1]->type == AST_IDENT && n->children[1]->name &&
+        !strcmp(n->children[1]->name, iv)) {
+        StrideArr* h = stride_arr(cg, st, nfr, wh, arrs, narr, cap, n->children[0]);
+        if (!h) return 0;
+        h->bad = 1;
+        if (n->child_count > 2)
+            return stride_scan(cg, st, nfr, wh, n->children[2], iv, arrs, narr, cap);
+        return 1;
+    }
+    if (n->type == AST_INDEX && stride_index_iv(n, iv)) {
+        StrideArr* h = stride_arr(cg, st, nfr, wh, arrs, narr, cap, n->children[0]);
+        if (!h) return 0;
+        h->bad = 1;
+        return 1;
+    }
+    for (i = 0; i < n->child_count; i++)
+        if (!stride_scan(cg, st, nfr, wh, n->children[i], iv, arrs, narr, cap)) return 0;
+    return 1;
+}
+
+static AstNode* stride_ident(const char* name, AstNode* at) {
+    AstNode* n = ast_new(AST_IDENT);
+    n->name = strdup(name);
+    stride_copy_pos(n, at);
+    return n;
+}
+
+static AstNode* stride_num(long long v, AstNode* at) {
+    AstNode* n = ast_new(AST_NUMBER);
+    char buf[32];
+    snprintf(buf, sizeof buf, "%lld", v);
+    n->value = strdup(buf);
+    stride_copy_pos(n, at);
+    return n;
+}
+
+static void stride_rewrite(AstNode* n, const char* iv, StrideArr* h) {
+    int i;
+    if (!n || !h) return;
+    for (i = 0; i < n->child_count; i++) {
+        AstNode* c = n->children[i];
+        if (c && c->type == AST_ADDR_OF && c->child_count > 0 &&
+            stride_index_iv(c->children[0], iv) &&
+            stride_same_base(c->children[0]->children[0], h)) {
+            n->children[i] = stride_ident(h->pname, c);
+            continue;
+        }
+        if (c && (c->type == AST_FIELD_ACCESS || c->type == AST_FIELD_ASSIGN) &&
+            c->child_count > 0 && stride_index_iv(c->children[0], iv) &&
+            stride_same_base(c->children[0]->children[0], h)) {
+            AstNode* d = ast_new(AST_DEREF);
+            stride_copy_pos(d, c->children[0]);
+            ast_add(d, stride_ident(h->pname, c->children[0]));
+            c->children[0] = d;
+            if (c->type == AST_FIELD_ASSIGN && c->child_count > 1)
+                stride_rewrite(c->children[1], iv, h);
+            continue;
+        }
+        stride_rewrite(c, iv, h);
+    }
+}
+
+static AstNode* stride_let_ptr(AstNode* wh, StrideArr* h, const char* iv) {
+    AstNode* let = ast_new(AST_LET);
+    AstNode* addr = ast_new(AST_ADDR_OF);
+    AstNode* ix = ast_new(AST_INDEX);
+    AstNode* base = ast_new(AST_IDENT);
+    let->name = strdup(h->pname);
+    let->is_pointer = 1;
+    let->value = strdup(h->elem);
+    stride_copy_pos(let, wh);
+    base->name = strdup(h->name);
+    if (h->has_qual) base->qual = strdup(h->qual);
+    stride_copy_pos(base, wh);
+    stride_copy_pos(ix, wh);
+    stride_copy_pos(addr, wh);
+    ast_add(ix, base);
+    ast_add(ix, stride_ident(iv, wh));
+    ast_add(addr, ix);
+    ast_add(let, addr);
+    return let;
+}
+
+static AstNode* stride_bump(AstNode* at, StrideArr* h, int dir, long long delta) {
+    AstNode* as = ast_new(AST_ASSIGN);
+    AstNode* op = ast_new(AST_BINOP);
+    as->name = strdup(h->pname);
+    op->op = strdup(dir < 0 ? "-" : "+");
+    stride_copy_pos(as, at);
+    stride_copy_pos(op, at);
+    ast_add(op, stride_ident(h->pname, at));
+    ast_add(op, stride_num(delta, at));
+    ast_add(as, op);
+    return as;
+}
+
+static void stride_while(Codegen* cg, AstNode* fn, AstNode* wh, StrideFrame* st, int nfr) {
+    StrideIv ivs[8];
+    StrideArr chosen[4];
+    int niv = 0;
+    int nch = 0;
+    int i, v;
+    AstNode* prev;
+    if (nfr < 1) return;
+    if (st[nfr - 1].block->children[st[nfr - 1].idx] != wh) return;
+    // No call: the imul is the whole loop, and a shorter function moves
+    // whatever was compiled after it. book_init got 30 bytes shorter and the
+    // order book went from 49 ms to 63 ms; putting those 30 bytes back as
+    // nops, so insert/cancel stayed at the same addresses, restored 49 ms.
+    // The hot case is the imul on both sides of a call (release).
+    if (!node_has_call(wh)) return;
+    prev = st[nfr - 1].idx > 0 ? st[nfr - 1].block->children[st[nfr - 1].idx - 1] : NULL;
+    memset(ivs, 0, sizeof ivs);
+    stride_collect_iv(wh, NULL, ivs, &niv, 8);
+    for (v = 0; v < niv && nch < 4; v++) {
+        StrideArr arrs[8];
+        int narr = 0;
+        int w = 0;
+        long long bound = 0;
+        int have_bound = 0;
+        if (name_addr_taken(wh, ivs[v].name)) continue;
+        count_writes(wh, ivs[v].name, &w);
+        if (w != 1 || !ivs[v].as || !ivs[v].parent) continue;
+        if (!stride_iv_wide(st, nfr, ivs[v].name)) continue;
+        if (!stride_scan(cg, st, nfr, wh, wh, ivs[v].name, arrs, &narr, 8)) return;
+        have_bound = stride_loop_upper(wh, ivs[v].name, &bound);
+        for (i = 0; i < narr && nch < 4; i++) {
+            long long delta;
+            if (arrs[i].bad || arrs[i].uses < 1 || arrs[i].elem_size <= 0) continue;
+            // 8, 16, 32 are already shl (or a SIB scale). A pointer for those
+            // added a live register and an add on the back edge and slowed
+            // the order book's level scans. Measured and left on shl.
+            if (is_power_of_2((long)arrs[i].elem_size)) continue;
+            delta = (long long)arrs[i].elem_size * (long long)ivs[v].step;
+            if (delta <= 0 || !fits_imm32_val(delta)) continue;
+            if (arrs[i].is_local) {
+                long long c = 0;
+                if (ivs[v].dir != 1) continue;
+                if (!nonneg_init(prev, ivs[v].name)) continue;
+                if (!parse_i64(prev->children[0]->value, &c) || c < 0) continue;
+                if (!have_bound || c >= bound || bound > (long long)arrs[i].local_len) continue;
+            }
+            arrs[i].iv = v;
+            stride_fresh(fn, arrs[i].pname, sizeof arrs[i].pname);
+            chosen[nch++] = arrs[i];
+        }
+    }
+    if (nch < 1) return;
+    for (i = 0; i < nch; i++)
+        stride_rewrite(wh, ivs[chosen[i].iv].name, &chosen[i]);
+    for (i = 0; i < nch; i++) {
+        StrideIv* iv = &ivs[chosen[i].iv];
+        int at = ast_child_index(iv->parent, iv->as);
+        long long delta = (long long)chosen[i].elem_size * (long long)iv->step;
+        if (at < 0) return;
+        ast_insert(iv->parent, at + 1, stride_bump(iv->as, &chosen[i], iv->dir, delta));
+    }
+    {
+        AstNode* parent = st[nfr - 1].block;
+        int at = ast_child_index(parent, wh);
+        if (at < 0) return;
+        for (i = 0; i < nch; i++) {
+            ast_insert(parent, at, stride_let_ptr(wh, &chosen[i], ivs[chosen[i].iv].name));
+            at++;
+        }
+    }
+}
+
+
+static void stride_collect_wh(AstNode* n, AstNode** out, int* nout, int cap) {
+    int i;
+    if (!n || *nout >= cap || n->type == AST_FUNCTION) return;
+    for (i = 0; i < n->child_count; i++) {
+        stride_collect_wh(n->children[i], out, nout, cap);
+        if (*nout >= cap) return;
+    }
+    if (n->type == AST_WHILE && *nout < cap) out[(*nout)++] = n;
+}
+
+static void stride_function(Codegen* cg, AstNode* fn) {
+    AstNode* whs[128];
+    AstNode* body;
+    int nwh = 0;
+    int i, pc;
+    if (!o2_hosted() || !cg || !fn || calls_asm(fn)) return;
+    pc = fn->child_count - 1;
+    if (pc < 0) return;
+    body = fn->children[pc];
+    g_iv_seq = 0;
+    stride_collect_wh(body, whs, &nwh, 128);
+    for (i = 0; i < nwh; i++) {
+        StrideFrame st[48];
+        int nfr = 0;
+        if (!stride_find(body, whs[i], st, &nfr, 48)) continue;
+        stride_while(cg, fn, whs[i], st, nfr);
+    }
+}
+
 void gen_func(Codegen* cg, AstNode* n) {
     g_reg_local_n = 0;
     g_reg_callee_n = 0;
@@ -12864,8 +13424,10 @@ void gen_func(Codegen* cg, AstNode* n) {
         emit(cg, "    push rbp\n    mov rbp, rsp\n");
         emit(cg, "    sub rsp, __frame_%s\n", g_fn_name);
     } else {
-        if (optimization_level >= 2 && !g_freestanding)
+        if (optimization_level >= 2 && !g_freestanding) {
+            stride_function(cg, n);
             plan_reg_locals(cg, n);
+        }
         prepare_frame(cg, n);
         EarlyRet early = match_early_ret(cg, n);
         if (early.ok) {
