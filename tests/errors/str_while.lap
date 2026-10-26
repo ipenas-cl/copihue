@@ -1,0 +1,6 @@
+fn f(a: str, b: str) -> i64 {
+    while (a == b) {
+        return 0;
+    }
+    return 1;
+}

@@ -1,5 +1,7 @@
 # Slices y nivel fácil (v0.34.0)
 
+**Corte 0.43.0.** `str` es este `[]u8`. El detalle está en [`DESIGN_STRINGS.md`](DESIGN_STRINGS.md).
+
 El nivel fácil es el que decide el compilador. El nivel explícito es el que decide quien escribe. Un slice es un puntero y un largo, no un tercer array. `[T; N]`, el decaimiento a `*T` y la comprobación de un array local en hosted no cambian. Indexar un puntero sigue sin comprobación.
 
 ## Representación
