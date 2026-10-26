@@ -1,0 +1,9 @@
+fn f(p) {
+    return p;
+}
+
+fn main() -> i64 {
+    let b: u8 = 1;
+    f(&b);
+    return 0;
+}

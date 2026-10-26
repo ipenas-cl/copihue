@@ -1,0 +1,4 @@
+tests/errors/vec_hosted.lap:3:9: error: vec is hosted-only
+      3 |     let v: vec i64;
+        |         ^
+1 error, compilation failed

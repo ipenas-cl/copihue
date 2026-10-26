@@ -1,0 +1,4 @@
+tests/errors/easy_ptr.lap:7:7: error: argument 1 of 'f': expected i64, found *u8
+      7 |     f(&b);
+        |       ^
+1 error, compilation failed

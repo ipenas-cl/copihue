@@ -1,0 +1,4 @@
+tests/errors/own_assign.lap:3:7: error: an owning pointer cannot be reassigned
+      3 |     p = malloc(8);
+        |       ^
+1 error, compilation failed

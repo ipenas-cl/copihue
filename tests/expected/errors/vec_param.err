@@ -1,0 +1,4 @@
+tests/errors/vec_param.lap:1:6: error: a vec must be a local
+      1 | fn f(v: vec i64) -> i64 {
+        |      ^
+1 error, compilation failed
