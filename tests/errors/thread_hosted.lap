@@ -1,0 +1,9 @@
+// flags: --freestanding
+fn worker() -> i64 {
+    return 0;
+}
+
+fn main() -> i64 {
+    thread_spawn(&worker, 0, 0);
+    return 0;
+}

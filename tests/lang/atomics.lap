@@ -1,0 +1,46 @@
+// Atomic u32/u64 on *volatile. Same results at -O0 and -O2.
+let volatile cell: u64 = 0;
+let volatile wide: u32 = 0;
+let volatile narrow: i32 = 0;
+
+fn main() -> i64 {
+    let p: *volatile u64 = &cell;
+    atomic_store_release(p, 10);
+    print_int(atomic_load_acquire(p));
+    println("");
+    print_int(fetch_add(p, 3));
+    println("");
+    print_int(atomic_add(p, 2));
+    println("");
+    print_int(swap(p, 40));
+    println("");
+    print_int(compare_exchange(p, 40, 7));
+    println("");
+    print_int(atomic_load_seq_cst(p));
+    println("");
+    print_int(compare_exchange(p, 1, 9));
+    println("");
+    print_int(atomic_load_acquire(p));
+    println("");
+    atomic_store_seq_cst(p, 100);
+    fence();
+    print_int(atomic_load_seq_cst(p));
+    println("");
+
+    let q: *volatile u32 = &wide;
+    atomic_store_release(q, 5);
+    print_int(fetch_add(q, 1));
+    println("");
+    print_int(atomic_load_acquire(q));
+    println("");
+
+    let r: *volatile i32 = &narrow;
+    atomic_store_release(r, 8);
+    print_int(atomic_add(r, 4));
+    println("");
+    print_int(fence());
+    println("");
+    print_int(cpu_pause());
+    println("");
+    return 0;
+}

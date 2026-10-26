@@ -1,0 +1,4 @@
+tests/errors/atomic_width.lap:4:5: error: atomic_add() takes a *volatile u32 or *volatile u64, found *volatile u8
+      4 |     atomic_add(p, 1);
+        |     ^
+1 error, compilation failed
