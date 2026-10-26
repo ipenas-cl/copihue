@@ -2,6 +2,22 @@
 
 Todos los cambios importantes del proyecto.
 
+## [0.37.3] - 2026-10-26
+
+### Added
+- Hosted `-O2` can place a second scalar or pointer in a register that already holds another name, when the two are never live at the same time. The first assignment is unchanged: callee-saved `r12`–`r15` first, names that cross a call before names that do not, then `r10` and `r11` only for names that do not cross a call. The second pass runs only in a function that contains a call. It does not open another callee-saved slot, so a function that cannot share keeps the same prologue. A name that is live across a call still cannot use `r10` or `r11`. `own *T` stays live until the function returns, because the drop is not a use in the AST. `-O0`, `--freestanding`, `--flat`, `--boot`, and `bits 16` / `bits 32` do not share.
+- The overlap test is a backward walk of `if`, `while`, `break`, `continue`, and `return`, not the straight first-to-last tick. The 0.33.1 attempt shared on that tick and miscompiled the order book: a name used in a `while` condition was recorded before the body, and a body local reused the register. `tests/lang/o2_share.lap` prints the same ten lines at `-O0` and `-O2`, including a loop condition that stays live across a call in the body.
+
+### Changed
+- Language version is 0.37.3, on top of 0.37.2.
+
+### Measured
+- Choice, before the change. Hardware `cycles` and `instructions` are not available in this guest (`perf stat` reports them as not supported), so the split is dynamic instruction counts from one counter on each basic block, and `perf` `cpu-clock` at 4999 Hz for which function is running. The cpu-clock samples inside `fib` land on one `cmp` often enough that they are not an instruction mix. Checksums stayed 102334155, 41421435022848, and 2160927.
+- `fib`. 3311603014 instructions. `call`, `ret`, the frame (`sub`/`add rsp`), and the `push`/`pop` of `r12`/`r13` are 50.0%. The other 50.0% is the compare, the two `lea`s, and the add. Stack slots of a local that missed a register are 0. A leaf inliner does not apply: `fib` calls itself. The register plan already keeps `n` and the first result in `r12` and `r13`.
+- `parse`. 337246641 instructions. Work is 100.0%. The inner loop is `movzx`, `imul`, `add`, and `jmp`, all in registers. The only stack operand on the timed path is `cmp r15, [rbp-16]` for the outer trip count, 513 times, 0.0002%. There is one call, the final print.
+- `book`. 759730534 instructions. Work is 93.1%. Stack slots are 5.1%, and 4.03% of all instructions are one reload, `mov rbx, [rbp-8]`, the id in `cancel`'s order walk (30610896 times). Call, return, and frame traffic is 1.7%. The scratch `push`/`pop` of a field store is 0.1%. `cpu-clock` (3586 samples in the binary): `cancel` 71.8%, `find_level` 10.3%, `main` 7.2%, `best_ask` 3.3%, `rnd` 3.2%, `best_bid` 2.4%, `take` 0.9%, `insert` 0.8%.
+- That picks the register pass, not a leaf inliner. The 0.33.1 inliner (a direct call, no nested call, at most six scalar parameters, body weight at most 40, four passes, the result written into a destination local during codegen) made the book 57.21 against 49.74 and the pool 14.94 against 14.25. An AST inliner before register allocation would still be inlining leaves. Leaf-call overhead is 1.7% of the book's instructions, none of `parse`'s, and `fib`'s calls are not leaves. The reload in `cancel` is a name that dies before `nxt` is born on the match path and stays in `r10` on the miss path, so the two can share `r10`.
+
 ## [0.37.2] - 2026-10-26
 
 ### Changed

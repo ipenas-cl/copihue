@@ -16,7 +16,7 @@
 
 // ==== NAMING (single place to change when the language is renamed) ====
 #define LANG_NAME     "Copihue"
-#define LANG_VERSION  "0.37.2"
+#define LANG_VERSION  "0.37.3"
 #define COMPILER_BIN  "copihue"
 #define SRC_EXT       ".lap"   /* Lapageria rosea, the copihue */
 #define OLD_SRC_EXT   ".cph"   /* v0.18.x extension, still accepted with a warning */
@@ -747,16 +747,22 @@ static const char *g_reg_local_name[MAX_REG_LOCAL] = {
 static char g_reg_local_var[MAX_REG_LOCAL][96];
 static int g_reg_local_n = 0;
 static int g_reg_callee_n = 0;
+// Several names can share one slot when their live ranges do not overlap.
+// g_reg_local_var keeps the first name, which is what the prologue counts.
+#define MAX_REG_NAMES 128
+static char g_reg_names[MAX_REG_NAMES][96];
+static int g_reg_name_slot[MAX_REG_NAMES];
+static int g_reg_name_n = 0;
 
 static void symbol_assign_reg(Symbol *s) {
     s->reg = -1;
-    if (!s->name || g_reg_local_n <= 0) return;
+    if (!s->name || g_reg_name_n <= 0) return;
     // A pointer symbol stores its width in bytes (8). A scalar stores a slot
     // count of 1. Both can live in a register. An array or a struct cannot.
     if (s->is_array || s->is_volatile || s->is_slice) return;
     if (!s->is_pointer && s->size != 1) return;
-    for (int i = 0; i < g_reg_local_n; i++) {
-        if (!strcmp(s->name, g_reg_local_var[i])) { s->reg = i; return; }
+    for (int i = 0; i < g_reg_name_n; i++) {
+        if (!strcmp(s->name, g_reg_names[i])) { s->reg = g_reg_name_slot[i]; return; }
     }
 }
 
@@ -10134,6 +10140,8 @@ typedef struct {
     char name[96];
     int decls, uses, bad, ord;
     int lo, hi;
+    int is_param;   // defined at entry, interferes with the other live params
+    int sticky;     // own *T: the drop reads it at scope end, after the AST
 } RegCand;
 static RegCand g_reg_cand[MAX_REG_CAND];
 static int g_reg_ncand;
@@ -10196,6 +10204,10 @@ static void reg_walk(Codegen* cg, AstNode* n) {
              n->children[0]->type == AST_STRUCT_LITERAL))
             bad = 1;
         reg_note_decl(n->name, bad);
+        if (n->flags & AF_OWN) {
+            RegCand* c = reg_cand(n->name);
+            if (c) c->sticky = 1;
+        }
         reg_touch(n->name);
         return;
     }
@@ -10263,31 +10275,245 @@ static int reg_pick(int* taken, int cross_mode) {
     return best;
 }
 
+// Backward liveness for the share pass. A straight first/last tick miscompiled
+// the order book in 0.33.1: a name used in a while condition was recorded
+// before the body, so a body local reused its register. This walk follows
+// if, while, break, continue, and return. own *T stays live to the function
+// exit because the drop is not an AST use.
+typedef struct { unsigned long long w[2]; } Live;
+static Live g_cross_live;
+static Live g_sticky_live;
+static Live g_interfere[MAX_REG_CAND];
+static Live g_brk_live[16];
+static Live g_cont_live[16];
+static int g_live_nest;
+static int g_live_ok;
+static int g_cand_slot[MAX_REG_CAND];
+
+static Live live_empty(void) {
+    Live z; z.w[0] = 0; z.w[1] = 0; return z;
+}
+static Live live_or(Live a, Live b) {
+    Live r; r.w[0] = a.w[0] | b.w[0]; r.w[1] = a.w[1] | b.w[1]; return r;
+}
+static int live_eq(Live a, Live b) { return a.w[0] == b.w[0] && a.w[1] == b.w[1]; }
+static int live_has(Live a, int i) {
+    if (i < 0 || i >= MAX_REG_CAND) return 0;
+    return (a.w[i >> 6] >> (i & 63)) & 1ULL;
+}
+static Live live_setbit(Live a, int i) {
+    if (i < 0 || i >= MAX_REG_CAND) return a;
+    a.w[i >> 6] |= 1ULL << (i & 63);
+    return a;
+}
+static Live live_clrbit(Live a, int i) {
+    if (i < 0 || i >= MAX_REG_CAND) return a;
+    a.w[i >> 6] &= ~(1ULL << (i & 63));
+    return a;
+}
+static int reg_idx(const char* name) {
+    if (!name) return -1;
+    for (int i = 0; i < g_reg_ncand; i++)
+        if (!strcmp(g_reg_cand[i].name, name) && reg_eligible(&g_reg_cand[i])) return i;
+    return -1;
+}
+static void live_interfere(int idx, Live after) {
+    if (idx < 0) return;
+    after = live_clrbit(after, idx);
+    g_interfere[idx] = live_or(g_interfere[idx], after);
+    for (int i = 0; i < g_reg_ncand; i++) {
+        if (live_has(after, i)) g_interfere[i] = live_setbit(g_interfere[i], idx);
+    }
+}
+
+static Live live_expr(AstNode* n, Live out);
+static Live live_stmt(AstNode* n, Live out);
+
+static Live live_expr(AstNode* n, Live out) {
+    if (!n || !g_live_ok) return out;
+    if (n->type == AST_FUNCTION) return out;
+    if (n->type == AST_IDENT) {
+        int i = reg_idx(n->name);
+        return i >= 0 ? live_setbit(out, i) : out;
+    }
+    if (n->type == AST_CALL) {
+        g_cross_live = live_or(g_cross_live, out);
+        Live cur = out;
+        for (int i = n->child_count - 1; i >= 0; i--)
+            cur = live_expr(n->children[i], cur);
+        return cur;
+    }
+    if ((n->type == AST_BINOP || n->type == AST_COMPARE || n->type == AST_LOGICAL) &&
+        n->child_count == 2) {
+        Live r = live_expr(n->children[1], out);
+        return live_expr(n->children[0], r);
+    }
+    Live cur = out;
+    for (int i = n->child_count - 1; i >= 0; i--)
+        cur = live_expr(n->children[i], cur);
+    return cur;
+}
+
+static Live live_stmt(AstNode* n, Live out) {
+    Live cur;
+    int idx;
+    if (!n || !g_live_ok) return out;
+    if (n->type == AST_BLOCK) {
+        cur = out;
+        for (int i = n->child_count - 1; i >= 0; i--)
+            cur = live_stmt(n->children[i], cur);
+        return cur;
+    }
+    if (n->type == AST_LET || n->type == AST_ASSIGN) {
+        idx = n->name ? reg_idx(n->name) : -1;
+        if (idx >= 0) {
+            live_interfere(idx, out);
+            out = live_clrbit(out, idx);
+        }
+        cur = out;
+        for (int i = n->child_count - 1; i >= 0; i--)
+            cur = live_expr(n->children[i], cur);
+        return cur;
+    }
+    if (n->type == AST_IF) {
+        Live t = out, e = out;
+        if (n->child_count > 1) t = live_stmt(n->children[1], out);
+        if (n->child_count > 2) e = live_stmt(n->children[2], out);
+        if (n->child_count > 0) return live_expr(n->children[0], live_or(t, e));
+        return live_or(t, e);
+    }
+    if (n->type == AST_WHILE) {
+        Live header = live_empty();
+        Live body = live_empty();
+        int nest;
+        if (g_live_nest >= 16) { g_live_ok = 0; return out; }
+        nest = g_live_nest++;
+        g_brk_live[nest] = out;
+        for (int it = 0; it < MAX_REG_CAND + 2; it++) {
+            Live b = live_empty();
+            Live h, cond_out;
+            g_cont_live[nest] = header;
+            if (n->child_count > 1) b = live_stmt(n->children[1], header);
+            cond_out = live_or(b, out);
+            h = n->child_count > 0 ? live_expr(n->children[0], cond_out) : cond_out;
+            if (it > 0 && live_eq(h, header) && live_eq(b, body)) {
+                header = h;
+                break;
+            }
+            header = h;
+            body = b;
+            if (it == MAX_REG_CAND + 1) g_live_ok = 0;
+        }
+        g_live_nest--;
+        return header;
+    }
+    if (n->type == AST_RETURN) {
+        cur = g_sticky_live;
+        if (n->child_count > 0) cur = live_expr(n->children[0], g_sticky_live);
+        return cur;
+    }
+    if (n->type == AST_BREAK)
+        return g_live_nest > 0 ? g_brk_live[g_live_nest - 1] : out;
+    if (n->type == AST_CONTINUE)
+        return g_live_nest > 0 ? g_cont_live[g_live_nest - 1] : out;
+    if (n->type == AST_CALL || n->type == AST_FIELD_ASSIGN || n->type == AST_ARRAY_ASSIGN)
+        return live_expr(n, out);
+    // Unknown statement. Do not share in this function.
+    g_live_ok = 0;
+    return out;
+}
+
+static void reg_bind(int cand, int slot) {
+    if (cand < 0 || slot < 0 || slot >= MAX_REG_LOCAL) return;
+    if (g_reg_name_n >= MAX_REG_NAMES) return;
+    g_cand_slot[cand] = slot;
+    snprintf(g_reg_names[g_reg_name_n], sizeof g_reg_names[0], "%s", g_reg_cand[cand].name);
+    g_reg_name_slot[g_reg_name_n++] = slot;
+    if (!g_reg_local_var[slot][0])
+        snprintf(g_reg_local_var[slot], sizeof g_reg_local_var[0], "%s", g_reg_cand[cand].name);
+}
+
+// The first pass is the 0.33.1 plan: one name per register, callee-saved
+// first. A second pass, only in a function that calls, puts a name that
+// stayed on the stack into a register that already has a name, when
+// liveness says the two are never live together. It does not open a new
+// callee-saved slot, so the prologue of a function that cannot share stays
+// the same. r10 and r11 still refuse a name that is live across a call.
+static void reg_share_holes(AstNode* body) {
+    Live entry;
+    int taken[MAX_REG_CAND];
+    int i;
+    if (!g_live_ok || g_ncall_tick <= 0 || g_call_overflow || g_reg_asm) return;
+    g_cross_live = live_empty();
+    g_sticky_live = live_empty();
+    g_live_nest = 0;
+    for (i = 0; i < g_reg_ncand; i++) {
+        g_interfere[i] = live_empty();
+        if (g_reg_cand[i].sticky && reg_eligible(&g_reg_cand[i]))
+            g_sticky_live = live_setbit(g_sticky_live, i);
+    }
+    entry = live_stmt(body, g_sticky_live);
+    if (!g_live_ok) return;
+    for (i = 0; i < g_reg_ncand; i++) {
+        if (!g_reg_cand[i].is_param || !live_has(entry, i)) continue;
+        live_interfere(i, entry);
+    }
+    memset(taken, 0, sizeof taken);
+    for (i = 0; i < g_reg_ncand; i++)
+        if (g_cand_slot[i] >= 0) taken[i] = 1;
+    for (;;) {
+        int best = reg_pick(taken, -1);
+        int cr, slot;
+        if (best < 0) break;
+        taken[best] = 1;
+        cr = live_has(g_cross_live, best);
+        for (slot = 0; slot < g_reg_local_n; slot++) {
+            int ok = 1, j;
+            if (slot >= g_reg_callee_n && slot < MAX_REG_CALLEE) continue;
+            if (slot >= MAX_REG_CALLEE && cr) continue;
+            if (!g_reg_local_var[slot][0]) continue;
+            for (j = 0; j < g_reg_ncand; j++) {
+                if (g_cand_slot[j] != slot) continue;
+                if (live_has(g_interfere[best], j)) { ok = 0; break; }
+            }
+            if (!ok) continue;
+            reg_bind(best, slot);
+            break;
+        }
+    }
+}
+
 // Callee-saved r12-r15 first, preferring names that cross a call, then any
 // other name. r10 and r11 only for names that still do not cross a call.
 // A fifth crosser stays on the stack: there is no spill around the call.
 // asm() disables the whole plan. Too many calls to remember is treated as
-// every name crossing. Sharing one register across non-overlapping ranges
-// was tried and miscompiled the order book: a name used in a loop condition
-// stays live through the body, and a straight walk records that use before
-// the body.
+// every name crossing.
 static void plan_reg_locals(Codegen* cg, AstNode* fn) {
     g_reg_local_n = 0;
     g_reg_callee_n = 0;
+    g_reg_name_n = 0;
     g_reg_ncand = 0;
     g_reg_asm = 0;
     g_tick = 0;
     g_ncall_tick = 0;
     g_call_overflow = 0;
+    g_live_ok = 1;
     for (int i = 0; i < MAX_REG_LOCAL; i++) g_reg_local_var[i][0] = '\0';
+    for (int i = 0; i < MAX_REG_CAND; i++) g_cand_slot[i] = -1;
     if (!fn || fn->child_count < 1) return;
     int pc = fn->child_count - 1;
     for (int i = 0; i < pc; i++) {
         AstNode* par = fn->children[i];
+        RegCand* c;
         if (!par || !par->name) continue;
         int bad = (par->flags & AF_VOLATILE) != 0;
         if (!(par->is_pointer & 1) && par->value && typetab_lookup(cg->types, par->value)) bad = 1;
         reg_note_decl(par->name, bad);
+        c = reg_cand(par->name);
+        if (c) {
+            c->is_param = 1;
+            if (par->flags & AF_OWN) c->sticky = 1;
+        }
         reg_touch(par->name);
     }
     reg_walk(cg, fn->children[pc]);
@@ -10301,7 +10527,7 @@ static void plan_reg_locals(Codegen* cg, AstNode* fn) {
             int best = reg_pick(taken, mode);
             if (best < 0) break;
             taken[best] = 1;
-            snprintf(g_reg_local_var[slot], sizeof g_reg_local_var[0], "%s", g_reg_cand[best].name);
+            reg_bind(best, slot);
             slot++;
         }
     }
@@ -10311,10 +10537,11 @@ static void plan_reg_locals(Codegen* cg, AstNode* fn) {
         int best = reg_pick(taken, 0);
         if (best < 0) break;
         taken[best] = 1;
-        snprintf(g_reg_local_var[MAX_REG_CALLEE + extra], sizeof g_reg_local_var[0], "%s", g_reg_cand[best].name);
+        reg_bind(best, MAX_REG_CALLEE + extra);
         extra++;
     }
     g_reg_local_n = extra ? MAX_REG_CALLEE + extra : g_reg_callee_n;
+    reg_share_holes(fn->children[pc]);
 }
 
 static void emit_reg_restore(Codegen* cg) {
@@ -10534,8 +10761,8 @@ static char* g_seen_labels[128];
 static int g_nseen_labels;
 static int regplan_has(const char* name) {
     if (!name) return 0;
-    for (int i = 0; i < g_reg_local_n; i++)
-        if (g_reg_local_var[i][0] && !strcmp(g_reg_local_var[i], name)) return 1;
+    for (int i = 0; i < g_reg_name_n; i++)
+        if (!strcmp(g_reg_names[i], name)) return 1;
     return 0;
 }
 
@@ -13494,6 +13721,7 @@ static void stride_function(Codegen* cg, AstNode* fn) {
 void gen_func(Codegen* cg, AstNode* n) {
     g_reg_local_n = 0;
     g_reg_callee_n = 0;
+    g_reg_name_n = 0;
     g_slim = 0;
     g_slim_pad = 0;
     g_slim_nsave = 0;
@@ -13836,6 +14064,7 @@ void gen_func(Codegen* cg, AstNode* n) {
     cold_flush(cg);
     g_reg_local_n = 0;
     g_reg_callee_n = 0;
+    g_reg_name_n = 0;
     g_slim = 0;
     g_expr_tmp = NULL;
     g_proven_idx = NULL;
