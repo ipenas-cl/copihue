@@ -925,6 +925,10 @@ static const char* g_nonneg_reg;
 // The value just loaded for a compare is still in rax. The next identical
 // index load in the taken body reuses it. Compiler-time only.
 static int g_fwd_ok;
+// While a loop is open, a global array's address lives in this register and
+// indexed loads use it instead of a disp32(index). NULL outside that loop.
+static const char* g_garr_base;
+static char g_garr_name[64];
 static int g_fwd_hold;
 static char g_fwd_arr[96];
 static char g_fwd_idx[96];
@@ -9506,7 +9510,9 @@ void gen_array_index(Codegen* cg, AstNode* n) {
 
             if (o2_hosted() && scale_ok(elem_size)) {
                 char mem[128];
-                snprintf(mem, sizeof mem, "%s+%s*%d", gvar->name, idxreg ? idxreg : "rax", elem_size);
+                const char* base = gvar->name;
+                if (g_garr_base && gvar->name && !strcmp(gvar->name, g_garr_name)) base = g_garr_base;
+                snprintf(mem, sizeof mem, "%s+%s*%d", base, idxreg ? idxreg : "rax", elem_size);
                 emit_scaled_load(cg, mem, elem_size, is_struct_elem, want ? want : "rax");
                 if (want) g_index_hit = 1;
             } else if (o2_hosted() && is_struct_elem) {
@@ -12783,7 +12789,9 @@ void gen_expr(Codegen* cg, AstNode* n) {
                 if (o2_hosted() && scale_ok(elem_size)) {
                     emit(cg, "    pop rbx\n");
                     char mem[128];
-                    snprintf(mem, sizeof mem, "%s+rax*%d", gvar->name, elem_size);
+                    const char* base = gvar->name;
+                    if (g_garr_base && gvar->name && !strcmp(gvar->name, g_garr_name)) base = g_garr_base;
+                    snprintf(mem, sizeof mem, "%s+rax*%d", base, elem_size);
                     emit_scaled_store(cg, mem, elem_size, "rbx");
                 } else {
                     if (elem_size > 1) {
@@ -15375,6 +15383,117 @@ static int pause_only_body(AstNode* n) {
         n->child_count == 0;
 }
 
+// Nested control in a loop arm. A straight assign or a call is fine.
+// Names of global arrays indexed under n. *nfound is 0, 1, or 2 (2 means more than one).
+static void tally_garr(Codegen* cg, AstNode* n, char* name, int* nfound) {
+    if (!n || !nfound || *nfound > 1) return;
+    if (n->type == AST_INDEX && n->child_count >= 1 && n->children[0] &&
+        n->children[0]->type == AST_IDENT && n->children[0]->name && cg->global_symtab) {
+        GlobalVar* g = global_symtab_lookup(cg->global_symtab, n->children[0]->name);
+        if (g && g->is_array && !g->is_volatile) {
+            if (*nfound == 0) {
+                snprintf(name, 64, "%s", n->children[0]->name);
+                *nfound = 1;
+            } else if (strcmp(name, n->children[0]->name)) {
+                *nfound = 2;
+            }
+        }
+    }
+    for (int i = 0; i < n->child_count; i++)
+        tally_garr(cg, n->children[i], name, nfound);
+}
+
+static int node_has_ctrl(AstNode* n) {
+    if (!n) return 0;
+    if (n->type == AST_IF || n->type == AST_WHILE || n->type == AST_MATCH ||
+        n->type == AST_BREAK || n->type == AST_CONTINUE)
+        return 1;
+    for (int i = 0; i < n->child_count; i++)
+        if (node_has_ctrl(n->children[i])) return 1;
+    return 0;
+}
+
+// `header; if (x == k) { A } else { B }; tail` inside a while body.
+// The equal arm is the one a direct compare branches to. The not-equal arm
+// falls through, so that path has one taken branch (the jump back) instead
+// of a taken conditional plus the jump back. A nested if, a while, a match,
+// a break, or a continue stays on the ordinary layout. `&&` / `||` and a
+// compare that is not a direct branch stay there too.
+static int eq_fall_if(Codegen* cg, AstNode* body, int* if_at) {
+    int seen = -1;
+    AstNode* iff;
+    AstNode* cond;
+    if (!o2_hosted() || !cg || !cg->symtab || !body || body->type != AST_BLOCK) return 0;
+    for (int i = 0; i < body->child_count; i++) {
+        AstNode* s = body->children[i];
+        if (!s || s->type != AST_IF) continue;
+        if (seen >= 0) return 0;
+        seen = i;
+    }
+    if (seen < 0) return 0;
+    iff = body->children[seen];
+    if ((iff->flags & AF_CARRY) || iff->child_count < 3 || !iff->children[2]) return 0;
+    cond = iff->children[0];
+    if (!cond || cond->type != AST_COMPARE || !cond->op || strcmp(cond->op, "==")) return 0;
+    if (!can_branch_cond(cg, cond)) return 0;
+    if (node_has_ctrl(iff->children[1]) || node_has_ctrl(iff->children[2])) return 0;
+    for (int i = 0; i < body->child_count; i++) {
+        if (i == seen) continue;
+        if (node_has_ctrl(body->children[i])) return 0;
+    }
+    *if_at = seen;
+    return 1;
+}
+
+static void emit_eq_stmt(Codegen* cg, AstNode* n) {
+    if (!try_hosted_rewrite(cg, n)) gen_stmt(cg, n);
+}
+
+// Body scope of a while that matched eq_fall_if. `start_lab` is the loop test.
+// Drops of names declared in the body run on both arms, once per iteration,
+// the same place the ordinary block epilogue runs them.
+static void emit_eq_fall_body(Codegen* cg, AstNode* body, int if_at, int start_lab) {
+    AstNode* iff = body->children[if_at];
+    int then_lab = new_label(cg);
+    int saved_unsafe = g_unsafe;
+    int base;
+    if (body->flags & AF_UNSAFE) g_unsafe++;
+    symtab_enter(cg->symtab);
+    base = cg->symtab->scope_base[cg->symtab->scope_depth - 1];
+    for (int i = 0; i < if_at; i++) {
+        g_prev2_stmt = i > 1 ? body->children[i - 2] : NULL;
+        g_prev_stmt = i > 0 ? body->children[i - 1] : NULL;
+        emit_eq_stmt(cg, body->children[i]);
+    }
+    g_fwd_ok = 0;
+    emit_cond_succeed(cg, iff->children[0], then_lab);
+    g_nonneg_reg = NULL;
+    g_fwd_hold = 1;
+    g_prev_stmt = if_at > 0 ? body->children[if_at - 1] : NULL;
+    gen_stmt(cg, iff->children[2]);
+    for (int i = if_at + 1; i < body->child_count; i++) {
+        g_prev2_stmt = i > if_at + 1 ? body->children[i - 2] : iff;
+        g_prev_stmt = i == if_at + 1 ? iff : body->children[i - 1];
+        gen_stmt(cg, body->children[i]);
+    }
+    emit_drops(cg, base, cg->symtab->count);
+    emit(cg, "    jmp .L%d\n", start_lab);
+    emit(cg, ".L%d:\n", then_lab);
+    g_prev_stmt = if_at > 0 ? body->children[if_at - 1] : NULL;
+    gen_stmt(cg, iff->children[1]);
+    for (int i = if_at + 1; i < body->child_count; i++) {
+        g_prev2_stmt = i > if_at + 1 ? body->children[i - 2] : iff;
+        g_prev_stmt = i == if_at + 1 ? iff : body->children[i - 1];
+        gen_stmt(cg, body->children[i]);
+    }
+    emit_drops(cg, base, cg->symtab->count);
+    emit(cg, "    jmp .L%d\n", start_lab);
+    g_prev_stmt = NULL;
+    g_prev2_stmt = NULL;
+    symtab_leave(cg->symtab);
+    g_unsafe = saved_unsafe;
+}
+
 static int cond_is_not(AstNode* n) {
     return n && n->type == AST_UNARY && n->op && n->op[0] == '!' && !n->op[1] &&
         n->child_count > 0;
@@ -15834,6 +15953,32 @@ void gen_stmt(Codegen* cg, AstNode* n) {
         int start_lab = new_label(cg);
         int end_lab = new_label(cg);
         int cont_lab = new_label(cg);
+        int if_at = -1;
+        int hoist = 0;
+        char gname[64];
+        const char* saved_base = g_garr_base;
+        char saved_name[64];
+        snprintf(saved_name, sizeof saved_name, "%s", g_garr_name);
+        // Fall-through of the not-equal arm is profitable when the load is
+        // base+index. A global `buf[i]` is disp32(index) unless its address
+        // is in a register. Two globals, a call, or asm() leave the loop alone.
+        if (!g_reg_asm && n->child_count >= 2 &&
+            !node_has_call(n->children[0]) && !node_has_call(n->children[1]) &&
+            eq_fall_if(cg, n->children[1], &if_at)) {
+            int nf = 0;
+            tally_garr(cg, n->children[1], gname, &nf);
+            if (nf == 1) hoist = 1;
+            else if (nf != 0) if_at = -1;
+        } else {
+            if_at = -1;
+        }
+        if (hoist) emit(cg, "    lea r8, [%s]\n", gname);
+        // The back edge must start a 32-byte chunk. On this Xeon the same
+        // bytes are ~21 ms when the test shares its chunk with the lea, and
+        // ~13.7 ms when the label is at or past the next boundary. NASM
+        // `align 32` is that boundary. It is not the 0.37.2 align of every
+        // function and every while.
+        if (if_at >= 0) emit(cg, "align 32\n");
         emit(cg, ".L%d:\n", start_lab);
         int branched = 0;
         if (!legacy_bits() && o2_hosted() && can_branch_cond(cg, n->children[0])) {
@@ -15875,7 +16020,16 @@ void gen_stmt(Codegen* cg, AstNode* n) {
             }
         }
         if (branched) g_fwd_hold = 1;
-        gen_stmt(cg, n->children[1]);
+        if (hoist) {
+            g_garr_base = "r8";
+            snprintf(g_garr_name, sizeof g_garr_name, "%s", gname);
+        }
+        if (if_at >= 0)
+            emit_eq_fall_body(cg, n->children[1], if_at, start_lab);
+        else
+            gen_stmt(cg, n->children[1]);
+        g_garr_base = saved_base;
+        snprintf(g_garr_name, sizeof g_garr_name, "%s", saved_name);
         g_for_base = save_fb;
         g_for_idx = save_fi;
         g_for_lim = save_fl;
