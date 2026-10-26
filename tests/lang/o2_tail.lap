@@ -89,11 +89,11 @@ fn main() -> i64 {
     println("");
     print_int(pair(3, 10));
     println("");
-    print_int(wrap2(1));
+    print_int(wrap2(1) == 9223372036854775807);
     println("");
-    print_int(wrap2(2));
+    print_int(wrap2(2) == -2);
     println("");
-    print_int(wrap2(3));
+    print_int(wrap2(3) == 9223372036854775805);
     println("");
     print_int(down(3));
     println("");
