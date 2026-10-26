@@ -1,0 +1,139 @@
+enum Option { None, Some(i64) }
+enum Pair { Empty, Both(i64, i32) }
+
+struct Box { o: Option, n: i64 }
+
+let g: Option;
+
+fn make(n: i64) -> Option {
+    return Option::Some(n);
+}
+
+fn make5(a: i64, b: i64, c: i64, d: i64, e: i64) -> Option {
+    return Option::Some(a + b + c + d + e);
+}
+
+fn make6(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64) -> Option {
+    return Option::Some(a + f);
+}
+
+fn id(o: Option) -> Option {
+    return o;
+}
+
+fn give() -> Option {
+    return Option::Some(4);
+}
+
+fn none() -> Option {
+    return Option::None;
+}
+
+fn only_wild(o: Option) -> i64 {
+    return match o {
+        _ => 8
+    };
+}
+
+fn miss_wild(o: Option) -> i64 {
+    return match o {
+        Some(n) => n,
+        _ => 2
+    };
+}
+
+fn from_box(b: Box) -> Option {
+    return b.o;
+}
+
+fn clobber(o: Option) -> i64 {
+    let old = match o {
+        None => 0,
+        Some(n) => n
+    };
+    o = Option::Some(9);
+    return old;
+}
+
+fn take(o: Option) -> i64 {
+    return match o {
+        Option::None => 0,
+        Some(n) => n,
+        _ => 7
+    };
+}
+
+fn pick(o: Option) -> i64 {
+    return match o {
+        None => 0,
+        Some(n) => {
+            let k = 1;
+            n + k;
+        }
+    };
+}
+
+fn main() -> i64 {
+    print_int(take(make(4)));
+    println("");
+    print_int(take(make5(1, 2, 3, 4, 5)));
+    println("");
+    print_int(take(make6(1, 2, 3, 4, 5, 9)));
+    println("");
+    let o = make(4);
+    print_int(take(o));
+    println("");
+    let kept = Option::Some(3);
+    print_int(clobber(kept));
+    println("");
+    print_int(take(kept));
+    println("");
+    print_int(take(id(kept)));
+    println("");
+    print_int(take(give()));
+    println("");
+    print_int(take(none()));
+    println("");
+    print_int(only_wild(kept));
+    println("");
+    print_int(miss_wild(Option::None));
+    println("");
+    print_int(miss_wild(Option::Some(6)));
+    println("");
+    print_int(pick(Option::Some(6)));
+    println("");
+    print_int(pick(Option::None));
+    println("");
+    print_int(take(g));
+    println("");
+    g = Option::Some(11);
+    print_int(take(g));
+    println("");
+    let b: Box;
+    b.o = Option::Some(12);
+    b.n = 13;
+    print_int(match b.o { None => 0, Some(n) => n });
+    println("");
+    let copied = b.o;
+    print_int(take(copied));
+    println("");
+    print_int(take(from_box(b)));
+    println("");
+    print_int(b.n);
+    println("");
+    let p: *Box = &b;
+    print_int(match p->o { None => 0, Some(n) => n });
+    println("");
+    p->o = Option::None;
+    print_int(match b.o { None => 1, Some(n) => n });
+    println("");
+    let both = Pair::Both(10, 4);
+    let back = id_pair(both);
+    print_int(match back { Empty => 0, Both(x, y) => x + y });
+    println("");
+    return 0;
+}
+
+fn id_pair(p: Pair) -> Pair {
+    return p;
+}

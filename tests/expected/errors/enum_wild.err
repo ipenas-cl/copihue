@@ -1,0 +1,19 @@
+tests/errors/enum_wild.lap:6:9: error: '_' has no fields
+      6 |         _(x) => x,
+        |         ^
+tests/errors/enum_wild.lap:5:13: error: match does not cover 'Some'
+      5 |     let a = match o {
+        |             ^
+tests/errors/enum_wild.lap:11:9: error: arm after '_' is unreachable
+     11 |         Some(n) => n
+        |         ^
+tests/errors/enum_wild.lap:15:9: error: '_' is already matched
+     15 |         _ => 2
+        |         ^
+tests/errors/enum_wild.lap:18:17: error: '_' is not a variant
+     18 |         Option::_ => 1
+        |                 ^
+tests/errors/enum_wild.lap:17:13: error: match does not cover 'None', 'Some'
+     17 |     let d = match o {
+        |             ^
+6 errors, compilation failed

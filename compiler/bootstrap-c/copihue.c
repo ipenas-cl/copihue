@@ -16,7 +16,7 @@
 
 // ==== NAMING (single place to change when the language is renamed) ====
 #define LANG_NAME     "Copihue"
-#define LANG_VERSION  "0.38.2"
+#define LANG_VERSION  "0.39.1"
 #define COMPILER_BIN  "copihue"
 #define SRC_EXT       ".lap"   /* Lapageria rosea, the copihue */
 #define OLD_SRC_EXT   ".cph"   /* v0.18.x extension, still accepted with a warning */
@@ -633,6 +633,13 @@ static int type_layout(TypeTable* tt, const char* name, int is_pointer, int* ali
             return st->size;
         }
     }
+    if (name) {
+        EnumType* en = enum_lookup(name);
+        if (en) {
+            if (align_out) *align_out = 8;
+            return en->size > 0 ? en->size : 8;
+        }
+    }
     return -1;
 }
 
@@ -664,10 +671,8 @@ void typetab_add_field(TypeTable* tt, char* struct_name, char* field_name, char*
         else
             snprintf(shown, sizeof shown, "%s", field_type ? field_type : "?");
     }
-    if (!is_pointer && field_type && field_type[0] != '*' && enum_lookup(field_type)) {
-        diag_error(line, col, array_len
-                   ? "an enum cannot be an array element"
-                   : "an enum cannot be a struct field");
+    if (!is_pointer && array_len && field_type && field_type[0] != '*' && enum_lookup(field_type)) {
+        diag_error(line, col, "an enum cannot be an array element");
         fsize = 0;
         al = 1;
         stored_len = 0;
@@ -863,6 +868,23 @@ static const char *local_reg(Symbol *s) {
 static int o2_hosted(void) {
     // bits 16/32 keep the eax/ebx stream. These opts are 64-bit hosted only.
     return optimization_level >= 2 && !g_freestanding && !legacy_bits();
+}
+
+// Hidden return pointer for an enum. 0 means this function returns a scalar.
+// The caller passes the destination in rdi. Real parameters start at rsi.
+static int g_eret_off = 0;
+static int g_enum_dst_kind = 0; // 0 alloc, 1 [rbp+off], 2 saved rdi, 3 symbol, 4 pointer slot
+static int g_enum_dst_off = 0;
+static int g_enum_dst_extra = 0;
+static char g_enum_dst_name[96];
+
+// Hosted, freestanding, and flat 64-bit functions. Naked, bits 16/32,
+// interrupt, and syscall keep the old rejection.
+static int enum_ret_allowed(AstNode* fn) {
+    if (!fn || (fn->is_pointer & 1) || !fn->value) return 0;
+    if (fn->bits == 16 || fn->bits == 32) return 0;
+    if (fn->flags & (AF_NAKED | AF_INTERRUPT | AF_SYSCALL)) return 0;
+    return enum_lookup(fn->value) != NULL;
 }
 
 // x86 scale is only 1, 2, 4 or 8. A larger power of two is shl at hosted
@@ -1717,6 +1739,8 @@ static int match_expr_ahead(Parser* p) {
     return 0;
 }
 
+AstNode* parse_block(Parser* p);
+
 static AstNode* parse_match(Parser* p) {
     Tok kw = advance_tok(p);
     AstNode* m = ast_new(AST_MATCH);
@@ -1783,7 +1807,15 @@ static AstNode* parse_match(Parser* p) {
             advance_tok(p);
             advance_tok(p);
         }
-        ast_add(arm, parse_expr(p));
+        if (check_tok(p, T_LBRACE)) {
+            Tok br = peek_tok(p);
+            AstNode* blk = parse_block(p);
+            blk->line = br.line;
+            blk->col = br.col;
+            ast_add(arm, blk);
+        } else {
+            ast_add(arm, parse_expr(p));
+        }
         ast_add(m, arm);
         if (!check_tok(p, T_RBRACE)) expect(p, T_COMMA);
     }
@@ -4448,6 +4480,38 @@ static VTy ty_binop(Codegen* cg, AstNode* n) {
     return ty_int_result(L, R, shift);
 }
 
+// A match-arm block yields when its last child is an expression.
+// A let, an assignment, or an empty block does not.
+static int arm_is_expr(AstNode* n) {
+    if (!n) return 0;
+    switch (n->type) {
+    case AST_CALL:
+    case AST_IDENT:
+    case AST_NUMBER:
+    case AST_BINOP:
+    case AST_COMPARE:
+    case AST_STRING:
+    case AST_UNARY:
+    case AST_DEREF:
+    case AST_INDEX:
+    case AST_FIELD_ACCESS:
+    case AST_LOGICAL:
+    case AST_CAST:
+    case AST_MATCH:
+    case AST_ADDR_OF:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+static AstNode* block_value(AstNode* n) {
+    AstNode* last;
+    if (!n || n->type != AST_BLOCK || n->child_count < 1) return NULL;
+    last = n->children[n->child_count - 1];
+    return arm_is_expr(last) ? last : NULL;
+}
+
 static VTy expr_ty(Codegen* cg, AstNode* n) {
     if (!n) return ty_unk();
     if (n->line) { g_use_line = n->line; g_use_col = n->col; }
@@ -4525,6 +4589,10 @@ static VTy expr_ty(Codegen* cg, AstNode* n) {
     if (n->type == AST_STRUCT_LITERAL && n->struct_type) return ty_from_spelled(cg, n->struct_type);
     if (n->type == AST_MATCH) return match_result_ty(cg, n);
     if (n->type == AST_ASSIGN && n->child_count > 0) return expr_ty(cg, n->children[0]);
+    if (n->type == AST_BLOCK) {
+        AstNode* v = block_value(n);
+        return v ? expr_ty(cg, v) : ty_unk();
+    }
     return ty_unk();
 }
 
@@ -4618,6 +4686,29 @@ static int ptr_compat(const char* dst, const char* src) {
     return 1;
 }
 
+// Local, global, or struct field. No code. A call stays unknown here.
+static EnumType* scrutinee_enum(Codegen* cg, AstNode* scr) {
+    if (!scr || !cg) return NULL;
+    if (scr->type == AST_IDENT && !scr->qual && scr->name) {
+        if (cg->symtab) {
+            EnumType* e = symbol_enum(symtab_lookup_symbol(cg->symtab, scr->name));
+            if (e) return e;
+        }
+        if (cg->global_symtab) {
+            GlobalVar* g = global_symtab_lookup(cg->global_symtab, scr->name);
+            if (g && !g->is_pointer && !g->is_array && !g->is_slice && g->type_name)
+                return enum_lookup(g->type_name);
+        }
+        return NULL;
+    }
+    if (scr->type == AST_FIELD_ACCESS && scr->name && scr->child_count >= 1) {
+        StructField* f = access_field(cg, scr);
+        if (f && !f->is_pointer && f->type_name && f->type_name[0] != '*')
+            return enum_lookup(f->type_name);
+    }
+    return NULL;
+}
+
 // Result type of a match. No diagnostic: gen_match is the error site.
 // Integer arms widen to the wider width, so the type does not depend on order.
 static VTy match_result_ty(Codegen* cg, AstNode* n) {
@@ -4625,21 +4716,28 @@ static VTy match_result_ty(Codegen* cg, AstNode* n) {
     VTy acc;
     int have = 0;
     int i;
+    int wild = 0;
     acc = ty_unk();
     if (!n || n->child_count < 2) return acc;
-    if (n->children[0] && n->children[0]->type == AST_IDENT && !n->children[0]->qual &&
-        n->children[0]->name && cg && cg->symtab) {
-        Symbol* s = symtab_lookup_symbol(cg->symtab, n->children[0]->name);
-        e = symbol_enum(s);
-    }
+    e = scrutinee_enum(cg, n->children[0]);
     for (i = 1; i < n->child_count; i++) {
         AstNode* arm = n->children[i];
         Variant* v;
         AstNode* body;
         VTy t;
         int saved, b;
+        int is_wild;
         if (!arm) continue;
-        v = (e && arm->name) ? variant_by_name(e, arm->name) : NULL;
+        is_wild = arm->name && !strcmp(arm->name, "_") && !arm->struct_type;
+        if (is_wild) {
+            if (wild) continue;
+            wild = 1;
+            v = NULL;
+        } else if (wild) {
+            continue;
+        } else {
+            v = (e && arm->name) ? variant_by_name(e, arm->name) : NULL;
+        }
         saved = g_nbindty;
         if (v && arm->array_size == v->field_count) {
             for (b = 0; b < arm->array_size && g_nbindty < ENUM_BIND_MAX; b++) {
@@ -4997,11 +5095,49 @@ static int is_struct_value_arg(Codegen* cg, AstNode* a) {
            typetab_lookup(cg->types, asym->type_name) != NULL;
 }
 
-// A constructor or an enum local is passed as an address, like a struct.
+static EnumType* call_return_enum(Codegen* cg, AstNode* call) {
+    AstNode* fn;
+    if (!call || call->type != AST_CALL || !call->name || !cg) return NULL;
+    if (call->qual && enum_lookup(call->qual)) return NULL;
+    fn = find_func(cg, call->name);
+    if (!fn || !enum_ret_allowed(fn)) return NULL;
+    return enum_lookup(fn->value);
+}
+
+static int call_is_indirect(Codegen* cg, AstNode* n) {
+    Symbol* loc;
+    GlobalVar* gv;
+    AstNode* fn;
+    if (!n || n->type != AST_CALL || !n->name || !cg) return 0;
+    if (n->qual && enum_lookup(n->qual)) return 0;
+    fn = find_func(cg, n->name);
+    if (fn) return 0;
+    loc = (!n->qual && cg->symtab) ? symtab_lookup_symbol(cg->symtab, n->name) : NULL;
+    gv = (!loc && cg->global_symtab) ? global_symtab_lookup(cg->global_symtab, n->name) : NULL;
+    return (loc || gv) ? 1 : 0;
+}
+
+// A constructor, an enum local, a global, a field, or a call that returns one.
+// The value is the address of the bytes. The callee copies.
 static int enum_passed_by_addr(Codegen* cg, AstNode* a) {
+    if (!a || !cg) return 0;
     if (ctor_enum_name(a, NULL, NULL)) return 1;
-    if (a && a->type == AST_IDENT && !a->qual && a->name && cg && cg->symtab)
-        return symbol_enum(symtab_lookup_symbol(cg->symtab, a->name)) != NULL;
+    if (call_return_enum(cg, a)) return 1;
+    if (a->type == AST_IDENT && !a->qual && a->name) {
+        if (cg->symtab && symbol_enum(symtab_lookup_symbol(cg->symtab, a->name))) return 1;
+        if (cg->global_symtab) {
+            GlobalVar* g = global_symtab_lookup(cg->global_symtab, a->name);
+            if (g && !g->is_pointer && !g->is_array && !g->is_slice && g->type_name &&
+                enum_lookup(g->type_name))
+                return 1;
+        }
+    }
+    if (a->type == AST_FIELD_ACCESS) {
+        StructField* f = access_field(cg, a);
+        if (f && !f->is_pointer && f->type_name && f->type_name[0] != '*' &&
+            enum_lookup(f->type_name))
+            return 1;
+    }
     return 0;
 }
 
@@ -5124,6 +5260,95 @@ static void release_moved_arg(Codegen* cg, AstNode* call, int i, int indirect) {
     else emit(cg, "    mov qword [rbp%d], 0\n", s->offset);
 }
 
+static void emit_sret_rdi(Codegen* cg, int kind, int off, int extra, const char* name) {
+    if (kind == 2) emit(cg, "    mov rdi, [rbp%+d]\n", g_eret_off);
+    else if (kind == 3) {
+        if (extra) emit(cg, "    lea rdi, [%s%+d]\n", name, extra);
+        else emit(cg, "    lea rdi, [%s]\n", name);
+    } else if (kind == 4) {
+        emit(cg, "    mov rdi, [rbp%+d]\n", off);
+        if (extra) emit(cg, "    add rdi, %d\n", extra);
+    } else emit(cg, "    lea rdi, [rbp%+d]\n", off);
+}
+
+static void emit_sret_rax(Codegen* cg, int kind, int off, int extra, const char* name) {
+    if (kind == 2) {
+        emit(cg, "    mov rax, [rbp%+d]\n", g_eret_off);
+        return;
+    }
+    if (kind == 4) {
+        emit(cg, "    mov rax, [rbp%+d]\n", off);
+        if (extra) emit(cg, "    add rax, %d\n", extra);
+        return;
+    }
+    if (kind == 3) {
+        if (extra) emit(cg, "    lea rax, [%s%+d]\n", name, extra);
+        else emit(cg, "    lea rax, [%s]\n", name);
+        return;
+    }
+    emit(cg, "    lea rax, [rbp%+d]\n", off);
+}
+
+// rdi is the caller's slot. The first five real arguments use rsi..r9.
+// The sixth is the first stack slot. Nested calls allocate their own slot:
+// the destination is cleared before arguments run.
+static void gen_sret_call(Codegen* cg, AstNode* n, EnumType* rete) {
+    static const char* sregs[] = {"rsi", "rdx", "rcx", "r8", "r9"};
+    int argc = n ? n->child_count : 0;
+    int kind = g_enum_dst_kind;
+    int off = g_enum_dst_off;
+    int extra = g_enum_dst_extra;
+    char name[96];
+    int i;
+    snprintf(name, sizeof name, "%s", g_enum_dst_name);
+    g_enum_dst_kind = 0;
+    g_enum_dst_name[0] = 0;
+    if (argc > 16) argc = 16;
+    if (kind == 0) {
+        int sz = rete && rete->size > 0 ? rete->size : 8;
+        if (!cg || !cg->symtab) {
+            emit(cg, "    xor rax, rax\n");
+            return;
+        }
+        cg->symtab->stack_size += sz;
+        off = -cg->symtab->stack_size;
+        kind = 1;
+    }
+    if (argc <= 5) {
+        for (i = 0; i < argc; i++) {
+            gen_one_arg(cg, n->children[i]);
+            emit(cg, "    push rax\n");
+            release_moved_arg(cg, n, i, 0);
+        }
+        for (i = argc - 1; i >= 0; i--)
+            emit(cg, "    pop %s\n", sregs[i]);
+        emit_sret_rdi(cg, kind, off, extra, name);
+        emit(cg, "    call %s\n", call_nasm(cg, n));
+        emit_sret_rax(cg, kind, off, extra, name);
+        return;
+    }
+    emit(cg, "    sub rsp, %d\n", argc * 8);
+    for (i = 0; i < argc; i++) {
+        gen_one_arg(cg, n->children[i]);
+        emit(cg, "    mov [rsp+%d], rax\n", i * 8);
+        release_moved_arg(cg, n, i, 0);
+    }
+    for (i = 0; i < 5 && i < argc; i++)
+        emit(cg, "    mov %s, [rsp+%d]\n", sregs[i], i * 8);
+    {
+        int stack_args = argc - 5;
+        for (i = 5; i < argc; i++) {
+            emit(cg, "    mov rax, [rsp+%d]\n", i * 8);
+            emit(cg, "    mov [rsp+%d], rax\n", (i - 5) * 8);
+        }
+        emit(cg, "    add rsp, %d\n", 5 * 8);
+        emit_sret_rdi(cg, kind, off, extra, name);
+        emit(cg, "    call %s\n", call_nasm(cg, n));
+        if (stack_args) emit(cg, "    add rsp, %d\n", stack_args * 8);
+    }
+    emit_sret_rax(cg, kind, off, extra, name);
+}
+
 static void gen_user_call(Codegen* cg, AstNode* n, int indirect) {
     if (legacy_bits()) {
         int mode = g_fn_bits;
@@ -5206,6 +5431,19 @@ static void gen_user_call(Codegen* cg, AstNode* n, int indirect) {
             if (fn && (fn->flags & AF_OWN) && g_stmt_expr == n)
                 diag_error(n->line, n->col, "an owning pointer must be moved into 'own *T'");
         }
+    }
+    if (!indirect) {
+        AstNode* fnr = find_func(cg, n->name);
+        EnumType* rete = (fnr && enum_ret_allowed(fnr)) ? enum_lookup(fnr->value) : NULL;
+        if (rete) {
+            gen_sret_call(cg, n, rete);
+            return;
+        }
+    } else if (g_enum_dst_kind) {
+        diag_error(n->line, n->col, "an indirect call cannot return an enum");
+        emit(cg, "    xor rax, rax\n");
+        g_enum_dst_kind = 0;
+        return;
     }
     if (!indirect && argc <= 6 && args_all_direct(cg, n, argc)) {
         for (int i = 0; i < argc; i++) {
@@ -9390,13 +9628,188 @@ static void copy_enum_slots(Codegen* cg, int dst, int src, int size) {
     }
 }
 
-static void gen_enum_store(Codegen* cg, Symbol* dst, AstNode* src) {
-    EnumType* e = symbol_enum(dst);
+// 1: [rbp+off]. 2: [name+extra]. 3: address saved at [rbp+off], plus extra.
+typedef struct {
+    int kind;
+    int off;
+    int extra;
+    char name[96];
+} EnumLoc;
+
+static void enum_loc_clear(EnumLoc* loc) {
+    if (loc) memset(loc, 0, sizeof *loc);
+}
+
+static void enum_loc_rbp(EnumLoc* loc, int off) {
+    enum_loc_clear(loc);
+    loc->kind = 1;
+    loc->off = off;
+}
+
+static int enum_loc_of(Codegen* cg, AstNode* n, EnumLoc* loc, EnumType** out) {
+    EnumType* e = NULL;
+    if (loc) enum_loc_clear(loc);
+    if (out) *out = NULL;
+    if (!cg || !n || !loc) return 0;
+    if (n->type == AST_IDENT && !n->qual && n->name) {
+        Symbol* s = cg->symtab ? symtab_lookup_symbol(cg->symtab, n->name) : NULL;
+        e = symbol_enum(s);
+        if (e) {
+            int off = s->offset;
+            enum_loc_rbp(loc, off);
+            if (out) *out = e;
+            return 1;
+        }
+        if (cg->global_symtab) {
+            GlobalVar* g = global_symtab_lookup(cg->global_symtab, n->name);
+            if (g && !g->is_pointer && !g->is_array && !g->is_slice && g->type_name) {
+                e = enum_lookup(g->type_name);
+                if (e) {
+                    loc->kind = 2;
+                    snprintf(loc->name, sizeof loc->name, "%s", g->name);
+                    if (out) *out = e;
+                    return 1;
+                }
+            }
+        }
+        return 0;
+    }
+    if (n->type == AST_FIELD_ACCESS && n->name && n->child_count >= 1) {
+        StructField* f = access_field(cg, n);
+        AstNode* obj;
+        int foff;
+        if (!f || f->is_pointer || !f->type_name || f->type_name[0] == '*') return 0;
+        e = enum_lookup(f->type_name);
+        if (!e) return 0;
+        foff = f->offset;
+        obj = n->children[0];
+        if (obj && obj->type == AST_IDENT && obj->name && !obj->qual) {
+            Symbol* s = cg->symtab ? symtab_lookup_symbol(cg->symtab, obj->name) : NULL;
+            if (s && !s->is_pointer && !s->is_array && s->type_name &&
+                typetab_lookup(cg->types, s->type_name)) {
+                int base = s->offset;
+                enum_loc_rbp(loc, base + foff);
+                if (out) *out = e;
+                return 1;
+            }
+            if (cg->global_symtab) {
+                GlobalVar* g = global_symtab_lookup(cg->global_symtab, obj->name);
+                if (g && !g->is_pointer && !g->is_array && g->type_name &&
+                    typetab_lookup(cg->types, g->type_name)) {
+                    loc->kind = 2;
+                    loc->extra = foff;
+                    snprintf(loc->name, sizeof loc->name, "%s", g->name);
+                    if (out) *out = e;
+                    return 1;
+                }
+            }
+        }
+        if (!cg->symtab || !gen_field_addr(cg, obj, n->name)) return 0;
+        cg->symtab->stack_size += 8;
+        loc->kind = 3;
+        loc->off = -cg->symtab->stack_size;
+        emit(cg, "    mov [rbp%+d], rax\n", loc->off);
+        if (out) *out = e;
+        return 1;
+    }
+    return 0;
+}
+
+static void load_enum_qword(Codegen* cg, const EnumLoc* loc, int add) {
+    if (!loc) return;
+    if (loc->kind == 1) {
+        emit(cg, "    mov rax, [rbp%+d]\n", loc->off + add);
+        return;
+    }
+    if (loc->kind == 2) {
+        int d = loc->extra + add;
+        if (d) emit(cg, "    mov rax, [%s%+d]\n", loc->name, d);
+        else emit(cg, "    mov rax, [%s]\n", loc->name);
+        return;
+    }
+    emit(cg, "    mov rbx, [rbp%+d]\n", loc->off);
+    if (loc->extra + add) emit(cg, "    mov rax, [rbx%+d]\n", loc->extra + add);
+    else emit(cg, "    mov rax, [rbx]\n");
+}
+
+static void store_enum_qword_rax(Codegen* cg, const EnumLoc* loc, int add) {
+    if (!loc) return;
+    if (loc->kind == 1) {
+        emit(cg, "    mov [rbp%+d], rax\n", loc->off + add);
+        return;
+    }
+    if (loc->kind == 2) {
+        int d = loc->extra + add;
+        if (d) emit(cg, "    mov [%s%+d], rax\n", loc->name, d);
+        else emit(cg, "    mov [%s], rax\n", loc->name);
+        return;
+    }
+    emit(cg, "    mov rbx, [rbp%+d]\n", loc->off);
+    if (loc->extra + add) emit(cg, "    mov [rbx%+d], rax\n", loc->extra + add);
+    else emit(cg, "    mov [rbx], rax\n");
+}
+
+static void copy_enum_loc(Codegen* cg, const EnumLoc* dst, const EnumLoc* src, int size) {
+    int f;
+    if (!dst || !src) return;
+    if (dst->kind == 1 && src->kind == 1) {
+        copy_enum_slots(cg, dst->off, src->off, size);
+        return;
+    }
+    for (f = 0; f + 8 <= size; f += 8) {
+        load_enum_qword(cg, src, f);
+        store_enum_qword_rax(cg, dst, f);
+    }
+}
+
+static void enum_dst_from_loc(const EnumLoc* loc) {
+    g_enum_dst_kind = 0;
+    g_enum_dst_off = 0;
+    g_enum_dst_extra = 0;
+    g_enum_dst_name[0] = 0;
+    if (!loc) return;
+    if (loc->kind == 1) {
+        g_enum_dst_kind = 1;
+        g_enum_dst_off = loc->off;
+    } else if (loc->kind == 2) {
+        g_enum_dst_kind = 3;
+        g_enum_dst_extra = loc->extra;
+        snprintf(g_enum_dst_name, sizeof g_enum_dst_name, "%s", loc->name);
+    } else if (loc->kind == 3) {
+        g_enum_dst_kind = 4;
+        g_enum_dst_off = loc->off;
+        g_enum_dst_extra = loc->extra;
+    }
+}
+
+static void fill_then_copy(Codegen* cg, EnumType* e, Variant* v, AstNode* src, EnumLoc* dst) {
+    int sz;
+    int off;
+    EnumLoc tmp;
+    if (!e || !v || !dst) return;
+    if (dst->kind == 1) {
+        fill_variant(cg, e, v, src, dst->off);
+        return;
+    }
+    sz = e->size > 0 ? e->size : 8;
+    if (!cg->symtab) return;
+    cg->symtab->stack_size += sz;
+    off = -cg->symtab->stack_size;
+    fill_variant(cg, e, v, src, off);
+    enum_loc_rbp(&tmp, off);
+    copy_enum_loc(cg, dst, &tmp, sz);
+}
+
+static void gen_enum_store_loc(Codegen* cg, EnumType* e, EnumLoc* dst, AstNode* src) {
     const char* en = NULL;
     const char* vn = NULL;
-    if (!e || !dst) return;
+    if (!e || !dst || !dst->kind) return;
+    if (legacy_bits() || (g_fn_flags & AF_NAKED)) {
+        diag_error(src ? src->line : 0, src ? src->col : 0, "an enum is a 64-bit value");
+        return;
+    }
     if (!src) {
-        diag_error(dst->name ? 0 : 0, 0, "an enum local needs a value");
+        diag_error(0, 0, "an enum local needs a value");
         return;
     }
     if (ctor_enum_name(src, &en, &vn)) {
@@ -9410,21 +9823,108 @@ static void gen_enum_store(Codegen* cg, Symbol* dst, AstNode* src) {
             diag_error(src->line, src->col, "enum '%s' has no variant '%s'", e->name, vn);
             return;
         }
-        fill_variant(cg, e, v, src, dst->offset);
+        fill_then_copy(cg, e, v, src, dst);
         return;
     }
     {
         VTy got = expr_ty(cg, src);
+        EnumType* cret;
         if (got.kind != VK_ENUM || strcmp(got.disp, e->name)) {
             check_types(src, "", ty_from_spelled(cg, e->name), got);
             return;
         }
-        if (src->type == AST_IDENT && !src->qual && src->name && cg->symtab) {
-            Symbol* ss = symtab_lookup_symbol(cg->symtab, src->name);
-            if (symbol_enum(ss)) {
-                copy_enum_slots(cg, dst->offset, ss->offset, e->size);
+        if (src->type == AST_CALL && (cret = call_return_enum(cg, src)) && !strcmp(cret->name, e->name)) {
+            int sk = g_enum_dst_kind;
+            int so = g_enum_dst_off;
+            int sx = g_enum_dst_extra;
+            char sn[96];
+            snprintf(sn, sizeof sn, "%s", g_enum_dst_name);
+            enum_dst_from_loc(dst);
+            gen_user_call(cg, src, 0);
+            g_enum_dst_kind = sk;
+            g_enum_dst_off = so;
+            g_enum_dst_extra = sx;
+            snprintf(g_enum_dst_name, sizeof g_enum_dst_name, "%s", sn);
+            return;
+        }
+        if (call_is_indirect(cg, src)) {
+            diag_error(src->line, src->col, "an indirect call cannot return an enum");
+            return;
+        }
+        {
+            EnumLoc src_loc;
+            if (enum_loc_of(cg, src, &src_loc, NULL)) {
+                copy_enum_loc(cg, dst, &src_loc, e->size > 0 ? e->size : 8);
                 return;
             }
+        }
+        diag_error(src->line, src->col, "store this variant in a local");
+    }
+}
+
+static void gen_enum_store(Codegen* cg, Symbol* dst, AstNode* src) {
+    EnumType* e;
+    EnumLoc loc;
+    int off;
+    if (!dst) return;
+    e = symbol_enum(dst);
+    off = dst->offset;
+    if (!e) return;
+    enum_loc_rbp(&loc, off);
+    gen_enum_store_loc(cg, e, &loc, src);
+}
+
+static void gen_enum_return(Codegen* cg, AstNode* src, EnumType* e) {
+    const char* en = NULL;
+    const char* vn = NULL;
+    EnumLoc sret;
+    EnumType* cret;
+    if (!src || !e) return;
+    enum_loc_clear(&sret);
+    sret.kind = 3;
+    sret.off = g_eret_off;
+    if (src->type == AST_CALL && (cret = call_return_enum(cg, src)) && !strcmp(cret->name, e->name)) {
+        int sk = g_enum_dst_kind;
+        int so = g_enum_dst_off;
+        int sx = g_enum_dst_extra;
+        char sn[96];
+        snprintf(sn, sizeof sn, "%s", g_enum_dst_name);
+        g_enum_dst_kind = 2;
+        gen_user_call(cg, src, 0);
+        g_enum_dst_kind = sk;
+        g_enum_dst_off = so;
+        g_enum_dst_extra = sx;
+        snprintf(g_enum_dst_name, sizeof g_enum_dst_name, "%s", sn);
+        return;
+    }
+    if (call_is_indirect(cg, src)) {
+        diag_error(src->line, src->col, "an indirect call cannot return an enum");
+        return;
+    }
+    if (ctor_enum_name(src, &en, &vn)) {
+        Variant* v;
+        if (strcmp(en, e->name)) {
+            diag_error(src->line, src->col, "expected %s, found %s", e->name, en);
+            return;
+        }
+        v = variant_by_name(e, vn);
+        if (!v) {
+            diag_error(src->line, src->col, "enum '%s' has no variant '%s'", e->name, vn);
+            return;
+        }
+        fill_then_copy(cg, e, v, src, &sret);
+        return;
+    }
+    {
+        EnumLoc src_loc;
+        VTy got = expr_ty(cg, src);
+        if (got.kind != VK_ENUM || strcmp(got.disp, e->name)) {
+            check_types(src, "return value", ty_from_spelled(cg, e->name), got);
+            return;
+        }
+        if (enum_loc_of(cg, src, &src_loc, NULL)) {
+            copy_enum_loc(cg, &sret, &src_loc, e->size > 0 ? e->size : 8);
+            return;
         }
         diag_error(src->line, src->col, "store this variant in a local");
     }
@@ -9436,19 +9936,32 @@ static int gen_enum_arg(Codegen* cg, AstNode* a) {
     EnumType* e;
     Variant* v;
     int off;
+    EnumLoc loc;
     if (!a) return 0;
-    if (a->type == AST_IDENT && !a->qual && a->name && cg && cg->symtab) {
-        Symbol* s = symtab_lookup_symbol(cg->symtab, a->name);
-        e = symbol_enum(s);
-        if (e) {
-            if (legacy_bits() || (g_fn_flags & AF_NAKED)) {
-                diag_error(a->line, a->col, "an enum is a 64-bit value");
-                emit(cg, "    xor rax, rax\n");
-                return 1;
-            }
-            emit(cg, "    lea rax, [rbp%+d]\n", s->offset);
+    if (call_return_enum(cg, a)) {
+        if (legacy_bits() || (g_fn_flags & AF_NAKED)) {
+            diag_error(a->line, a->col, "an enum is a 64-bit value");
+            emit(cg, "    xor rax, rax\n");
             return 1;
         }
+        gen_user_call(cg, a, 0);
+        return 1;
+    }
+    if (enum_loc_of(cg, a, &loc, NULL)) {
+        if (legacy_bits() || (g_fn_flags & AF_NAKED)) {
+            diag_error(a->line, a->col, "an enum is a 64-bit value");
+            emit(cg, "    xor rax, rax\n");
+            return 1;
+        }
+        if (loc.kind == 1) emit(cg, "    lea rax, [rbp%+d]\n", loc.off);
+        else if (loc.kind == 2) {
+            if (loc.extra) emit(cg, "    lea rax, [%s%+d]\n", loc.name, loc.extra);
+            else emit(cg, "    lea rax, [%s]\n", loc.name);
+        } else {
+            emit(cg, "    mov rax, [rbp%+d]\n", loc.off);
+            if (loc.extra) emit(cg, "    add rax, %d\n", loc.extra);
+        }
+        return 1;
     }
     if (!ctor_enum_name(a, &en, &vn)) return 0;
     if (legacy_bits() || (g_fn_flags & AF_NAKED)) {
@@ -9487,9 +10000,21 @@ static int try_enum_let(Codegen* cg, AstNode* n) {
         if (!e) return 0;
     } else if (n->child_count > 0) {
         const char* en = NULL;
-        if (ctor_enum_name(n->children[0], &en, NULL)) e = enum_lookup(en);
-        else if (n->children[0]->type == AST_IDENT && !n->children[0]->qual && n->children[0]->name)
-            e = symbol_enum(symtab_lookup_symbol(cg->symtab, n->children[0]->name));
+        AstNode* init = n->children[0];
+        if (ctor_enum_name(init, &en, NULL)) e = enum_lookup(en);
+        else if (call_return_enum(cg, init)) e = call_return_enum(cg, init);
+        else if (init->type == AST_IDENT && !init->qual && init->name) {
+            e = symbol_enum(cg->symtab ? symtab_lookup_symbol(cg->symtab, init->name) : NULL);
+            if (!e && cg->global_symtab) {
+                GlobalVar* g = global_symtab_lookup(cg->global_symtab, init->name);
+                if (g && !g->is_pointer && !g->is_array && !g->is_slice && g->type_name)
+                    e = enum_lookup(g->type_name);
+            }
+        } else if (init->type == AST_FIELD_ACCESS) {
+            StructField* f = access_field(cg, init);
+            if (f && !f->is_pointer && f->type_name && f->type_name[0] != '*')
+                e = enum_lookup(f->type_name);
+        }
     }
     if (!e) return 0;
     if (legacy_bits() || (g_fn_flags & AF_NAKED)) {
@@ -9538,12 +10063,121 @@ static void widen_arm(VTy* acc, VTy t) {
     *acc = bits >= 64 ? ty_i64() : ty_named_int(bits, sg);
 }
 
+void gen_stmt(Codegen* cg, AstNode* n);
+
+static void gen_arm_body(Codegen* cg, AstNode* body) {
+    VTy bt;
+    if (!body) {
+        emit(cg, "    xor rax, rax\n");
+        return;
+    }
+    if (body->type == AST_BLOCK) {
+        AstNode* v = block_value(body);
+        int i;
+        if (!v) {
+            emit(cg, "    xor rax, rax\n");
+            return;
+        }
+        for (i = 0; i < body->child_count - 1; i++)
+            gen_stmt(cg, body->children[i]);
+        body = v;
+    }
+    bt = expr_ty(cg, body);
+    if (bt.kind == VK_ENUM || bt.kind == VK_STRUCT || bt.kind == VK_SLICE)
+        emit(cg, "    xor rax, rax\n");
+    else
+        gen_expr(cg, body);
+}
+
+static void load_field_mem(Codegen* cg, const char* mem, VariantField* f) {
+    if (!f || !mem) return;
+    if (f->size <= 1)
+        emit(cg, f->is_signed ? "    movsx rax, byte [%s]\n" : "    movzx rax, byte [%s]\n", mem);
+    else if (f->size == 2)
+        emit(cg, f->is_signed ? "    movsx rax, word [%s]\n" : "    movzx rax, word [%s]\n", mem);
+    else if (f->size == 4)
+        emit(cg, f->is_signed ? "    movsxd rax, dword [%s]\n" : "    mov eax, [%s]\n", mem);
+    else
+        emit(cg, "    mov rax, [%s]\n", mem);
+}
+
+static void bind_enum_field_loc(Codegen* cg, const char* name, VariantField* f, const EnumLoc* loc,
+                                int line, int col) {
+    int slot;
+    Symbol* s;
+    char mem[128];
+    if (!name || !f || !loc) return;
+    if (loc->kind == 1) {
+        bind_enum_field(cg, name, f, loc->off, line, col);
+        return;
+    }
+    if (symtab_redeclared(cg->symtab, name)) {
+        diag_error(line, col, "redeclaration of '%s' in the same block", name);
+        return;
+    }
+    if (f->is_pointer) slot = symtab_add_pointer(cg->symtab, (char*)name);
+    else slot = symtab_add(cg->symtab, (char*)name, 1);
+    s = &cg->symtab->symbols[cg->symtab->count - 1];
+    s->reg = -1;
+    if (f->type_name) s->type_name = strdup(f->type_name);
+    if (f->is_pointer) s->is_pointer = 1;
+    if (loc->kind == 3) emit(cg, "    mov rbx, [rbp%+d]\n", loc->off);
+    if (loc->kind == 2) {
+        int d = loc->extra + f->offset;
+        if (d) snprintf(mem, sizeof mem, "%s%+d", loc->name, d);
+        else snprintf(mem, sizeof mem, "%s", loc->name);
+    } else {
+        int d = loc->extra + f->offset;
+        if (d) snprintf(mem, sizeof mem, "rbx%+d", d);
+        else snprintf(mem, sizeof mem, "rbx");
+    }
+    load_field_mem(cg, mem, f);
+    emit(cg, "    mov [rbp%+d], rax\n", slot);
+}
+
+static void emit_tag_rbx(Codegen* cg, const EnumLoc* loc) {
+    if (!loc) return;
+    if (loc->kind == 1) emit(cg, "    mov rbx, [rbp%+d]\n", loc->off);
+    else if (loc->kind == 2) {
+        if (loc->extra) emit(cg, "    mov rbx, [%s%+d]\n", loc->name, loc->extra);
+        else emit(cg, "    mov rbx, [%s]\n", loc->name);
+    } else {
+        emit(cg, "    mov rax, [rbp%+d]\n", loc->off);
+        if (loc->extra) emit(cg, "    mov rbx, [rax%+d]\n", loc->extra);
+        else emit(cg, "    mov rbx, [rax]\n");
+    }
+}
+
+static void emit_tag_cmp(Codegen* cg, const EnumLoc* loc, int tag, int use_rbx) {
+    if (!loc) return;
+    if (use_rbx) {
+        emit(cg, "    cmp rbx, %d\n", tag);
+        return;
+    }
+    if (loc->kind == 1) {
+        emit(cg, "    cmp qword [rbp%+d], %d\n", loc->off, tag);
+        return;
+    }
+    if (loc->kind == 2) {
+        if (loc->extra) emit(cg, "    cmp qword [%s%+d], %d\n", loc->name, loc->extra, tag);
+        else emit(cg, "    cmp qword [%s], %d\n", loc->name, tag);
+        return;
+    }
+    emit(cg, "    mov rax, [rbp%+d]\n", loc->off);
+    if (loc->extra) emit(cg, "    cmp qword [rax%+d], %d\n", loc->extra, tag);
+    else emit(cg, "    cmp qword [rax], %d\n", tag);
+}
+
+static int arm_is_wild(AstNode* arm) {
+    return arm && arm->name && !strcmp(arm->name, "_") && !arm->struct_type;
+}
+
 static void gen_match(Codegen* cg, AstNode* n) {
     AstNode* scr;
-    Symbol* s;
     EnumType* e;
+    EnumLoc loc;
     unsigned char* seen;
-    int narm, i, end_lab, have;
+    int narm, i, end_lab, have, wild_at, use_rbx, any_real;
     VTy acc;
     if (!n) return;
     if (legacy_bits() || (g_fn_flags & AF_NAKED)) {
@@ -9552,24 +10186,21 @@ static void gen_match(Codegen* cg, AstNode* n) {
         return;
     }
     scr = n->child_count > 0 ? n->children[0] : NULL;
-    s = NULL;
-    if (scr && scr->type == AST_IDENT && !scr->qual && scr->name && cg->symtab)
-        s = symtab_lookup_symbol(cg->symtab, scr->name);
-    e = symbol_enum(s);
-    if (!e) {
+    e = NULL;
+    enum_loc_clear(&loc);
+    if (!scr || !enum_loc_of(cg, scr, &loc, &e) || !e) {
         diag_error(scr ? scr->line : n->line, scr ? scr->col : n->col, "match needs a local enum");
         emit(cg, "    xor rax, rax\n");
         return;
     }
-    // symtab_add inside an arm reallocates the symbol table. Keep the slot.
+    // The location is a copy. An arm's symtab_add must not keep a Symbol*.
     {
-        int base_off = s->offset;
-        s = NULL;
         narm = n->child_count - 1;
     if (narm < 0) narm = 0;
     seen = calloc((size_t)(e->var_count > 0 ? e->var_count : 1), 1);
     acc = ty_unk();
     have = 0;
+    wild_at = -1;
     for (i = 0; i < narm; i++) {
         AstNode* arm = n->children[i + 1];
         Variant* v;
@@ -9577,25 +10208,45 @@ static void gen_match(Codegen* cg, AstNode* n) {
         VTy t;
         int saved, b;
         if (!arm || !arm->name) continue;
-        if (arm->struct_type && strcmp(arm->struct_type, e->name)) {
-            diag_error(arm->line, arm->col, "variant '%s::%s' is not in '%s'",
-                       arm->struct_type, arm->name, e->name);
+        if (arm->name && !strcmp(arm->name, "_") && arm->struct_type) {
+            diag_error(arm->line, arm->col, "'_' is not a variant");
             continue;
         }
-        v = variant_by_name(e, arm->name);
-        if (!v) {
-            diag_error(arm->line, arm->col, "variant '%s' is not in '%s'", arm->name, e->name);
+        if (arm_is_wild(arm)) {
+            if ((arm->flags & AF_ENUM_PAREN) || arm->array_size > 0) {
+                diag_error(arm->line, arm->col, "'_' has no fields");
+                continue;
+            }
+            if (wild_at >= 0) {
+                diag_error(arm->line, arm->col, "'_' is already matched");
+                continue;
+            }
+            wild_at = i;
+            v = NULL;
+        } else if (wild_at >= 0) {
+            diag_error(arm->line, arm->col, "arm after '_' is unreachable");
             continue;
+        } else {
+            if (arm->struct_type && strcmp(arm->struct_type, e->name)) {
+                diag_error(arm->line, arm->col, "variant '%s::%s' is not in '%s'",
+                           arm->struct_type, arm->name, e->name);
+                continue;
+            }
+            v = variant_by_name(e, arm->name);
+            if (!v) {
+                diag_error(arm->line, arm->col, "variant '%s' is not in '%s'", arm->name, e->name);
+                continue;
+            }
+            if (v->tag >= 0 && v->tag < e->var_count && seen[v->tag]) {
+                diag_error(arm->line, arm->col, "variant '%s' is already matched", arm->name);
+                continue;
+            }
+            if (v->tag >= 0 && v->tag < e->var_count) seen[v->tag] = 1;
+            variant_arity(arm, v->name, v->field_count, arm->array_size,
+                          (arm->flags & AF_ENUM_PAREN) ? 1 : 0);
         }
-        if (v->tag >= 0 && v->tag < e->var_count && seen[v->tag]) {
-            diag_error(arm->line, arm->col, "variant '%s' is already matched", arm->name);
-            continue;
-        }
-        if (v->tag >= 0 && v->tag < e->var_count) seen[v->tag] = 1;
-        variant_arity(arm, v->name, v->field_count, arm->array_size,
-                      (arm->flags & AF_ENUM_PAREN) ? 1 : 0);
         saved = g_nbindty;
-        if (arm->array_size == v->field_count) {
+        if (v && arm->array_size == v->field_count) {
             for (b = 0; b < arm->array_size && g_nbindty < ENUM_BIND_MAX; b++) {
                 if (!arm->children[b] || !arm->children[b]->name) continue;
                 g_bindty[g_nbindty].name = arm->children[b]->name;
@@ -9604,6 +10255,11 @@ static void gen_match(Codegen* cg, AstNode* n) {
             }
         }
         body = (arm->child_count > arm->array_size) ? arm->children[arm->child_count - 1] : NULL;
+        if (body && body->type == AST_BLOCK && !block_value(body)) {
+            diag_error(body->line, body->col, "match arm block needs a result");
+            g_nbindty = saved;
+            continue;
+        }
         t = body ? expr_ty(cg, body) : ty_unk();
         g_nbindty = saved;
         if (t.kind == VK_ENUM || t.kind == VK_STRUCT || t.kind == VK_SLICE) {
@@ -9637,10 +10293,22 @@ static void gen_match(Codegen* cg, AstNode* n) {
             o += w;
             nmiss++;
         }
-        if (nmiss) diag_error(n->line, n->col, "%s", buf);
+        if (nmiss && wild_at < 0) diag_error(n->line, n->col, "%s", buf);
     }
     free(seen);
     end_lab = new_label(cg);
+    any_real = 0;
+    for (i = 0; i < narm; i++) {
+        if (wild_at >= 0 && i >= wild_at) break;
+        if (n->children[i + 1] && n->children[i + 1]->name) any_real = 1;
+    }
+    use_rbx = 0;
+    // Hosted -O2: one load of the tag. Later arms are reached by jne, so rbx
+    // still holds it. The arm body may clobber rbx; that path jumps to the end.
+    if (o2_hosted() && any_real) {
+        emit_tag_rbx(cg, &loc);
+        use_rbx = 1;
+    }
     seen = calloc((size_t)(e->var_count > 0 ? e->var_count : 1), 1);
     for (i = 0; i < narm; i++) {
         AstNode* arm = n->children[i + 1];
@@ -9648,6 +10316,16 @@ static void gen_match(Codegen* cg, AstNode* n) {
         AstNode* body;
         int next_lab, b, arity_ok;
         if (!arm || !arm->name) continue;
+        if (wild_at >= 0 && i > wild_at) continue;
+        if (i == wild_at) {
+            body = (arm->child_count > arm->array_size) ? arm->children[arm->child_count - 1] : NULL;
+            symtab_enter(cg->symtab);
+            g_nbindty = 0;
+            gen_arm_body(cg, body);
+            symtab_leave(cg->symtab);
+            emit(cg, "    jmp .L%d\n", end_lab);
+            continue;
+        }
         if (arm->struct_type && strcmp(arm->struct_type, e->name)) continue;
         v = variant_by_name(e, arm->name);
         if (!v || v->tag < 0 || v->tag >= e->var_count || seen[v->tag]) continue;
@@ -9655,24 +10333,18 @@ static void gen_match(Codegen* cg, AstNode* n) {
         arity_ok = arm->array_size == v->field_count &&
                    !((arm->flags & AF_ENUM_PAREN) && v->field_count == 0);
         next_lab = new_label(cg);
-        emit(cg, "    cmp qword [rbp%+d], %d\n", base_off, v->tag);
+        emit_tag_cmp(cg, &loc, v->tag, use_rbx);
         emit(cg, "    jne .L%d\n", next_lab);
         if (arity_ok) {
             symtab_enter(cg->symtab);
             for (b = 0; b < v->field_count; b++) {
                 AstNode* id = arm->children[b];
-                bind_enum_field(cg, id ? id->name : NULL, &v->fields[b], base_off,
-                                id ? id->line : arm->line, id ? id->col : arm->col);
+                bind_enum_field_loc(cg, id ? id->name : NULL, &v->fields[b], &loc,
+                                    id ? id->line : arm->line, id ? id->col : arm->col);
             }
             body = (arm->child_count > arm->array_size) ? arm->children[arm->child_count - 1] : NULL;
             g_nbindty = 0;
-            if (body) {
-                VTy bt = expr_ty(cg, body);
-                if (bt.kind == VK_ENUM || bt.kind == VK_STRUCT || bt.kind == VK_SLICE)
-                    emit(cg, "    xor rax, rax\n");
-                else
-                    gen_expr(cg, body);
-            } else emit(cg, "    xor rax, rax\n");
+            gen_arm_body(cg, body);
             symtab_leave(cg->symtab);
         } else {
             emit(cg, "    xor rax, rax\n");
@@ -9680,7 +10352,7 @@ static void gen_match(Codegen* cg, AstNode* n) {
         emit(cg, "    jmp .L%d\n", end_lab);
         emit(cg, ".L%d:\n", next_lab);
     }
-    emit(cg, "    ud2\n");
+    if (wild_at < 0) emit(cg, "    ud2\n");
     emit(cg, ".L%d:\n", end_lab);
     free(seen);
     }
@@ -9749,6 +10421,12 @@ void gen_expr(Codegen* cg, AstNode* n) {
                 // For arrays, load address; for scalars, load value
                 if (gvar->is_slice) {
                     diag_error(n->line, n->col, "a slice is not a scalar; read .ptr or .len");
+                    emit(cg, "    xor rax, rax\n");
+                    return;
+                }
+                if (!gvar->is_pointer && !gvar->is_array && gvar->type_name &&
+                    enum_lookup(gvar->type_name)) {
+                    diag_error(n->line, n->col, "an enum is not a scalar; match it");
                     emit(cg, "    xor rax, rax\n");
                     return;
                 }
@@ -9875,6 +10553,16 @@ void gen_expr(Codegen* cg, AstNode* n) {
                 return;
             }
             gen_enum_store(cg, hw, n->child_count > 0 ? n->children[0] : NULL);
+            return;
+        }
+        if (!hw && hwg && !hwg->is_pointer && !hwg->is_array && !hwg->is_slice &&
+            hwg->type_name && enum_lookup(hwg->type_name)) {
+            EnumLoc loc;
+            EnumType* ge = enum_lookup(hwg->type_name);
+            enum_loc_clear(&loc);
+            loc.kind = 2;
+            snprintf(loc.name, sizeof loc.name, "%s", hwg->name);
+            gen_enum_store_loc(cg, ge, &loc, n->child_count > 0 ? n->children[0] : NULL);
             return;
         }
         if (n->name) {
@@ -10106,6 +10794,15 @@ void gen_expr(Codegen* cg, AstNode* n) {
         }
     } else if (n->type == AST_FIELD_ACCESS) {
         if (gen_slice_field(cg, n)) return;
+        {
+            StructField* ef = access_field(cg, n);
+            if (ef && !ef->is_pointer && ef->type_name && ef->type_name[0] != '*' &&
+                enum_lookup(ef->type_name)) {
+                diag_error(n->line, n->col, "an enum is not a scalar; match it");
+                emit(cg, "    xor rax, rax\n");
+                return;
+            }
+        }
         AstNode* obj = n->children[0];
         char* field_name = n->name;
 
@@ -10687,6 +11384,30 @@ void gen_expr(Codegen* cg, AstNode* n) {
         {
             char* rec = obj_record_type(cg, obj);
             char* ft = rec ? typetab_field_type(cg->types, rec, field_name) : NULL;
+            EnumType* ee = (ft && ft[0] != '*') ? enum_lookup(ft) : NULL;
+            if (ee) {
+                EnumLoc loc;
+                AstNode fld;
+                AstNode* fk[1];
+                if (legacy_bits() || (g_fn_flags & AF_NAKED)) {
+                    diag_error(n->line, n->col, "an enum is a 64-bit value");
+                    return;
+                }
+                memset(&fld, 0, sizeof fld);
+                fld.type = AST_FIELD_ACCESS;
+                fld.name = field_name;
+                fld.line = n->line;
+                fld.col = n->col;
+                fk[0] = obj;
+                fld.children = fk;
+                fld.child_count = 1;
+                if (!enum_loc_of(cg, &fld, &loc, NULL)) {
+                    diag_error(n->line, n->col, "cannot take the address of field '%s'", field_name);
+                    return;
+                }
+                gen_enum_store_loc(cg, ee, &loc, value_expr);
+                return;
+            }
             if (ft && (ft[0] == '*' || !is_record(cg, ft)))
                 check_types(value_expr, "", ty_from_spelled(cg, ft), expr_ty(cg, value_expr));
             if (ft && ft[0] != '*' && is_record(cg, ft)) {
@@ -11222,6 +11943,7 @@ static EarlyRet match_early_ret(Codegen* cg, AstNode* fn) {
     memset(&e, 0, sizeof e);
     if (!o2_hosted() || !fn || !fn->name) return e;
     if (fn->flags & (AF_INTERRUPT | AF_SYSCALL | AF_NAKED)) return e;
+    if (enum_ret_allowed(fn)) return e;
     int pc = fn->child_count - 1;
     if (pc < 1) return e;
     AstNode* body = fn->children[pc];
@@ -11368,6 +12090,7 @@ static int slim_call_shape(Codegen* cg, AstNode* n) {
     if (!n || n->type != AST_CALL || !n->name || !strcmp(n->name, "asm")) return 0;
     AstNode* fn = find_func(cg, n->name);
     if (!fn) return 0;
+    if (enum_ret_allowed(fn)) return 0;
     int argc = n->child_count;
     int want = fn->child_count - 1;
     if (argc != want || argc > 6) return 0;
@@ -11457,6 +12180,8 @@ static void prepare_frame(Codegen* cg, AstNode* fn) {
     g_slim_pad = 0;
     g_slim_nsave = 0;
     if (!o2_hosted() || !fn || g_reg_asm || fn->child_count < 1) return;
+    // The hidden return pointer is saved at [rbp-N]. A slim frame has no rbp.
+    if (!(fn->is_pointer & 1) && fn->value && enum_lookup(fn->value)) return;
     int pc = fn->child_count - 1;
     AstNode* body = fn->children[pc];
     int depth = expr_tmp_depth(body);
@@ -13409,10 +14134,21 @@ void gen_stmt(Codegen* cg, AstNode* n) {
                 return;
             }
             if (src_ty.kind == VK_ENUM) {
-                int declared = g_cur_fn && !(g_cur_fn->is_pointer & 1) && g_cur_fn->value &&
-                               enum_lookup(g_cur_fn->value);
-                if (!declared)
+                EnumType* want = (g_cur_fn && enum_ret_allowed(g_cur_fn))
+                    ? enum_lookup(g_cur_fn->value) : NULL;
+                if (!want) {
                     diag_error(n->line, n->col, "an enum cannot be returned");
+                    return;
+                }
+                if (strcmp(src_ty.disp, want->name)) {
+                    check_types(n->children[0], "return value",
+                                ty_from_spelled(cg, want->name), src_ty);
+                    return;
+                }
+                gen_enum_return(cg, n->children[0], want);
+                emit_drops(cg, 0, cg->symtab ? cg->symtab->count : 0);
+                if (g_eret_off) emit(cg, "    mov rax, [rbp%+d]\n", g_eret_off);
+                emit_hosted_epilogue(cg);
                 return;
             }
             if (g_cur_fn && !(g_cur_fn->struct_type && !strcmp(g_cur_fn->struct_type, "__array__"))) {
@@ -14473,6 +15209,8 @@ static void stride_function(Codegen* cg, AstNode* fn) {
 }
 
 void gen_func(Codegen* cg, AstNode* n) {
+    g_eret_off = 0;
+    g_enum_dst_kind = 0;
     g_reg_local_n = 0;
     g_reg_callee_n = 0;
     g_slim = 0;
@@ -14575,7 +15313,7 @@ void gen_func(Codegen* cg, AstNode* n) {
     g_fn_flags = n->flags;
     g_fn_bits = bits;
     g_cur_fn = n;
-    if (!(n->is_pointer & 1) && n->value && enum_lookup(n->value))
+    if (!(n->is_pointer & 1) && n->value && enum_lookup(n->value) && !enum_ret_allowed(n))
         diag_error(n->line, n->col, "an enum cannot be returned");
     if (n->flags & AF_OWN)
         owner_hosted(n->line, n->col, "an owning pointer");
@@ -14731,11 +15469,22 @@ void gen_func(Codegen* cg, AstNode* n) {
             symtab_add_hw(cg->symtab, par->name, pregs[i], pw, par->is_pointer, par->value);
         }
     } else {
-        int nreg = param_count < 6 ? param_count : 6;
-        for (int i = 0; i < nreg; i++)
-            bind_param(cg, n->children[i], regs[i], 0, 0);
-        for (int i = 6; i < param_count && i < 16; i++)
-            bind_param(cg, n->children[i], NULL, 16 + (i - 6) * 8, 1);
+        int nreg_max = 6;
+        const char* sret_regs[] = {"rsi", "rdx", "rcx", "r8", "r9"};
+        g_eret_off = 0;
+        if (enum_ret_allowed(n) && cg->symtab) {
+            cg->symtab->stack_size += 8;
+            g_eret_off = -cg->symtab->stack_size;
+            emit(cg, "    mov [rbp%+d], rdi\n", g_eret_off);
+            nreg_max = 5;
+        }
+        {
+            int nreg = param_count < nreg_max ? param_count : nreg_max;
+            for (int i = 0; i < nreg; i++)
+                bind_param(cg, n->children[i], g_eret_off ? sret_regs[i] : regs[i], 0, 0);
+            for (int i = nreg_max; i < param_count && i < 16; i++)
+                bind_param(cg, n->children[i], NULL, 16 + (i - nreg_max) * 8, 1);
+        }
     }
 
     AstNode* body = n->children[param_count];
@@ -14850,6 +15599,8 @@ void gen_func(Codegen* cg, AstNode* n) {
 
     g_fn_flags = 0;
     g_fn_bits = 0;
+    g_eret_off = 0;
+    g_enum_dst_kind = 0;
     g_fn_name[0] = '\0';
     g_cur_mod = NULL;
     cg->symtab = old_symtab;
@@ -15155,6 +15906,13 @@ static void write_global_def(Codegen* cg, FILE* out, GlobalVar* gv) {
             put_outf(cg, out, "%s: resq 2\n", gv->name);
         return;
     }
+    if (!gv->is_pointer && !gv->is_array && gv->type_name) {
+        EnumType* en = enum_lookup(gv->type_name);
+        if (en) {
+            put_outf(cg, out, "%s: resb %d\n", gv->name, en->size > 0 ? en->size : 8);
+            return;
+        }
+    }
     if (gv->is_initialized) {
         if (gv->is_array && gv->array_init_values && gv->array_init_count > 0) {
             const char* directive = type_asm_directive(gv->elem_type);
@@ -15401,10 +16159,18 @@ void codegen(AstNode* ast, const char* file, StringTable* strtab, TypeTable* typ
 
             if (!is_pointer && type_name && enum_lookup(type_name)) {
                 int is_slice = gvar->struct_type && !strcmp(gvar->struct_type, "__slice__");
-                diag_error(gvar->line, gvar->col, is_array
-                           ? "an enum cannot be an array element"
-                           : is_slice ? "a slice element cannot be an enum"
-                                      : "an enum must be a local or a parameter");
+                if (is_array || is_slice) {
+                    diag_error(gvar->line, gvar->col, is_array
+                               ? "an enum cannot be an array element"
+                               : "a slice element cannot be an enum");
+                } else if (gvar->flags & AF_VOLATILE) {
+                    diag_error(gvar->line, gvar->col, "volatile cannot apply to an enum");
+                } else if (is_initialized) {
+                    diag_error(gvar->line, gvar->col,
+                               "an enum global starts at zero; assign it in a function");
+                    is_initialized = 0;
+                    init_value = NULL;
+                }
             }
             if ((gvar->flags & AF_VOLATILE) && is_array) {
                 diag_error(gvar->line, gvar->col,
