@@ -1,0 +1,61 @@
+let gbuf: [i64; 4] = [1, 2, 3, 4];
+
+fn sum(s: []i64) -> i64 {
+    let t: i64 = 0;
+    for x in s {
+        t = t + x;
+    }
+    return t;
+}
+
+fn main() -> i64 {
+    let buf: [i64; 4] = [10, 20, 30, 40];
+    let s: []i64 = buf;
+    print_int(s.len);
+    println("");
+    print_int(s[0]);
+    println("");
+    print_int(s.ptr[1]);
+    println("");
+    let t: i64 = 0;
+    for x in s {
+        t = t + x;
+    }
+    print_int(t);
+    println("");
+    t = 0;
+    for i in 0..s.len {
+        t = t + s[i];
+    }
+    print_int(t);
+    println("");
+    t = 0;
+    for i in 0..4 {
+        t = t + buf[i];
+    }
+    print_int(t);
+    println("");
+    print_int(sum(s));
+    println("");
+    let gs: []i64 = gbuf;
+    print_int(gs[3]);
+    println("");
+    let z: []i64;
+    print_int(z.len);
+    println("");
+    unsafe {
+        print_int(s[2]);
+        println("");
+    }
+    let p: *i64 = s.ptr;
+    let built: []i64 = slice(p, s.len);
+    print_int(built[3]);
+    println("");
+    let copy: []i64 = s;
+    copy = gs;
+    print_int(copy[0]);
+    println("");
+    print_int(sizeof(s));
+    println("");
+    return 0;
+}

@@ -1,0 +1,24 @@
+fn main() -> i64 {
+    let buf: [i64; 1024];
+    let i: i64 = 0;
+    while (i < 1024) {
+        buf[i] = i;
+        i = i + 1;
+    }
+    let s: []i64 = buf;
+    let rounds: i64 = 100000;
+    let r: i64 = 0;
+    let sum: i64 = 0;
+    while (r < rounds) {
+        let j: i64 = 0;
+        let n: i64 = s.len;
+        while (j < n) {
+            sum = sum + s[j];
+            j = j + 1;
+        }
+        r = r + 1;
+    }
+    print_int(sum);
+    println("");
+    return 0;
+}
