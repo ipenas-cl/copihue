@@ -1,0 +1,45 @@
+fn give() -> own *i64 {
+    let p: own *i64 = malloc(8);
+    *p = 7;
+    return p;
+}
+
+fn take(p: own *i64) -> i64 {
+    let n = *p;
+    return n;
+}
+
+fn peek(p: *i64) -> i64 {
+    return *p;
+}
+
+fn pass(p: own *i64) -> own *i64 {
+    return p;
+}
+
+fn main() -> i64 {
+    let a: own *i64 = give();
+    let b = peek(a);
+    let c = take(a);
+    let z = 0;
+    if (a == 0) {
+        z = 1;
+    }
+    let q: own *i64 = pass(give());
+    let v: vec i64;
+    vec_push(v, 5);
+    let s: []i64 = v;
+    print_int(b);
+    println("");
+    print_int(c);
+    println("");
+    print_int(z);
+    println("");
+    print_int(*q);
+    println("");
+    print_int(s[0]);
+    println("");
+    print_int(v[0]);
+    println("");
+    return 0;
+}

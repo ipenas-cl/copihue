@@ -1,0 +1,4 @@
+tests/errors/vec_for.lap:5:9: error: for in of a struct element; index the slice
+      5 |     for x in v {
+        |         ^
+1 error, compilation failed

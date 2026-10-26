@@ -16,7 +16,7 @@
 
 // ==== NAMING (single place to change when the language is renamed) ====
 #define LANG_NAME     "Copihue"
-#define LANG_VERSION  "0.36.1"
+#define LANG_VERSION  "0.37.0"
 #define COMPILER_BIN  "copihue"
 #define SRC_EXT       ".lap"   /* Lapageria rosea, the copihue */
 #define OLD_SRC_EXT   ".cph"   /* v0.18.x extension, still accepted with a warning */
@@ -398,6 +398,8 @@ static void emit_malloc_rax(Codegen* cg);
 static void emit_drops(Codegen* cg, int from, int to);
 static int scope_has_drop(Codegen* cg, int from, int to);
 static void gen_vec_push(Codegen* cg, AstNode* n);
+static int gen_struct_addr(Codegen* cg, AstNode* n);
+static void emit_copy_mem(Codegen* cg, const char* dst_reg, const char* src_reg, int sz);
 
 // Kind of the function currently being generated (for return/epilogue).
 static int g_fn_flags = 0;
@@ -2105,6 +2107,8 @@ static AstNode* parse_for_in(Parser* p) {
     ast_add(lenf, ident_named(it));
     AstNode* idxn = ast_new(AST_INDEX);
     idxn->flags |= AF_NOCHECK;
+    idxn->line = name.line;
+    idxn->col = name.col;
     ast_add(idxn, ident_named(it));
     ast_add(idxn, ident_named(ix));
     AstNode* lx = ast_new(AST_LET);
@@ -2615,7 +2619,8 @@ TypeSpec parse_type(Parser* p) {
         Tok kw = advance_tok(p);
         TypeSpec inner = parse_type(p);
         if (inner.is_slice || inner.is_array || inner.is_vec || inner.is_own) {
-            diag_error(kw.line, kw.col, "a vec element must be an integer or a pointer");
+            diag_error(kw.line, kw.col,
+                       "a vec element cannot be a slice, an array, a vec, or an owning pointer");
             spec.base_type = strdup("i64");
         } else if (inner.is_pointer) {
             spec.base_type = type_spec_name(inner);
@@ -2768,9 +2773,17 @@ AstNode* parse_func(Parser* p) {
                                                      peek_tok_at(p, 1, T_IDENT)));
                 if (owner) {
                     TypeSpec spec = parse_type(p);
-                    diag_error(param.line, param.col, spec.is_vec
-                               ? "a vec must be a local" : "an owning pointer must be a local");
-                    par->value = strdup("i64");
+                    if (spec.is_vec) {
+                        diag_error(param.line, param.col, "a vec must be a local");
+                        par->value = strdup("i64");
+                    } else if (spec.is_own) {
+                        par->flags |= AF_OWN;
+                        par->is_pointer = spec.is_pointer | (spec.is_mutable << 1) |
+                                          (spec.is_volatile << 2);
+                        par->value = spec.base_type ? spec.base_type : strdup("i64");
+                    } else {
+                        par->value = strdup("i64");
+                    }
                 } else {
                     par->value = take_type_name(p);
                 }
@@ -2779,7 +2792,8 @@ AstNode* parse_func(Parser* p) {
                 par->value = strndup(type_tok.s, type_tok.len);  // Save type name
             }
         }
-        // A missing annotation is i64. It is not guessed from a later index.
+        // A missing annotation is i64. A later index does not turn it into a pointer:
+        // a load used as an integer does not fix the pointee width.
         if (!par->value && !par->is_pointer &&
             !(par->struct_type && !strcmp(par->struct_type, "__slice__")))
             par->value = strdup("i64");
@@ -2796,9 +2810,11 @@ AstNode* parse_func(Parser* p) {
             diag_error(name.line, name.col, "a slice cannot be returned");
         if (spec.is_vec)
             diag_error(name.line, name.col, "a vec cannot be returned");
-        if (spec.is_own)
-            diag_error(name.line, name.col, "an owning pointer cannot be returned");
-        if (!spec.is_vec && !spec.is_own) {
+        if (spec.is_own) {
+            func->flags |= AF_OWN;
+            func->is_pointer = spec.is_pointer | (spec.is_mutable << 1) | (spec.is_volatile << 2);
+            func->value = type_spec_name(spec);
+        } else if (!spec.is_vec) {
             func->is_pointer = spec.is_pointer | (spec.is_mutable << 1) | (spec.is_volatile << 2);
             func->array_size = spec.array_count;
             if (spec.is_pointer || spec.is_array) func->value = type_spec_name(spec);
@@ -3709,6 +3725,7 @@ typedef struct {
     int sg;
     int lit;
     int addr_int;
+    int own;          // 1: this pointer value is `own *T` (a local, or a call that returns one)
     long long litv;
     char disp[160];
 } VTy;
@@ -3886,6 +3903,7 @@ static VTy sym_vty(Codegen* cg, Symbol* s) {
         }
         p.addr_int = s->as_int;
         if (s->volatile_pointee) p = with_volatile_ptr(p);
+        if (s->drop_kind == 1) p.own = 1;
         return p;
     }
     if (s->type_name) return ty_from_spelled(cg, s->type_name);
@@ -4190,7 +4208,11 @@ static VTy expr_ty(Codegen* cg, AstNode* n) {
         AstNode* fn = cg ? find_func(cg, n->name) : NULL;
         int indirect = (loc || (gv && !fn)) ? 1 : 0;
         if (indirect || !fn) return ty_unk();
-        return ty_decl(cg, 1, fn->is_pointer, fn->value);
+        {
+            VTy t = ty_decl(cg, 1, fn->is_pointer, fn->value);
+            if (fn->flags & AF_OWN) t.own = 1;
+            return t;
+        }
     }
     if (n->type == AST_STRUCT_LITERAL && n->struct_type) return ty_from_spelled(cg, n->struct_type);
     if (n->type == AST_ASSIGN && n->child_count > 0) return expr_ty(cg, n->children[0]);
@@ -4304,13 +4326,63 @@ static GlobalVar* global_slice(Codegen* cg, AstNode* id);
 static const char* slice_elem_name(Symbol* s, GlobalVar* g);
 static void found_spelling(Codegen* cg, AstNode* a, char* buf, int n);
 
+// An owning local, or a call that returns `own *T`. A raw `*T` is not a source:
+// the caller could still free it.
+static int expr_is_own_source(Codegen* cg, AstNode* a) {
+    if (!a) return 0;
+    if (a->type == AST_IDENT && a->name && !a->qual && cg && cg->symtab) {
+        Symbol* s = symtab_lookup_symbol(cg->symtab, a->name);
+        if (s && s->drop_kind == 1) return 1;
+    }
+    if (a->type == AST_CALL && a->name && cg) {
+        AstNode* fn = find_func(cg, a->name);
+        if (fn && (fn->flags & AF_OWN)) return 1;
+    }
+    return 0;
+}
+
 static void check_user_args(Codegen* cg, AstNode* n, AstNode* fn) {
     int argc = n->child_count;
     int want = fn->child_count - 1;
     int narg = argc < want ? argc : want;
     for (int i = 0; i < narg; i++) {
         AstNode* par = fn->children[i];
+        AstNode* arg;
         if (!par) continue;
+        arg = n->children[i];
+        if (par->flags & AF_OWN) {
+            if (!expr_is_own_source(cg, arg)) {
+                diag_error(arg ? arg->line : n->line, arg ? arg->col : n->col,
+                           "an owning parameter takes an owning pointer");
+                continue;
+            }
+            {
+                int again = 0;
+                if (arg && arg->type == AST_IDENT && arg->name) {
+                    for (int j = 0; j < narg; j++) {
+                        AstNode* other = n->children[j];
+                        if (j == i || !other || other->type != AST_IDENT || !other->name) continue;
+                        if (strcmp(other->name, arg->name)) continue;
+                        again = 1;
+                        break;
+                    }
+                }
+                if (again) {
+                    int earlier = 0;
+                    for (int j = 0; j < i; j++) {
+                        AstNode* other = n->children[j];
+                        if (other && other->type == AST_IDENT && other->name &&
+                            !strcmp(other->name, arg->name))
+                            earlier = 1;
+                    }
+                    if (!earlier)
+                        diag_error(arg->line, arg->col, "an owning pointer cannot be moved twice");
+                }
+            }
+        } else if (arg && expr_is_own_source(cg, arg) && arg->type == AST_CALL) {
+            diag_error(arg->line, arg->col, "an owning pointer must be moved into 'own *T'");
+            continue;
+        }
         if (par->struct_type && !strcmp(par->struct_type, "__slice__")) {
             const char* want_e = par->value ? par->value : "i64";
             Symbol* s = local_slice(cg, n->children[i]);
@@ -4649,6 +4721,28 @@ static int args_all_direct(Codegen* cg, AstNode* n, int argc) {
 // 16 the displacement is 16 bits, so the callee has to land within ±32KiB
 // or nasm rejects the object. Indirect calls stay 64-bit: the name is what
 // tells us the callee's mode.
+// The argument value is already in a register or on the stack. Null the
+// caller's owning slot so its later drop is free(NULL). A call expression
+// has no slot: the callee that returned it already nulled its own.
+static void release_moved_arg(Codegen* cg, AstNode* call, int i, int indirect) {
+    AstNode* fn;
+    AstNode* par;
+    AstNode* arg;
+    Symbol* s;
+    if (indirect || !cg || !call || i < 0 || i >= call->child_count) return;
+    fn = find_func(cg, call->name);
+    if (!fn || i >= fn->child_count - 1) return;
+    par = fn->children[i];
+    arg = call->children[i];
+    if (!par || !(par->flags & AF_OWN) || !arg || arg->type != AST_IDENT || arg->qual || !arg->name)
+        return;
+    if (!cg->symtab) return;
+    s = symtab_lookup_symbol(cg->symtab, arg->name);
+    if (!s || s->drop_kind != 1) return;
+    if (s->mem) emit(cg, "    mov qword [%s], 0\n", s->mem);
+    else emit(cg, "    mov qword [rbp%d], 0\n", s->offset);
+}
+
 static void gen_user_call(Codegen* cg, AstNode* n, int indirect) {
     if (legacy_bits()) {
         int mode = g_fn_bits;
@@ -4728,11 +4822,15 @@ static void gen_user_call(Codegen* cg, AstNode* n, int indirect) {
             } else {
                 check_user_args(cg, n, fn);
             }
+            if (fn && (fn->flags & AF_OWN) && g_stmt_expr == n)
+                diag_error(n->line, n->col, "an owning pointer must be moved into 'own *T'");
         }
     }
     if (!indirect && argc <= 6 && args_all_direct(cg, n, argc)) {
-        for (int i = 0; i < argc; i++)
+        for (int i = 0; i < argc; i++) {
             place_in(cg, n->children[i], regs[i]);
+            release_moved_arg(cg, n, i, 0);
+        }
         emit(cg, "    call %s\n", call_nasm(cg, n));
         return;
     }
@@ -4740,6 +4838,7 @@ static void gen_user_call(Codegen* cg, AstNode* n, int indirect) {
         for (int i = 0; i < argc; i++) {
             gen_one_arg(cg, n->children[i]);
             emit(cg, "    push rax\n");
+            release_moved_arg(cg, n, i, 0);
         }
         for (int i = argc - 1; i >= 0; i--)
             emit(cg, "    pop %s\n", regs[i]);
@@ -4750,6 +4849,7 @@ static void gen_user_call(Codegen* cg, AstNode* n, int indirect) {
         for (int i = 0; i < argc; i++) {
             gen_one_arg(cg, n->children[i]);
             emit(cg, "    push rax\n");
+            release_moved_arg(cg, n, i, indirect);
         }
         gen_load_callee(cg, n->name);
         for (int i = argc - 1; i >= 0; i--)
@@ -4761,6 +4861,7 @@ static void gen_user_call(Codegen* cg, AstNode* n, int indirect) {
     for (int i = 0; i < argc; i++) {
         gen_one_arg(cg, n->children[i]);
         emit(cg, "    mov [rsp+%d], rax\n", i * 8);
+        release_moved_arg(cg, n, i, indirect);
     }
     int nreg = argc < 6 ? argc : 6;
     for (int i = 0; i < nreg; i++)
@@ -6083,19 +6184,29 @@ static int owner_hosted(int line, int col, const char* what) {
     return 1;
 }
 
-static int vec_elem_size(const char* elem) {
+// 0 when `elem` is not an integer, a pointer, or a known struct.
+static int vec_elem_size(Codegen* cg, const char* elem, int* is_struct) {
     int bits = 64, sg = 1;
+    StructType* st;
+    if (is_struct) *is_struct = 0;
     if (!elem || !elem[0]) return 0;
     if (elem[0] == '*') return 8;
-    if (!int_name(elem, &bits, &sg)) return 0;
-    if (bits != 8 && bits != 16 && bits != 32 && bits != 64) return 0;
-    return bits / 8;
+    if (int_name(elem, &bits, &sg)) {
+        if (bits != 8 && bits != 16 && bits != 32 && bits != 64) return 0;
+        return bits / 8;
+    }
+    st = (cg && cg->types) ? typetab_lookup(cg->types, (char*)elem) : NULL;
+    if (st && st->size > 0) {
+        if (is_struct) *is_struct = 1;
+        return st->size;
+    }
+    return 0;
 }
 
 static void gen_vec_push(Codegen* cg, AstNode* n) {
     Symbol* s = NULL;
     const char* elem;
-    int es, off;
+    int es, off, is_struct;
     int dbl, alloc, oom, nocopy, store;
     if (!n || n->child_count != 2) {
         diag_error(n ? n->line : 0, n ? n->col : 0, "vec_push() takes a vec and a value");
@@ -6108,14 +6219,32 @@ static void gen_vec_push(Codegen* cg, AstNode* n) {
         return;
     }
     elem = s->type_name ? s->type_name : "i64";
-    es = vec_elem_size(elem);
+    is_struct = 0;
+    es = vec_elem_size(cg, elem, &is_struct);
     if (!es) {
-        diag_error(n->line, n->col, "a vec element must be an integer or a pointer");
+        diag_error(n->line, n->col, "a vec element must be an integer, a pointer, or a struct");
         return;
     }
-    check_types(n->children[1], "", ty_from_spelled(cg, elem), expr_ty(cg, n->children[1]));
+    if (is_struct) {
+        VTy src = expr_ty(cg, n->children[1]);
+        if (src.kind != VK_STRUCT || !src.disp[0] || strcmp(src.disp, elem))
+            diag_error(n->children[1] ? n->children[1]->line : n->line,
+                       n->children[1] ? n->children[1]->col : n->col,
+                       "expected %s, found %s", elem, src.disp[0] ? src.disp : "untyped");
+        // The new slot is past `len`, so the checked index path would trap.
+        // Growth reallocates the vec buffer, not this value, so its address
+        // stays valid across the malloc. A struct literal has no address.
+        if (!gen_struct_addr(cg, n->children[1])) {
+            diag_error(n->children[1] ? n->children[1]->line : n->line,
+                       n->children[1] ? n->children[1]->col : n->col,
+                       "cannot copy this struct value");
+            return;
+        }
+    } else {
+        check_types(n->children[1], "", ty_from_spelled(cg, elem), expr_ty(cg, n->children[1]));
+        gen_expr(cg, n->children[1]);
+    }
     off = s->offset;
-    gen_expr(cg, n->children[1]);
     emit(cg, "    push rax\n");
     store = new_label(cg);
     emit(cg, "    mov rax, [rbp%d]\n", off + 8);
@@ -6159,11 +6288,16 @@ static void gen_vec_push(Codegen* cg, AstNode* n) {
     emit(cg, "    mov rcx, [rbp%d]\n", off + 8);
     if (es > 1) emit_scale_reg(cg, "rcx", es);
     emit(cg, "    add rbx, rcx\n");
-    emit(cg, "    pop rax\n");
-    if (es <= 1) emit(cg, "    mov byte [rbx], al\n");
-    else if (es == 2) emit(cg, "    mov word [rbx], ax\n");
-    else if (es == 4) emit(cg, "    mov dword [rbx], eax\n");
-    else emit(cg, "    mov qword [rbx], rax\n");
+    if (is_struct) {
+        emit(cg, "    pop rsi\n");
+        emit_copy_mem(cg, "rbx", "rsi", es);
+    } else {
+        emit(cg, "    pop rax\n");
+        if (es <= 1) emit(cg, "    mov byte [rbx], al\n");
+        else if (es == 2) emit(cg, "    mov word [rbx], ax\n");
+        else if (es == 4) emit(cg, "    mov dword [rbx], eax\n");
+        else emit(cg, "    mov qword [rbx], rax\n");
+    }
     emit(cg, "    inc qword [rbp%d]\n", off + 8);
     emit(cg, "    mov rax, [rbp%d]\n", off + 8);
     emit_trap_cold(cg, oom, "oom", "out of memory\n", 14);
@@ -6568,11 +6702,9 @@ static void gen_slice_let(Codegen* cg, AstNode* n) {
                 ? symtab_lookup_symbol(cg->symtab, init->name) : NULL;
             if (vs && vs->is_vec) {
                 const char* elem = vs->type_name ? vs->type_name : "i64";
-                if (!(n->flags & AF_BORROW)) {
-                    diag_error(init->line, init->col, "a vec cannot be copied");
-                    zero_slice(cg, off);
-                    return;
-                }
+                // A view: pointer and length only. The vec still owns the buffer.
+                // A later vec_push that reallocates, or the vec's drop, leaves
+                // this slice dangling. There is no lifetime check.
                 if (want && strcmp(want, elem)) {
                     diag_error(init->line, init->col, "expected []%s, found vec %s", want, elem);
                     zero_slice(cg, off);
@@ -8930,6 +9062,11 @@ void gen_expr(Codegen* cg, AstNode* n) {
         // is the same, but only in a naked function, and a real variable wins.
         Symbol* hw = (!n->qual && n->name) ? symtab_lookup_symbol(cg->symtab, n->name) : NULL;
         GlobalVar* hwg = (!hw && n->name) ? global_symtab_lookup(cg->global_symtab, n->name) : NULL;
+        if (n->child_count > 0 && n->children[0]->type == AST_CALL &&
+            expr_ty(cg, n->children[0]).own) {
+            diag_error(n->line, n->col, "an owning pointer must be moved into 'own *T'");
+            return;
+        }
         if (hw && hw->drop_kind) {
             diag_error(n->line, n->col, hw->is_vec
                        ? "a vec cannot be assigned" : "an owning pointer cannot be reassigned");
@@ -12348,21 +12485,33 @@ void gen_stmt(Codegen* cg, AstNode* n) {
         if (n->child_count > 0 && n->children[0] && n->children[0]->type == AST_IDENT &&
             n->children[0]->name && cg->symtab) {
             Symbol* rs = symtab_lookup_symbol(cg->symtab, n->children[0]->name);
-            if (rs && rs->drop_kind == 1) {
-                diag_error(n->line, n->col, "an owning pointer cannot be returned");
-                return;
-            }
             if (rs && rs->is_vec) {
                 diag_error(n->line, n->col, "a vec cannot be returned");
                 return;
             }
         }
         if (n->child_count > 0) {
+            VTy src_ty = expr_ty(cg, n->children[0]);
+            int fn_own = g_cur_fn && (g_cur_fn->flags & AF_OWN);
+            if (src_ty.own && !fn_own) {
+                diag_error(n->line, n->col, "an owning pointer cannot be returned");
+                return;
+            }
             if (g_cur_fn && !(g_cur_fn->struct_type && !strcmp(g_cur_fn->struct_type, "__array__"))) {
                 VTy dst_ty = ty_decl(cg, 1, g_cur_fn->is_pointer, g_cur_fn->value);
-                check_types(n->children[0], "return value", dst_ty, expr_ty(cg, n->children[0]));
+                check_types(n->children[0], "return value", dst_ty, src_ty);
             }
             gen_expr(cg, n->children[0]);
+            // Move: the caller owns this pointer. The slot must be null before
+            // the drops, or the callee frees it and the caller frees it again.
+            if (src_ty.own && n->children[0]->type == AST_IDENT && n->children[0]->name &&
+                cg->symtab) {
+                Symbol* rs = symtab_lookup_symbol(cg->symtab, n->children[0]->name);
+                if (rs && rs->drop_kind == 1) {
+                    if (rs->mem) emit(cg, "    mov qword [%s], 0\n", rs->mem);
+                    else emit(cg, "    mov qword [rbp%d], 0\n", rs->offset);
+                }
+            }
             keep_rax = scope_has_drop(cg, 0, cg->symtab ? cg->symtab->count : 0);
             if (keep_rax) emit(cg, "    push rax\n");
         }
@@ -12395,9 +12544,9 @@ void gen_stmt(Codegen* cg, AstNode* n) {
                 return;
             }
             if (!owner_hosted(n->line, n->col, "vec")) return;
-            es = vec_elem_size(n->value);
+            es = vec_elem_size(cg, n->value, NULL);
             if (!es) {
-                diag_error(n->line, n->col, "a vec element must be an integer or a pointer");
+                diag_error(n->line, n->col, "a vec element must be an integer, a pointer, or a struct");
                 return;
             }
             if (n->child_count > 0) {
@@ -12523,18 +12672,28 @@ void gen_stmt(Codegen* cg, AstNode* n) {
             }
 
             if (n->child_count > 0) {
-                if ((n->flags & AF_OWN) && n->children[0]->type == AST_IDENT &&
-                    n->children[0]->name && cg->symtab) {
+                int local_owner = 0;
+                VTy src_ty = expr_ty(cg, n->children[0]);
+                if (n->children[0]->type == AST_IDENT && n->children[0]->name && cg->symtab) {
                     Symbol* src = symtab_lookup_symbol(cg->symtab, n->children[0]->name);
-                    if (src && src->drop_kind == 1) {
-                        diag_error(n->line, n->col, "an owning pointer cannot be copied");
-                        emit(cg, "    xor rax, rax\n");
-                        emit(cg, "    mov [rbp%d], rax\n", off);
-                        return;
-                    }
+                    if (src && src->drop_kind == 1) local_owner = 1;
+                }
+                if ((n->flags & AF_OWN) && local_owner) {
+                    diag_error(n->line, n->col, "an owning pointer cannot be copied");
+                    emit(cg, "    xor rax, rax\n");
+                    emit(cg, "    mov [rbp%d], rax\n", off);
+                    return;
+                }
+                // `let q: *T = give()` would drop the only owner. A local owner
+                // on the right is a borrow: that owner still frees.
+                if (src_ty.own && !(n->flags & AF_OWN)) {
+                    diag_error(n->line, n->col, "an owning pointer must be moved into 'own *T'");
+                    emit(cg, "    xor rax, rax\n");
+                    emit(cg, "    mov [rbp%d], rax\n", off);
+                    return;
                 }
                 VTy dst_ty = ty_decl(cg, 0, n->is_pointer, n->value);
-                check_types(n->children[0], "", dst_ty, expr_ty(cg, n->children[0]));
+                check_types(n->children[0], "", dst_ty, src_ty);
                 gen_expr(cg, n->children[0]);
                 {
                     Symbol* ps = &cg->symtab->symbols[cg->symtab->count - 1];
@@ -12757,6 +12916,12 @@ static void bind_param(Codegen* cg, AstNode* par, const char* src_reg, int stack
         }
         if (par->is_pointer & 4)
             cg->symtab->symbols[cg->symtab->count - 1].volatile_pointee = 1;
+        if (par->flags & AF_OWN) {
+            Symbol* os = &cg->symtab->symbols[cg->symtab->count - 1];
+            if (!owner_hosted(par->line, par->col, "an owning pointer")) return;
+            os->drop_kind = 1;
+            os->reg = -1;
+        }
     } else if (par->value && typetab_lookup(cg->types, par->value)) {
         StructType* stt = typetab_lookup(cg->types, par->value);
         int sz = stt->size > 0 ? stt->size : 8;
@@ -13429,6 +13594,8 @@ void gen_func(Codegen* cg, AstNode* n) {
     g_fn_flags = n->flags;
     g_fn_bits = bits;
     g_cur_fn = n;
+    if (n->flags & AF_OWN)
+        owner_hosted(n->line, n->col, "an owning pointer");
     g_naked_slot_n = 0;
     g_naked_slot_seq = 0;
     g_naked_slot_bytes = 0;
@@ -13564,6 +13731,10 @@ void gen_func(Codegen* cg, AstNode* n) {
             }
             if (par->struct_type && !strcmp(par->struct_type, "__slice__")) {
                 diag_error(par->line, par->col, "[]T is a 64-bit value");
+                continue;
+            }
+            if (par->flags & AF_OWN) {
+                diag_error(par->line, par->col, "an owning pointer is hosted-only");
                 continue;
             }
             if (!par->is_pointer && par->value && typetab_lookup(cg->types, par->value)) {
