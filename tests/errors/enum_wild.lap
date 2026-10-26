@@ -1,0 +1,21 @@
+enum Option { None, Some(i64) }
+
+fn main() -> i64 {
+    let o = Option::Some(1);
+    let a = match o {
+        _(x) => x,
+        None => 0
+    };
+    let b = match o {
+        _ => 1,
+        Some(n) => n
+    };
+    let c = match o {
+        _ => 1,
+        _ => 2
+    };
+    let d = match o {
+        Option::_ => 1
+    };
+    return a + b + c + d;
+}

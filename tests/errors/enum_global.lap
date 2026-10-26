@@ -1,0 +1,7 @@
+enum Option { None, Some(i64) }
+
+let g: Option = Option::None;
+
+fn main() -> i64 {
+    return 0;
+}

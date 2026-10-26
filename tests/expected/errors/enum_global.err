@@ -1,0 +1,4 @@
+tests/errors/enum_global.lap:3:5: error: an enum global starts at zero; assign it in a function
+      3 | let g: Option = Option::None;
+        |     ^
+1 error, compilation failed
