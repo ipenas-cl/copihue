@@ -1,0 +1,11 @@
+module console;
+
+section ".console" @ 0x12000 {
+pub fn putc(c: i64) -> i64 {
+    outb(0x3F8, c);
+    return c;
+}
+pub let mark: i64 = 65;
+}
+
+fn hidden() -> i64 { return 1; }

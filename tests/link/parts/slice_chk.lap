@@ -64,6 +64,13 @@ fn rebind(s: []i64, other: []i64) -> i64 {
     return t;
 }
 
+fn unsafe_arr() -> i64 {
+    let a: [i64; 2] = [1, 2];
+    unsafe {
+        return a[9];
+    }
+}
+
 fn _start() -> i64 {
     return 0;
 }

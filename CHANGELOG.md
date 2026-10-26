@@ -2,6 +2,20 @@
 
 Todos los cambios importantes del proyecto.
 
+## [0.35.0] - 2026-10-26
+
+### Added
+- `--flat ADDR --elf` writes one ELF64 executable (`ET_EXEC`) for every file on the command and every `import`. A `module` item's symbol is `mod__item`. `pub` stays source visibility: a defined function, `let`, or `data` name is a global symbol either way. `section "name"` is an ELF section. `section "name" @ address` keeps that virtual address. `.text` is executable, `.data` and `.bss` are writable, and any other name is readable, writable, and executable. Each non-empty section is its own program header, aligned to 1. The section bytes are the raw `--flat` image. `--flat` without `--elf` is still `nasm -f bin`. `--elf` without `--flat` is rejected. `--elf` with `--boot` is rejected. `-S` still writes assembly and does not write the ELF.
+- `--checked` also bounds-checks a local array in `--freestanding`, `--flat`, and `--boot`. The trap is the hosted one: `test` / `js` / `cmp` / `jge`, then `Array bounds error` (19 bytes) on fd 2 and exit 1. `unsafe { a[i] }` skips it. `for i in 0..N` skips it when the array has at least `N` elements, at `-O0` and at `-O2`. `bits 16` and `bits 32` do not insert it. Without `--checked`, those modes still omit it. Hosted checks are unchanged.
+
+### Changed
+- Language version is 0.35.0, on top of 0.34.1.
+
+### Measured
+- No timed bench. Hosted local-array checks did not change, and nothing was added to `make test` beyond the ELF header check and the assembly counts. `bench/slice` and `bench/lowlat` were not run again.
+- NASM listing (`nasm -f elf64 -l`) of one freestanding `a[i]` on `[i64; 4]`. `--checked` inserts 13 bytes before the scale: `test rax, rax` (3), `js` (2), `cmp rax, 4` (4), `jge` (2), `jmp` (2). The trap that follows is 39 bytes, from `mov rsi, str_0` through the exit `syscall`. The jumps are the short form because that trap is 39 bytes, inside the 127-byte short-jump range. A trap past that range would widen each of those three jumps from 2 bytes to 6, and the 13 bytes would become 25. The 19-byte message is one shared literal. Without `--checked` those bytes are absent.
+- `tests/link/parts/flat_entry.lap`, `flat_console.lap`, and `flat_note.lap` at `--flat 0x10000`. The raw image is 102 bytes. The ELF is 1544 bytes. Both files are identical at `-O0` and `-O2`. The 1442 bytes between them are the ELF header, three program headers, and the section and symbol tables. No instruction was added for the ELF. The image was not booted.
+
 ## [0.34.1] - 2026-10-26
 
 ### Fixed
