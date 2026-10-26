@@ -1,0 +1,56 @@
+// also-o2
+// bits 16 and bits 32: idiv, u32 div, and u32 rem push edx and pop it,
+// including a zero divisor. A store through a local pointer, and
+// lgdt/lidt/invlpg of a non-label pointer, push ebx and pop it.
+// wrmsr of rdmsr / 2 pops edx before it pushes the value, so the high
+// half is still there. Assembled, not booted. tests/boot/edx_keep.lap
+// runs the bits 16 idiv, the u32 div, the store, and lgdt under QEMU.
+
+data gdtr {
+    dw 0;
+    dd 0;
+}
+
+bits 16 naked fn keep16() {
+    edx = 4660;
+    ebx = 7;
+    ax = 100;
+    ax = ax / 7;
+    ax = 100;
+    ax = ax % 7;
+    ax = 1;
+    ax = ax / 0;
+    let u: u32 = 4294967295;
+    let q = u / 2;
+    let m = u % 2;
+    let slot: u32 = 0;
+    let p: *u32 = &slot;
+    *(p + 0) = 65;
+    let g = &gdtr;
+    lgdt(g);
+    lidt(g);
+    invlpg(g);
+    ax = edx;
+    bp = ebx;
+}
+
+bits 32 naked fn keep32() {
+    edx = 4660;
+    ebx = 7;
+    eax = 100;
+    eax = eax / 7;
+    eax = 100;
+    eax = eax % 7;
+    let u: u32 = 4294967295;
+    let q = u / 2;
+    let slot: u32 = 0;
+    let p: *u32 = &slot;
+    *(p + 0) = 65;
+    let g = &gdtr;
+    lgdt(g);
+    lidt(g);
+    invlpg(p);
+    wrmsr(0xC0000080, rdmsr(0xC0000080) / 2);
+    eax = edx;
+    ebp = ebx;
+}

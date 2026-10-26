@@ -1,0 +1,302 @@
+section .data
+section .text
+gdtr:
+    dw 0
+    dd 0
+bits 16
+keep16:
+    mov edx, 4660
+    mov ebx, 7
+    mov ax, 100
+    movzx eax, ax
+    push ebx
+    push eax
+    push edx
+    mov eax, 7
+    mov ebx, eax
+    pop edx
+    pop eax
+    push edx
+    test ebx, ebx
+    jnz .L0
+    xor eax, eax
+    jmp .L0_end
+.L0:
+    cdq
+    idiv ebx
+.L0_end:
+    pop edx
+    pop ebx
+    mov ax, 100
+    movzx eax, ax
+    push ebx
+    push eax
+    push edx
+    mov eax, 7
+    mov ebx, eax
+    pop edx
+    pop eax
+    push edx
+    test ebx, ebx
+    jnz .L1
+    xor eax, eax
+    jmp .L1_end
+.L1:
+    cdq
+    idiv ebx
+    mov eax, edx
+.L1_end:
+    pop edx
+    pop ebx
+    mov ax, 1
+    movzx eax, ax
+    push ebx
+    push eax
+    push edx
+    mov eax, 0
+    mov ebx, eax
+    pop edx
+    pop eax
+    push edx
+    test ebx, ebx
+    jnz .L2
+    xor eax, eax
+    jmp .L2_end
+.L2:
+    cdq
+    idiv ebx
+.L2_end:
+    pop edx
+    pop ebx
+    mov eax, 4294967295
+    mov [__loc_keep16_0], eax
+    mov eax, [__loc_keep16_0]
+    push ebx
+    push eax
+    push edx
+    mov eax, 2
+    mov ebx, eax
+    pop edx
+    pop eax
+    push edx
+    test ebx, ebx
+    jnz .L3
+    xor eax, eax
+    jmp .L3_end
+.L3:
+    xor edx, edx
+    div ebx
+.L3_end:
+    pop edx
+    pop ebx
+    mov [__loc_keep16_1], eax
+    mov eax, [__loc_keep16_0]
+    push ebx
+    push eax
+    push edx
+    mov eax, 2
+    mov ebx, eax
+    pop edx
+    pop eax
+    push edx
+    test ebx, ebx
+    jnz .L4
+    xor eax, eax
+    jmp .L4_end
+.L4:
+    xor edx, edx
+    div ebx
+    mov eax, edx
+.L4_end:
+    pop edx
+    pop ebx
+    mov [__loc_keep16_2], eax
+    mov eax, 0
+    mov [__loc_keep16_3], eax
+    mov eax, __loc_keep16_3
+    mov [__loc_keep16_4], eax
+    mov eax, [__loc_keep16_4]
+    push ebx
+    push eax
+    push edx
+    mov eax, 0
+    mov ebx, eax
+    pop edx
+    pop eax
+    add eax, ebx
+    pop ebx
+    push ebx
+    push eax
+    mov eax, 65
+    pop ebx
+    mov dword [ebx], eax
+    pop ebx
+    mov eax, gdtr
+    mov [__loc_keep16_5], eax
+    mov eax, [__loc_keep16_5]
+    push ebx
+    mov bx, ax
+    lgdt [bx]
+    pop ebx
+    mov eax, [__loc_keep16_5]
+    push ebx
+    mov bx, ax
+    lidt [bx]
+    pop ebx
+    mov eax, [__loc_keep16_5]
+    push ebx
+    mov bx, ax
+    invlpg [bx]
+    pop ebx
+    mov eax, edx
+    mov eax, ebx
+    mov bp, ax
+    ret
+__loc_keep16_0: dd 0
+__loc_keep16_1: dd 0
+__loc_keep16_2: dd 0
+__loc_keep16_3: dd 0
+__loc_keep16_4: dd 0
+__loc_keep16_5: dd 0
+bits 64
+bits 32
+keep32:
+    mov edx, 4660
+    mov ebx, 7
+    mov eax, 100
+    push ebx
+    push eax
+    push edx
+    mov eax, 7
+    mov ebx, eax
+    pop edx
+    pop eax
+    push edx
+    test ebx, ebx
+    jnz .L5
+    xor eax, eax
+    jmp .L5_end
+.L5:
+    cdq
+    idiv ebx
+.L5_end:
+    pop edx
+    pop ebx
+    mov eax, 100
+    push ebx
+    push eax
+    push edx
+    mov eax, 7
+    mov ebx, eax
+    pop edx
+    pop eax
+    push edx
+    test ebx, ebx
+    jnz .L6
+    xor eax, eax
+    jmp .L6_end
+.L6:
+    cdq
+    idiv ebx
+    mov eax, edx
+.L6_end:
+    pop edx
+    pop ebx
+    mov eax, 4294967295
+    mov [__loc_keep32_0], eax
+    mov eax, [__loc_keep32_0]
+    push ebx
+    push eax
+    push edx
+    mov eax, 2
+    mov ebx, eax
+    pop edx
+    pop eax
+    push edx
+    test ebx, ebx
+    jnz .L7
+    xor eax, eax
+    jmp .L7_end
+.L7:
+    xor edx, edx
+    div ebx
+.L7_end:
+    pop edx
+    pop ebx
+    mov [__loc_keep32_1], eax
+    mov eax, 0
+    mov [__loc_keep32_2], eax
+    mov eax, __loc_keep32_2
+    mov [__loc_keep32_3], eax
+    mov eax, [__loc_keep32_3]
+    push ebx
+    push eax
+    push edx
+    mov eax, 0
+    mov ebx, eax
+    pop edx
+    pop eax
+    add eax, ebx
+    pop ebx
+    push ebx
+    push eax
+    mov eax, 65
+    pop ebx
+    mov dword [ebx], eax
+    pop ebx
+    mov eax, gdtr
+    mov [__loc_keep32_4], eax
+    mov eax, [__loc_keep32_4]
+    push ebx
+    mov ebx, eax
+    lgdt [ebx]
+    pop ebx
+    mov eax, [__loc_keep32_4]
+    push ebx
+    mov ebx, eax
+    lidt [ebx]
+    pop ebx
+    mov eax, [__loc_keep32_3]
+    push ebx
+    mov ebx, eax
+    invlpg [ebx]
+    pop ebx
+    xor edx, edx
+    mov eax, 3221225600
+    mov ecx, eax
+    rdmsr
+    push ebx
+    push eax
+    push edx
+    mov eax, 2
+    mov ebx, eax
+    pop edx
+    pop eax
+    push edx
+    test ebx, ebx
+    jnz .L8
+    xor eax, eax
+    jmp .L8_end
+.L8:
+    cdq
+    idiv ebx
+.L8_end:
+    pop edx
+    pop ebx
+    push eax
+    push edx
+    mov eax, 3221225600
+    mov ecx, eax
+    pop edx
+    pop eax
+    wrmsr
+    mov eax, edx
+    mov eax, ebx
+    mov ebp, eax
+    ret
+__loc_keep32_0: dd 0
+__loc_keep32_1: dd 0
+__loc_keep32_2: dd 0
+__loc_keep32_3: dd 0
+__loc_keep32_4: dd 0
+bits 64
