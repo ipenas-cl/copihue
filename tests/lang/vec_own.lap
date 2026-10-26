@@ -1,0 +1,108 @@
+fn owned() -> i64 {
+    let p: own *i64 = malloc(8);
+    *p = 42;
+    return *p;
+}
+
+fn after_block() -> i64 {
+    let n = 0;
+    {
+        let p: own *i64 = malloc(8);
+        *p = 7;
+        n = *p;
+    }
+    return n;
+}
+
+fn on_break() -> i64 {
+    let n = 0;
+    let i = 0;
+    while (i < 3) {
+        let p: own *i64 = malloc(8);
+        *p = 1;
+        n = n + *p;
+        i = i + 1;
+        if (i == 1) {
+            break;
+        }
+    }
+    return n + 1;
+}
+
+fn on_continue() -> i64 {
+    let s = 0;
+    let i = 0;
+    while (i < 4) {
+        let p: own *i64 = malloc(8);
+        *p = i;
+        if (i == 1) {
+            i = i + 1;
+            continue;
+        }
+        s = s + *p;
+        i = i + 1;
+    }
+    return s;
+}
+
+fn summed() -> i64 {
+    let v: vec i64;
+    let i = 0;
+    let s = 0;
+    while (i < 10) {
+        vec_push(v, i);
+        i = i + 1;
+    }
+    i = 0;
+    while (i < v.len) {
+        s = s + v[i];
+        i = i + 1;
+    }
+    return s * 100 + v.len * 10 + v.cap;
+}
+
+fn summed_for() -> i64 {
+    let v: vec i64;
+    let i = 1;
+    let s = 0;
+    while (i <= 5) {
+        vec_push(v, i);
+        i = i + 1;
+    }
+    for x in v {
+        s = s + x;
+    }
+    return s;
+}
+
+fn narrow() -> i64 {
+    let v: vec u8;
+    vec_push(v, 200);
+    vec_push(v, 55);
+    return v[0] + v[1];
+}
+
+fn pushed() -> i64 {
+    let v: vec i64;
+    return vec_push(v, 7);
+}
+
+fn main() -> i64 {
+    print_int(owned());
+    println("");
+    print_int(after_block());
+    println("");
+    print_int(on_break());
+    println("");
+    print_int(on_continue());
+    println("");
+    print_int(summed());
+    println("");
+    print_int(summed_for());
+    println("");
+    print_int(narrow());
+    println("");
+    print_int(pushed());
+    println("");
+    return 0;
+}

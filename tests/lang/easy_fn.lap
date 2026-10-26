@@ -1,0 +1,28 @@
+fn fib(n) {
+    if (n < 2) {
+        return n;
+    }
+    return fib(n - 1) + fib(n - 2);
+}
+
+fn fib_typed(n: i64) -> i64 {
+    if (n < 2) {
+        return n;
+    }
+    return fib_typed(n - 1) + fib_typed(n - 2);
+}
+
+fn add(a, b) {
+    let x = 40;
+    return x + a + b;
+}
+
+fn main() -> i64 {
+    print_int(fib(10));
+    println("");
+    print_int(fib_typed(10));
+    println("");
+    print_int(add(1, 1));
+    println("");
+    return 0;
+}

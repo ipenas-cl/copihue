@@ -1,0 +1,4 @@
+tests/errors/own_param.lap:1:6: error: an owning pointer must be a local
+      1 | fn f(p: own *i64) -> i64 {
+        |      ^
+1 error, compilation failed

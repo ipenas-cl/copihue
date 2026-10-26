@@ -1,0 +1,4 @@
+tests/errors/own_copy.lap:3:9: error: an owning pointer cannot be copied
+      3 |     let q: own *i64 = p;
+        |         ^
+1 error, compilation failed

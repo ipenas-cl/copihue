@@ -1,0 +1,4 @@
+tests/errors/vec_elem.lap:4:9: error: a vec element must be an integer or a pointer
+      4 |     let v: vec Point;
+        |         ^
+1 error, compilation failed

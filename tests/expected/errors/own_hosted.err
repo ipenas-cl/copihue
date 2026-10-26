@@ -1,0 +1,4 @@
+tests/errors/own_hosted.lap:3:9: error: an owning pointer is hosted-only
+      3 |     let p: own *i64 = malloc(8);
+        |         ^
+1 error, compilation failed

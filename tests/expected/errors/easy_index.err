@@ -1,0 +1,4 @@
+tests/errors/easy_index.lap:2:12: error: cannot index 'datos': it is not an array or a pointer (declare it as e.g. 'datos: *i8')
+      2 |     return datos[0];
+        |            ^
+1 error, compilation failed
