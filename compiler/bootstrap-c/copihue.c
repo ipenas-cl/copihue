@@ -16,7 +16,7 @@
 
 // ==== NAMING (single place to change when the language is renamed) ====
 #define LANG_NAME     "Copihue"
-#define LANG_VERSION  "0.32.2"
+#define LANG_VERSION  "0.33.0"
 #define COMPILER_BIN  "copihue"
 #define SRC_EXT       ".lap"   /* Lapageria rosea, the copihue */
 #define OLD_SRC_EXT   ".cph"   /* v0.18.x extension, still accepted with a warning */
@@ -49,11 +49,90 @@ static void print_source_line(int line, int col) {
 }
 
 #define MAX_LOADED 64
-typedef struct { char* name; char* text; } LoadedSrc;
+typedef struct { char* name; char* text; const char* mod; } LoadedSrc;
 static LoadedSrc g_loaded[MAX_LOADED];
 static int g_nloaded = 0;
 static char* g_import_stack[MAX_LOADED];
 static int g_import_depth = 0;
+
+// The file currently being parsed. NULL is the flat namespace (pre-0.33).
+static const char* g_file_mod = NULL;
+static int g_file_started = 0;
+static int g_item_pub = 0;
+// The function currently being generated. NULL while a flat function runs.
+static const char* g_cur_mod = NULL;
+
+#define MAX_MODULES 64
+typedef struct { char* name; const char* file; int line, col; } ModInfo;
+static ModInfo g_mods[MAX_MODULES];
+static int g_nmods = 0;
+
+#define MAX_LINK_SYMS 1024
+static char* g_link_syms[MAX_LINK_SYMS];
+static int g_nlink_syms = 0;
+
+static int same_mod(const char* a, const char* b) {
+    if (!a && !b) return 1;
+    if (!a || !b) return 0;
+    return strcmp(a, b) == 0;
+}
+
+static const char* module_file(const char* file) {
+    if (!file) return NULL;
+    for (int i = 0; i < g_nloaded; i++)
+        if (g_loaded[i].name == file && g_loaded[i].mod) return g_loaded[i].mod;
+    if (file == g_src_file) return g_file_mod;
+    return NULL;
+}
+
+static const char* module_of_path(const char* path) {
+    if (!path) return NULL;
+    for (int i = 0; i < g_nloaded; i++)
+        if (g_loaded[i].name && !strcmp(g_loaded[i].name, path)) return g_loaded[i].mod;
+    return NULL;
+}
+
+static int module_known(const char* name) {
+    if (!name) return 0;
+    for (int i = 0; i < g_nmods; i++)
+        if (!strcmp(g_mods[i].name, name)) return 1;
+    return 0;
+}
+
+// NASM spelling. Flat items keep their source name. A module item is mod__item.
+// The two compiler quads are never renamed.
+static const char* link_sym(const char* mod, const char* name) {
+    char buf[192];
+    if (!name) return NULL;
+    if (!mod || !strcmp(name, "__syscall_rsp") || !strcmp(name, "__syscall_user_rsp"))
+        return name;
+    snprintf(buf, sizeof buf, "%s__%s", mod, name);
+    for (int i = 0; i < g_nlink_syms; i++)
+        if (!strcmp(g_link_syms[i], buf)) return g_link_syms[i];
+    if (g_nlink_syms >= MAX_LINK_SYMS) return name;
+    return g_link_syms[g_nlink_syms++] = strdup(buf);
+}
+
+// `mod__item` when `mod` is a module loaded in this compilation. The item
+// may itself contain underscores; the module name is the longest prefix
+// that is a real module and leaves a non-empty item.
+static int split_link(const char* name, const char** mod, const char** src) {
+    const char* best = NULL;
+    int best_n = 0;
+    if (!name) return 0;
+    for (int i = 0; i < g_nmods; i++) {
+        int n = (int)strlen(g_mods[i].name);
+        if (n > best_n && !strncmp(name, g_mods[i].name, n) &&
+            name[n] == '_' && name[n + 1] == '_' && name[n + 2]) {
+            best = g_mods[i].name;
+            best_n = n;
+        }
+    }
+    if (!best) return 0;
+    *mod = best;
+    *src = name + best_n + 2;
+    return 1;
+}
 
 static void focus_file(const char* file) {
     if (!file) return;
@@ -66,10 +145,13 @@ static void focus_file(const char* file) {
     }
 }
 
-// Report an error at line:col in "file:line:col: error: message" form
+// Report an error at line:col. A file that declared `module` prints
+// "module:file:line:col: error:". A flat file stays "file:line:col: error:".
 void diag_error(int line, int col, const char* fmt, ...) {
     va_list ap;
-    fprintf(stderr, "%s:%d:%d: error: ", g_src_file, line, col);
+    const char* mod = module_file(g_src_file);
+    if (mod) fprintf(stderr, "%s:%s:%d:%d: error: ", mod, g_src_file, line, col);
+    else fprintf(stderr, "%s:%d:%d: error: ", g_src_file, line, col);
     va_start(ap, fmt);
     vfprintf(stderr, fmt, ap);
     va_end(ap);
@@ -86,7 +168,7 @@ typedef enum {
     T_EOF, T_IDENT, T_NUM, T_STR,
     T_FN, T_LET, T_IF, T_ELSE, T_WHILE, T_FOR, T_RET, T_STRUCT, T_MUT,
     T_LPAREN, T_RPAREN, T_LBRACE, T_RBRACE, T_LBRACKET, T_RBRACKET,
-    T_SEMI, T_COLON, T_COMMA, T_DOT, T_AT, T_AMP,
+    T_SEMI, T_COLON, T_COLONCOLON, T_COMMA, T_DOT, T_AT, T_AMP,
     T_PLUS, T_MINUS, T_STAR, T_SLASH, T_MOD,
     T_EQ, T_EQEQ, T_NEQ, T_LT, T_GT, T_LTE, T_GTE, T_ARROW,
     T_AND_AND, T_OR_OR, T_BANG,
@@ -181,6 +263,8 @@ typedef struct AstNode {
     const char* file;     // Source file (several files share one program)
     char* section;        // Named section this item is placed in. NULL is the default
     int align;            // align(N) on a struct, a field, or a global. 0 means none
+    const char* mod;      // Defining module. NULL is the flat namespace
+    char* qual;           // Use of Mod::item. NULL is unqualified. name is the link spelling
 } AstNode;
 
 #define AF_PACKED     1
@@ -191,6 +275,7 @@ typedef struct AstNode {
 #define AF_CARRY      32   // `if carry`: branch on CF, no accumulator load
 #define AF_EXTERN     64   // `extern name` or `extern fn`: defined in another -c object
 #define AF_JMP_MEM   128   // `jmp [name]`: indirect through memory, naked only
+#define AF_PUB       256   // `pub` inside a module: visible as Mod::name
 
 // Symbol table
 typedef struct {
@@ -244,6 +329,9 @@ typedef struct {
     char* pointee_type; // Type being pointed to
     char* section;      // Placed in this section, not the default .data or .bss
     int align;          // align(N) on this global. 0 means the type's own alignment
+    char* src_name;     // Source spelling. name is the NASM symbol (mod__item or the source name)
+    const char* mod;    // Defining module. NULL is the flat namespace
+    int is_pub;         // 1 if the source said `pub`
 } GlobalVar;
 
 typedef struct {
@@ -943,6 +1031,9 @@ void global_symtab_add_full(GlobalSymbolTable* gst, char* name, char* type_name,
     gv->volatile_pointee = 0;
     gv->section = NULL;
     gv->align = 0;
+    gv->src_name = NULL;
+    gv->mod = NULL;
+    gv->is_pub = 0;
     gv->pointee_type = is_pointer ? strdup(type_name) : NULL;
 
     // Calculate size
@@ -955,13 +1046,55 @@ void global_symtab_add_full(GlobalSymbolTable* gst, char* name, char* type_name,
     }
 }
 
-GlobalVar* global_symtab_lookup(GlobalSymbolTable* gst, char* name) {
+static GlobalVar* global_exact(GlobalSymbolTable* gst, const char* name) {
+    if (!gst || !name) return NULL;
     for (int i = 0; i < gst->count; i++) {
-        if (!strcmp(gst->vars[i].name, name)) {
+        if (gst->vars[i].name && !strcmp(gst->vars[i].name, name))
             return &gst->vars[i];
-        }
     }
     return NULL;
+}
+
+static const char* g_vis_mod;
+static const char* g_vis_name;
+static int g_use_line, g_use_col;
+
+static int vis_once(const char* mod, const char* name) {
+    if (g_vis_mod && g_vis_name && mod && name &&
+        !strcmp(g_vis_mod, mod) && !strcmp(g_vis_name, name))
+        return 0;
+    g_vis_mod = mod;
+    g_vis_name = name;
+    return 1;
+}
+
+static void vis_global(GlobalVar* g) {
+    if (!g || !g->mod || g->is_pub || same_mod(g->mod, g_cur_mod)) return;
+    if (!vis_once(g->mod, g->src_name ? g->src_name : g->name)) return;
+    diag_error(g_use_line ? g_use_line : g_cur_line, g_use_col ? g_use_col : g_cur_col,
+               "item '%s' of module '%s' is private",
+               g->src_name ? g->src_name : g->name, g->mod);
+}
+
+// A use. Inside a module, the source name is that module's item and nothing
+// else. A qualified use is already the link spelling (`mod__item`).
+GlobalVar* global_symtab_lookup(GlobalSymbolTable* gst, char* name) {
+    const char* qmod = NULL;
+    const char* qsrc = NULL;
+    GlobalVar* g;
+    if (!gst || !name) return NULL;
+    if (g_cur_mod) {
+        g = global_exact(gst, link_sym(g_cur_mod, name));
+        if (g) { vis_global(g); return g; }
+        if (split_link(name, &qmod, &qsrc)) {
+            g = global_exact(gst, name);
+            if (g) { vis_global(g); return g; }
+        }
+        return NULL;
+    }
+    g = global_exact(gst, name);
+    if (g) vis_global(g);
+    return g;
 }
 
 // ==== LEXER ====
@@ -1060,6 +1193,7 @@ Tok lex_tok(Lex* l) {
     if (c == '[') return (Tok){T_LBRACKET, st, 1, tok_line, tok_col};
     if (c == ']') return (Tok){T_RBRACKET, st, 1, tok_line, tok_col};
     if (c == ';') return (Tok){T_SEMI, st, 1, tok_line, tok_col};
+    if (c == ':' && peek(l) == ':') { adv(l); return (Tok){T_COLONCOLON, st, 2, tok_line, tok_col}; }
     if (c == ':') return (Tok){T_COLON, st, 1, tok_line, tok_col};
     if (c == ',') return (Tok){T_COMMA, st, 1, tok_line, tok_col};
     if (c == '.') return (Tok){T_DOT, st, 1, tok_line, tok_col};
@@ -1163,6 +1297,7 @@ const char* tok_name(TokType t) {
         case T_RBRACKET: return "']'";
         case T_SEMI: return "';'";
         case T_COLON: return "':'";
+        case T_COLONCOLON: return "'::'";
         case T_COMMA: return "','";
         case T_AT: return "'@'";
         case T_ARROW: return "'->'";
@@ -1315,6 +1450,60 @@ static char* decode_string_literal(const char* s, int len) {
     return out;
 }
 
+static int builtin_type_name(const char* s) {
+    return s && (!strcmp(s, "i8") || !strcmp(s, "u8") || !strcmp(s, "i16") ||
+                 !strcmp(s, "u16") || !strcmp(s, "i32") || !strcmp(s, "u32") ||
+                 !strcmp(s, "i64") || !strcmp(s, "u64"));
+}
+
+// A type name, possibly `Mod::Item`. Inside a module a struct name becomes
+// its link spelling so the type table can see it. Builtin integers stay.
+static char* take_type_name(Parser* p) {
+    Tok first = advance_tok(p);
+    char* raw = strndup(first.s, first.len);
+    if (check_tok(p, T_COLONCOLON)) {
+        Tok col = advance_tok(p);
+        Tok item = advance_tok(p);
+        if (item.t != T_IDENT) {
+            diag_error(col.line, col.col, "expected a name after '::'");
+            return raw;
+        }
+        char* item_s = strndup(item.s, item.len);
+        char* out = strdup(link_sym(raw, item_s));
+        free(raw);
+        free(item_s);
+        return out;
+    }
+    if (g_file_mod && !builtin_type_name(raw)) {
+        char* out = strdup(link_sym(g_file_mod, raw));
+        free(raw);
+        return out;
+    }
+    return raw;
+}
+
+// `Mod::item` on an expression. The node's name becomes the link spelling
+// (`mod__item`) and qual keeps the module, so a local named `item` does not
+// hide it. Unqualified names stay the source spelling.
+static void take_qual(Parser* p, Tok* name, char** qual) {
+    *qual = NULL;
+    if (!check_tok(p, T_COLONCOLON)) return;
+    Tok col = advance_tok(p);
+    Tok item = advance_tok(p);
+    if (item.t != T_IDENT) {
+        diag_error(col.line, col.col, "expected a name after '::'");
+        return;
+    }
+    *qual = strndup(name->s, name->len);
+    {
+        char* item_s = strndup(item.s, item.len);
+        char* link = strdup(link_sym(*qual, item_s));
+        free(item_s);
+        name->s = link;
+        name->len = (int)strlen(link);
+    }
+}
+
 AstNode* parse_primary(Parser* p) {
     if (check_tok(p, T_NUM)) {
         Tok t = advance_tok(p);
@@ -1342,12 +1531,20 @@ AstNode* parse_primary(Parser* p) {
     }
     if (check_tok(p, T_IDENT)) {
         Tok t = advance_tok(p);
+        char* qual = NULL;
+        take_qual(p, &t, &qual);
 
         // Struct literal
         if (check_tok(p, T_LBRACE)) {
             advance_tok(p);
             AstNode* struct_lit = ast_new(AST_STRUCT_LITERAL);
-            struct_lit->struct_type = strndup(t.s, t.len);
+            if (qual) struct_lit->struct_type = strndup(t.s, t.len);
+            else if (g_file_mod) {
+                char* src = strndup(t.s, t.len);
+                struct_lit->struct_type = strdup(link_sym(g_file_mod, src));
+                free(src);
+            } else struct_lit->struct_type = strndup(t.s, t.len);
+            struct_lit->qual = qual;
 
             while (!check_tok(p, T_RBRACE)) {
                 Tok field_name = advance_tok(p);
@@ -1369,6 +1566,7 @@ AstNode* parse_primary(Parser* p) {
         if (check_tok(p, T_LPAREN)) {
             AstNode* call = ast_new(AST_CALL);
             call->name = strndup(t.s, t.len);
+            call->qual = qual;
             advance_tok(p);
             while (!check_tok(p, T_RPAREN)) {
                 ast_add(call, parse_expr(p));
@@ -1384,6 +1582,7 @@ AstNode* parse_primary(Parser* p) {
             advance_tok(p);
             AstNode* assign = ast_new(AST_ASSIGN);
             assign->name = strndup(t.s, t.len);
+            assign->qual = qual;
             ast_add(assign, parse_expr(p));
             return assign;
         }
@@ -1391,6 +1590,7 @@ AstNode* parse_primary(Parser* p) {
         // Identifier
         AstNode* n = ast_new(AST_IDENT);
         n->name = strndup(t.s, t.len);
+        n->qual = qual;
         return n;
     }
     if (match_tok(p, T_LPAREN)) {
@@ -1879,10 +2079,16 @@ AstNode* parse_stmt(Parser* p) {
             // Desugar: x++ => x = x + 1
             AstNode* assign = ast_new(AST_ASSIGN);
             assign->name = strdup(expr->name);
+            assign->qual = expr->qual;
+            assign->line = expr->line;
+            assign->col = expr->col;
             AstNode* add = ast_new(AST_BINOP);
             add->op = strdup("+");
             AstNode* ident = ast_new(AST_IDENT);
             ident->name = strdup(expr->name);
+            ident->qual = expr->qual;
+            ident->line = expr->line;
+            ident->col = expr->col;
             ast_add(add, ident);
             AstNode* one = ast_new(AST_NUMBER);
             one->value = strdup("1");
@@ -1896,10 +2102,16 @@ AstNode* parse_stmt(Parser* p) {
             // Desugar: x-- => x = x - 1
             AstNode* assign = ast_new(AST_ASSIGN);
             assign->name = strdup(expr->name);
+            assign->qual = expr->qual;
+            assign->line = expr->line;
+            assign->col = expr->col;
             AstNode* sub = ast_new(AST_BINOP);
             sub->op = strdup("-");
             AstNode* ident = ast_new(AST_IDENT);
             ident->name = strdup(expr->name);
+            ident->qual = expr->qual;
+            ident->line = expr->line;
+            ident->col = expr->col;
             ast_add(sub, ident);
             AstNode* one = ast_new(AST_NUMBER);
             one->value = strdup("1");
@@ -1924,10 +2136,16 @@ AstNode* parse_stmt(Parser* p) {
             // Desugar: x += expr => x = x + expr
             AstNode* assign = ast_new(AST_ASSIGN);
             assign->name = strdup(expr->name);
+            assign->qual = expr->qual;
+            assign->line = expr->line;
+            assign->col = expr->col;
             AstNode* binop = ast_new(AST_BINOP);
             binop->op = strdup(op);
             AstNode* ident = ast_new(AST_IDENT);
             ident->name = strdup(expr->name);
+            ident->qual = expr->qual;
+            ident->line = expr->line;
+            ident->col = expr->col;
             ast_add(binop, ident);
             ast_add(binop, parse_expr(p));  // Right-hand side
             ast_add(assign, binop);
@@ -2166,10 +2384,9 @@ TypeSpec parse_type(Parser* p) {
         return spec;
     }
 
-    // Basic type or struct name (i32, i64, Point, Vector, etc.)
+    // Basic type or struct name (i32, i64, Point, mem::Cell, ...)
     if (!check_tok(p, T_IDENT)) error_expected_type(p);
-    Tok type = advance_tok(p);
-    spec.base_type = strndup(type.s, type.len);
+    spec.base_type = take_type_name(p);
     return spec;
 }
 
@@ -2229,6 +2446,8 @@ AstNode* parse_func(Parser* p) {
                 TypeSpec spec = parse_type(p);
                 par->is_pointer = spec.is_pointer | (spec.is_mutable << 1) | (spec.is_volatile << 2);
                 par->value = spec.base_type;
+            } else if (check_tok(p, T_IDENT)) {
+                par->value = take_type_name(p);
             } else {
                 Tok type_tok = advance_tok(p);  // Get type
                 par->value = strndup(type_tok.s, type_tok.len);  // Save type name
@@ -2446,6 +2665,7 @@ static AstNode* parse_bits_naked_fn(Parser* p) {
 typedef struct {
     char* name;
     const char* file;
+    const char* mod;
     int line, col;
     int forward;
     const char* kind;
@@ -2465,6 +2685,7 @@ static void note_top(AstNode* n) {
     else return;
     for (int i = 0; i < g_ndecls; i++) {
         if (strcmp(g_decls[i].name, n->name)) continue;
+        if (!same_mod(g_decls[i].mod, n->mod)) continue;
         if (fwd) return;
         if (g_decls[i].forward) {
             g_decls[i].forward = 0;
@@ -2483,12 +2704,25 @@ static void note_top(AstNode* n) {
                    what, n->name, g_decls[i].file, g_decls[i].line, g_decls[i].col);
         return;
     }
+    {
+        const char* mine = n->mod ? link_sym(n->mod, n->name) : n->name;
+        for (int i = 0; i < g_ndecls; i++) {
+            const char* other = g_decls[i].mod ? link_sym(g_decls[i].mod, g_decls[i].name) : g_decls[i].name;
+            if (mine && other && !strcmp(mine, other)) {
+                diag_error(n->line, n->col, "link symbol '%s' is already used by %s '%s' at %s:%d:%d",
+                           mine, g_decls[i].kind ? g_decls[i].kind : "declaration",
+                           g_decls[i].name, g_decls[i].file, g_decls[i].line, g_decls[i].col);
+                return;
+            }
+        }
+    }
     if (g_ndecls >= g_decl_cap) {
         g_decl_cap = g_decl_cap ? g_decl_cap * 2 : 64;
         g_decls = safe_realloc(g_decls, sizeof(DeclSite) * g_decl_cap);
     }
     g_decls[g_ndecls].name = strdup(n->name);
     g_decls[g_ndecls].file = g_src_file;
+    g_decls[g_ndecls].mod = n->mod;
     g_decls[g_ndecls].line = n->line;
     g_decls[g_ndecls].col = n->col;
     g_decls[g_ndecls].forward = fwd;
@@ -2614,8 +2848,38 @@ static int tok_u64(Tok t, unsigned long long* out) {
 static void add_top(AstNode* prog, AstNode* n) {
     if (!n) return;
     if (g_cur_section) n->section = g_cur_section;
+    if (g_file_mod) n->mod = g_file_mod;
+    if (g_item_pub) n->flags |= AF_PUB;
+    g_item_pub = 0;
     note_top(n);
     ast_add(prog, n);
+}
+
+static void declare_module(const char* name, int line, int col) {
+    if (g_file_started)
+        diag_error(line, col, "module must be the first declaration");
+    if (g_file_mod)
+        diag_error(line, col, "a file has one module");
+    for (int i = 0; i < g_nmods; i++) {
+        if (!strcmp(g_mods[i].name, name)) {
+            diag_error(line, col, "module '%s' is already defined at %s:%d:%d",
+                       name, g_mods[i].file, g_mods[i].line, g_mods[i].col);
+            return;
+        }
+    }
+    if (g_nmods >= MAX_MODULES) {
+        diag_error(line, col, "too many modules");
+        return;
+    }
+    g_mods[g_nmods].name = strdup(name);
+    g_mods[g_nmods].file = g_src_file;
+    g_mods[g_nmods].line = line;
+    g_mods[g_nmods].col = col;
+    g_file_mod = g_mods[g_nmods].name;
+    g_nmods++;
+    for (int i = 0; i < g_nloaded; i++) {
+        if (g_loaded[i].name == g_src_file) g_loaded[i].mod = g_file_mod;
+    }
 }
 
 static void parse_extern(Parser* p, AstNode* prog) {
@@ -2694,7 +2958,9 @@ static int import_done(const char* path) {
 
 static int parse_file_into(AstNode* prog, const char* path, int from_import, int line, int col) {
     if (import_active(path)) {
-        diag_error(line, col, "import of '%s' is a cycle", path);
+        const char* tm = module_of_path(path);
+        if (tm) diag_error(line, col, "import of '%s' (module %s) is a cycle", path, tm);
+        else diag_error(line, col, "import of '%s' is a cycle", path);
         return 0;
     }
     if (import_done(path)) return 1;
@@ -2719,10 +2985,15 @@ static int parse_file_into(AstNode* prog, const char* path, int from_import, int
     }
     g_loaded[g_nloaded].name = strdup(path);
     g_loaded[g_nloaded].text = src;
+    g_loaded[g_nloaded].mod = NULL;
     const char* saved_file = g_src_file;
     const char* saved_text = g_src_text;
+    const char* saved_mod = g_file_mod;
+    int saved_started = g_file_started;
     g_src_file = g_loaded[g_nloaded].name;
     g_src_text = src;
+    g_file_mod = NULL;
+    g_file_started = 0;
     g_import_stack[g_import_depth++] = g_loaded[g_nloaded].name;
     g_nloaded++;
     int count = 0;
@@ -2732,6 +3003,8 @@ static int parse_file_into(AstNode* prog, const char* path, int from_import, int
     g_import_depth--;
     g_src_file = saved_file;
     g_src_text = saved_text;
+    g_file_mod = saved_mod;
+    g_file_started = saved_started;
     return 1;
 }
 
@@ -2816,9 +3089,52 @@ static void parse_section(Parser* p, AstNode* prog) {
     free(name);
 }
 
+// The parser is sitting on `pub`. True when the next token starts a declaration.
+static int pub_follows(Parser* p) {
+    if (peek_tok_at(p, 1, T_FN) || peek_tok_at(p, 1, T_LET) || peek_tok_at(p, 1, T_STRUCT))
+        return 1;
+    if (peek_word_at(p, 1, "extern") || peek_word_at(p, 1, "data") ||
+        peek_word_at(p, 1, "packed") || peek_word_at(p, 1, "interrupt") ||
+        peek_word_at(p, 1, "syscall") || peek_word_at(p, 1, "bits") ||
+        peek_word_at(p, 1, "naked"))
+        return 1;
+    if (peek_word_at(p, 1, "align") && peek_tok_at(p, 2, T_LPAREN)) return 1;
+    return 0;
+}
+
+static void parse_module_decl(Parser* p) {
+    Tok kw = advance_tok(p);
+    Tok name = advance_tok(p);
+    if (name.t != T_IDENT) {
+        diag_error(kw.line, kw.col, "module needs a name");
+        return;
+    }
+    char* id = strndup(name.s, name.len);
+    declare_module(id, kw.line, kw.col);
+    free(id);
+    expect(p, T_SEMI);
+}
+
 static void parse_top_item(Parser* p, AstNode* prog) {
     int item_align = 0;
+    g_item_pub = 0;
     // Contextual words, so `syscall(...)` and a variable named `packed` still parse.
+    if (peek_word(p, "pub") && pub_follows(p)) {
+        Tok kw = advance_tok(p);
+        if (!g_file_mod)
+            diag_error(kw.line, kw.col, "pub is only valid inside a module");
+        else
+            g_item_pub = 1;
+    }
+    if (peek_word(p, "module") && peek_tok_at(p, 1, T_IDENT) && peek_tok_at(p, 2, T_SEMI)) {
+        if (g_item_pub)
+            diag_error(peek_tok(p).line, peek_tok(p).col, "pub is only valid inside a module");
+        g_item_pub = 0;
+        parse_module_decl(p);
+        g_file_started = 1;
+        return;
+    }
+    g_file_started = 1;
     if (peek_word(p, "align") && peek_tok_at(p, 1, T_LPAREN))
         item_align = parse_align_prefix(p);
     if (peek_word(p, "section") && peek_tok_at(p, 1, T_STR)) {
@@ -2987,16 +3303,46 @@ static void mem_base_disp(char* buf, int n, const char* base, int disp) {
     else snprintf(buf, n, "%s%+d", base, disp);
 }
 
-static AstNode* find_func(Codegen* cg, const char* name) {
+static AstNode* find_func_mod(Codegen* cg, const char* name, const char* mod, int report) {
     AstNode* fwd = NULL;
+    AstNode* hit = NULL;
     if (!cg->program || !name) return NULL;
     for (int i = 0; i < cg->program->child_count; i++) {
         AstNode* fn = cg->program->children[i];
         if (fn->type != AST_FUNCTION || !fn->name || strcmp(fn->name, name)) continue;
-        if (!fn->is_forward_decl) return fn;
+        if (!same_mod(fn->mod, mod)) continue;
+        if (!fn->is_forward_decl) { hit = fn; break; }
         fwd = fn;
     }
-    return fwd;
+    if (!hit) hit = fwd;
+    if (report && hit && hit->mod && !(hit->flags & AF_PUB) && !same_mod(hit->mod, g_cur_mod)) {
+        if (vis_once(hit->mod, hit->name))
+            diag_error(g_use_line ? g_use_line : hit->line,
+                       g_use_col ? g_use_col : hit->col,
+                       "item '%s' of module '%s' is private", hit->name, hit->mod);
+    }
+    return hit;
+}
+
+static AstNode* find_func(Codegen* cg, const char* name) {
+    const char* mod = NULL;
+    const char* src = NULL;
+    if (split_link(name, &mod, &src)) return find_func_mod(cg, src, mod, 1);
+    return find_func_mod(cg, name, g_cur_mod, 1);
+}
+
+static const char* func_nasm(AstNode* fn) {
+    if (!fn || !fn->name) return "";
+    if (!fn->mod) return fn->name;
+    return link_sym(fn->mod, fn->name);
+}
+
+static const char* call_nasm(Codegen* cg, AstNode* n) {
+    AstNode* fn;
+    if (!n || !n->name) return "";
+    fn = find_func(cg, n->name);
+    if (fn) return func_nasm(fn);
+    return n->name;
 }
 
 // ==== TYPES (0.31.0) ====
@@ -3421,6 +3767,7 @@ static VTy ty_binop(Codegen* cg, AstNode* n) {
 
 static VTy expr_ty(Codegen* cg, AstNode* n) {
     if (!n) return ty_unk();
+    if (n->line) { g_use_line = n->line; g_use_col = n->col; }
     if (n->type == AST_NUMBER) return ty_lit(n->value ? atoll(n->value) : 0);
     if (n->type == AST_STRING) return ty_from_spelled(NULL, "*u8");
     if (n->type == AST_CAST) {
@@ -3428,7 +3775,7 @@ static VTy expr_ty(Codegen* cg, AstNode* n) {
         return ty_decl(cg, 0, n->is_pointer, n->value);
     }
     if (n->type == AST_IDENT && n->name) {
-        Symbol* s = (cg && cg->symtab) ? symtab_lookup_symbol(cg->symtab, n->name) : NULL;
+        Symbol* s = (!n->qual && cg && cg->symtab) ? symtab_lookup_symbol(cg->symtab, n->name) : NULL;
         if (s) return sym_vty(cg, s);
         GlobalVar* g = (cg && cg->global_symtab) ? global_symtab_lookup(cg->global_symtab, n->name) : NULL;
         if (g) return global_vty(cg, g);
@@ -3463,7 +3810,7 @@ static VTy expr_ty(Codegen* cg, AstNode* n) {
             if (atomic_pointee(cg, n->children[0], &ab, &asg)) return ty_named_int(ab, asg);
         }
         if (builtin_ret_ty(n->name, &b)) return b;
-        Symbol* loc = (cg && cg->symtab) ? symtab_lookup_symbol(cg->symtab, n->name) : NULL;
+        Symbol* loc = (!n->qual && cg && cg->symtab) ? symtab_lookup_symbol(cg->symtab, n->name) : NULL;
         GlobalVar* gv = (!loc && cg && cg->global_symtab) ? global_symtab_lookup(cg->global_symtab, n->name) : NULL;
         AstNode* fn = cg ? find_func(cg, n->name) : NULL;
         int indirect = (loc || (gv && !fn)) ? 1 : 0;
@@ -3905,8 +4252,14 @@ static void gen_user_call(Codegen* cg, AstNode* n, int indirect) {
         }
         {
             AstNode* fn = find_func(cg, n->name);
-            if (!fn) {
-                diag_error(n->line, n->col, "unknown function '%s'", n->name ? n->name : "(call)");
+            if (n->qual && !module_known(n->qual)) {
+                diag_error(n->line, n->col, "unknown module '%s'", n->qual);
+            } else if (!fn) {
+                if (n->qual)
+                    diag_error(n->line, n->col, "module '%s' has no item '%s'", n->qual,
+                               n->name + strlen(n->qual) + 2);
+                else
+                    diag_error(n->line, n->col, "unknown function '%s'", n->name ? n->name : "(call)");
             } else {
                 int target = fn->bits ? fn->bits : 64;
                 if (target != mode) {
@@ -3936,7 +4289,7 @@ static void gen_user_call(Codegen* cg, AstNode* n, int indirect) {
             }
             for (int i = argc - 1; i >= 0; i--)
                 emit(cg, "    pop %s\n", pregs[i]);
-            if (n->name) emit(cg, "    call %s\n", n->name);
+            if (n->name) emit(cg, "    call %s\n", call_nasm(cg, n));
         }
         return;
     }
@@ -3948,8 +4301,14 @@ static void gen_user_call(Codegen* cg, AstNode* n, int indirect) {
     }
     if (!indirect) {
         AstNode* fn = find_func(cg, n->name);
-        if (!fn) {
-            diag_error(n->line, n->col, "unknown function '%s'", n->name ? n->name : "(call)");
+        if (n->qual && !module_known(n->qual)) {
+            diag_error(n->line, n->col, "unknown module '%s'", n->qual);
+        } else if (!fn) {
+            if (n->qual)
+                diag_error(n->line, n->col, "module '%s' has no item '%s'", n->qual,
+                           n->name + strlen(n->qual) + 2);
+            else
+                diag_error(n->line, n->col, "unknown function '%s'", n->name ? n->name : "(call)");
         } else {
             int want = fn->child_count - 1;
             if (argc != want) {
@@ -3963,7 +4322,7 @@ static void gen_user_call(Codegen* cg, AstNode* n, int indirect) {
     if (!indirect && argc <= 6 && args_all_direct(cg, n, argc)) {
         for (int i = 0; i < argc; i++)
             place_in(cg, n->children[i], regs[i]);
-        emit(cg, "    call %s\n", n->name);
+        emit(cg, "    call %s\n", call_nasm(cg, n));
         return;
     }
     if (!indirect && argc <= 6) {
@@ -3973,7 +4332,7 @@ static void gen_user_call(Codegen* cg, AstNode* n, int indirect) {
         }
         for (int i = argc - 1; i >= 0; i--)
             emit(cg, "    pop %s\n", regs[i]);
-        emit(cg, "    call %s\n", n->name);
+        emit(cg, "    call %s\n", call_nasm(cg, n));
         return;
     }
     if (argc <= 6) {
@@ -4005,7 +4364,7 @@ static void gen_user_call(Codegen* cg, AstNode* n, int indirect) {
         gen_load_callee(cg, n->name);
         emit(cg, "    call rbx\n");
     } else {
-        emit(cg, "    call %s\n", n->name);
+        emit(cg, "    call %s\n", call_nasm(cg, n));
     }
     emit(cg, "    add rsp, %d\n", stack_args * 8);
 }
@@ -4371,19 +4730,29 @@ static int gen_core_builtin(Codegen* cg, AstNode* n) {
             diag_error(n->line, n->col, "offsetof(Struct, field) takes a struct name and a field name");
             return 1;
         }
-        if (!typetab_lookup(cg->types, n->children[0]->name)) {
-            diag_error(n->line, n->col, "offsetof() unknown struct '%s'", n->children[0]->name);
+        {
+            const char* st = n->children[0]->name;
+            char* owned = NULL;
+            if (g_cur_mod && !typetab_lookup(cg->types, (char*)st)) {
+                owned = strdup(link_sym(g_cur_mod, st));
+                st = owned;
+            }
+            if (!typetab_lookup(cg->types, (char*)st)) {
+                diag_error(n->line, n->col, "offsetof() unknown struct '%s'", n->children[0]->name);
+                free(owned);
+                return 1;
+            }
+            int off = typetab_field_offset(cg->types, (char*)st, n->children[1]->name);
+            free(owned);
+            if (off < 0) {
+                diag_error(n->line, n->col, "struct '%s' has no field '%s'",
+                           n->children[0]->name, n->children[1]->name);
+                return 1;
+            }
+            if (legacy_bits()) emit(cg, "    mov eax, %d\n", off);
+            else emit(cg, "    mov rax, %d\n", off);
             return 1;
         }
-        int off = typetab_field_offset(cg->types, n->children[0]->name, n->children[1]->name);
-        if (off < 0) {
-            diag_error(n->line, n->col, "struct '%s' has no field '%s'",
-                       n->children[0]->name, n->children[1]->name);
-            return 1;
-        }
-        if (legacy_bits()) emit(cg, "    mov eax, %d\n", off);
-        else emit(cg, "    mov rax, %d\n", off);
-        return 1;
     }
     if (!strcmp(f, "outb") || !strcmp(f, "outw") || !strcmp(f, "outl")) {
         if (n->child_count != 2) { diag_error(n->line, n->col, "%s(port, value) takes 2 arguments", f); return 1; }
@@ -5061,7 +5430,8 @@ void gen_builtin_call(Codegen* cg, AstNode* n) {
         }
     } else {
         // Regular function call, or a call through a function pointer variable.
-        Symbol* loc = n->name ? symtab_lookup_symbol(cg->symtab, n->name) : NULL;
+        // A qualified name is the link spelling; a local does not hide it.
+        Symbol* loc = (!n->qual && n->name) ? symtab_lookup_symbol(cg->symtab, n->name) : NULL;
         GlobalVar* gv = (!loc && n->name) ? global_symtab_lookup(cg->global_symtab, n->name) : NULL;
         AstNode* fn = n->name ? find_func(cg, n->name) : NULL;
         int indirect = (loc || (gv && !fn)) ? 1 : 0;
@@ -5070,13 +5440,37 @@ void gen_builtin_call(Codegen* cg, AstNode* n) {
 }
 
 // A `data` block name, or a label written inside one (`mark:`).
+static int data_is(AstNode* d, const char* name) {
+    const char* mod = NULL;
+    const char* src = NULL;
+    if (!d || !d->name || !name) return 0;
+    if (split_link(name, &mod, &src))
+        return !strcmp(d->name, src) && same_mod(d->mod, mod);
+    if (g_cur_mod) return !strcmp(d->name, name) && same_mod(d->mod, g_cur_mod);
+    return !strcmp(d->name, name) && !d->mod;
+}
+
+static const char* data_sym_of(AstNode* d) {
+    if (!d || !d->name) return NULL;
+    return d->mod ? link_sym(d->mod, d->name) : d->name;
+}
+
+static const char* data_sym(Codegen* cg, const char* name) {
+    if (!cg || !cg->program || !name) return NULL;
+    for (int i = 0; i < cg->program->child_count; i++) {
+        AstNode* d = cg->program->children[i];
+        if (!d || d->type != AST_DATA) continue;
+        if (data_is(d, name)) return data_sym_of(d);
+    }
+    return NULL;
+}
+
 static int is_data_name(Codegen* cg, const char* name) {
     if (!cg || !cg->program || !name) return 0;
-    AstNode* prog = cg->program;
-    for (int i = 0; i < prog->child_count; i++) {
-        AstNode* d = prog->children[i];
+    if (data_sym(cg, name)) return 1;
+    for (int i = 0; i < cg->program->child_count; i++) {
+        AstNode* d = cg->program->children[i];
         if (!d || d->type != AST_DATA) continue;
-        if (d->name && !strcmp(d->name, name)) return 1;
         for (int j = 0; j < d->child_count; j++) {
             AstNode* it = d->children[j];
             if (it && it->name && !strcmp(it->name, "label") &&
@@ -5090,10 +5484,15 @@ static int is_data_name(Codegen* cg, const char* name) {
 // `&gdtr` or a bare `gdtr` when that name is a data label. NULL otherwise.
 static const char* addr_data_label(Codegen* cg, AstNode* e) {
     if (!e) return NULL;
-    if (e->type == AST_IDENT && is_data_name(cg, e->name)) return e->name;
+    if (e->type == AST_IDENT && is_data_name(cg, e->name)) {
+        const char* s = data_sym(cg, e->name);
+        return s ? s : e->name;
+    }
     if (e->type == AST_ADDR_OF && e->child_count > 0 && e->children[0] &&
-        e->children[0]->type == AST_IDENT && is_data_name(cg, e->children[0]->name))
-        return e->children[0]->name;
+        e->children[0]->type == AST_IDENT && is_data_name(cg, e->children[0]->name)) {
+        const char* s = data_sym(cg, e->children[0]->name);
+        return s ? s : e->children[0]->name;
+    }
     return NULL;
 }
 
@@ -5914,6 +6313,10 @@ static int sizeof_node(Codegen* cg, AstNode* n) {
             if (g->type_name) return known_type_size(cg, g->type_name, 0);
             return -1;
         }
+    }
+    if (g_cur_mod) {
+        int sz = known_type_size(cg, (char*)link_sym(g_cur_mod, n->name), 0);
+        if (sz >= 0) return sz;
     }
     return known_type_size(cg, n->name, 0);
 }
@@ -6790,7 +7193,8 @@ static void emit_reg_write(Codegen* cg, const char* name, int bits, int seg, Ast
     }
     if (rhs && rhs->type == AST_IDENT && rhs->name &&
         (is_data_name(cg, rhs->name) || find_func(cg, rhs->name))) {
-        emit(cg, "    mov %s, %s\n", name, rhs->name);
+        const char* ds = data_sym(cg, rhs->name);
+        emit(cg, "    mov %s, %s\n", name, ds ? ds : call_nasm(cg, rhs));
         return;
     }
     if (rhs) gen_expr(cg, rhs);
@@ -6960,6 +7364,7 @@ static int try_emit_byte_add(Codegen* cg, AstNode* value, const char* dst_mem,
 
 void gen_expr(Codegen* cg, AstNode* n) {
     if (!n) return;  // Null safety guard
+    if (n->line) { g_use_line = n->line; g_use_col = n->col; }
     // An index load may reuse the value a compare just left in rax.
     // An array store generates that load as its value expression.
     if (n->type != AST_INDEX && n->type != AST_ARRAY_ASSIGN) g_fwd_ok = 0;
@@ -6975,13 +7380,13 @@ void gen_expr(Codegen* cg, AstNode* n) {
             emit(cg, "    mov rbx, %d\n", (int)strlen(n->value));
         }
     } else if (n->type == AST_IDENT) {
-        // Try local variable first
-        Symbol* sym0 = n->name ? symtab_lookup_symbol(cg->symtab, n->name) : NULL;
+        // A qualified name is `mod__item`. A local does not hide it.
+        Symbol* sym0 = (!n->qual && n->name) ? symtab_lookup_symbol(cg->symtab, n->name) : NULL;
         if (sym0 && sym0->hwreg) {
             emit_reg_read(cg, sym0->hwreg, sym0->hwbits);
             return;
         }
-        int off = symtab_lookup(cg->symtab, n->name);
+        int off = n->qual ? 0 : symtab_lookup(cg->symtab, n->name);
         if (off) {
             // Check if this is an array - if so, load address not value
             Symbol* sym = sym0;
@@ -7020,8 +7425,18 @@ void gen_expr(Codegen* cg, AstNode* n) {
                     else if (legacy_bits()) emit(cg, "    xor eax, eax\n");
                     else emit(cg, "    xor rax, rax\n");
                 } else if (is_data_name(cg, n->name) || find_func(cg, n->name)) {
-                    if (legacy_bits()) emit(cg, "    mov eax, %s\n", n->name);
-                    else emit(cg, "    mov rax, %s\n", n->name);
+                    const char* sym = call_nasm(cg, n);
+                    const char* ds = data_sym(cg, n->name);
+                    if (ds) sym = ds;
+                    if (legacy_bits()) emit(cg, "    mov eax, %s\n", sym);
+                    else emit(cg, "    mov rax, %s\n", sym);
+                } else if (n->qual && !module_known(n->qual)) {
+                    diag_error(n->line, n->col, "unknown module '%s'", n->qual);
+                    emit(cg, "    mov rax, 0\n");
+                } else if (n->qual) {
+                    diag_error(n->line, n->col, "module '%s' has no item '%s'", n->qual,
+                               n->name + strlen(n->qual) + 2);
+                    emit(cg, "    mov rax, 0\n");
                 } else {
                     diag_error(n->line, n->col, "use of undeclared variable '%s'", n->name);
                     emit(cg, "    mov rax, 0  ; unknown var %s\n", n->name);
@@ -7081,7 +7496,7 @@ void gen_expr(Codegen* cg, AstNode* n) {
     } else if (n->type == AST_ASSIGN) {
         // A naked parameter is the register itself. A machine-register name
         // is the same, but only in a naked function, and a real variable wins.
-        Symbol* hw = n->name ? symtab_lookup_symbol(cg->symtab, n->name) : NULL;
+        Symbol* hw = (!n->qual && n->name) ? symtab_lookup_symbol(cg->symtab, n->name) : NULL;
         GlobalVar* hwg = (!hw && n->name) ? global_symtab_lookup(cg->global_symtab, n->name) : NULL;
         if (hw && hw->hwreg) {
             emit_reg_write(cg, hw->hwreg, hw->hwbits, 0, n->child_count > 0 ? n->children[0] : NULL);
@@ -7117,8 +7532,8 @@ void gen_expr(Codegen* cg, AstNode* n) {
         }
         check_assign_types(cg, n);
         gen_expr(cg, n->children[0]);
-        // Try local variable first
-        int off = symtab_lookup(cg->symtab, n->name);
+        // A qualified name is the module global, not a local of that spelling.
+        int off = n->qual ? 0 : symtab_lookup(cg->symtab, n->name);
         if (off) {
             Symbol* sym = symtab_lookup_symbol(cg->symtab, n->name);
             if (sym && !sym->is_pointer && !sym->is_array)
@@ -8494,7 +8909,10 @@ static void gen_jmp(Codegen* cg, AstNode* n) {
         }
         if (!find_func(cg, n->name) && !is_data_name(cg, n->name) && !is_code_label(cg, n->name))
             diag_error(n->line, n->col, "unknown jump target '%s'", n->name);
-        emit(cg, "    jmp %s\n", n->name);
+        {
+            const char* ds = data_sym(cg, n->name);
+            emit(cg, "    jmp %s\n", ds ? ds : call_nasm(cg, n));
+        }
         return;
     }
     if (n->value) emit(cg, "    jmp %s\n", n->value);
@@ -10893,10 +11311,12 @@ void gen_func(Codegen* cg, AstNode* n) {
     g_naked_slot_n = 0;
     g_naked_slot_seq = 0;
     g_naked_slot_bytes = 0;
-    snprintf(g_fn_name, sizeof(g_fn_name), "%s", n->name);
+    snprintf(g_fn_name, sizeof(g_fn_name), "%s",
+             n->mod ? link_sym(n->mod, n->name) : n->name);
+    g_cur_mod = n->mod;
 
-    if (bits) emit(cg, "\nbits %d\n%s:\n", bits, n->name);
-    else emit(cg, "\n%s:\n", n->name);
+    if (bits) emit(cg, "\nbits %d\n%s:\n", bits, g_fn_name);
+    else emit(cg, "\n%s:\n", g_fn_name);
     if (naked) {
         // No frame. The body is the machine code, in the selected bits mode.
     } else if (is_int) {
@@ -10909,7 +11329,7 @@ void gen_func(Codegen* cg, AstNode* n) {
         for (int i = 0; i < 15; i++) emit(cg, "    push %s\n", saved[i]);
         if (align_err) emit(cg, "    push rax\n");  // keep the frame 16-byte aligned
         emit(cg, "    mov rbp, rsp\n");
-        emit(cg, "    sub rsp, __frame_%s\n", n->name);
+        emit(cg, "    sub rsp, __frame_%s\n", g_fn_name);
     } else if (is_sys) {
         // syscall/sysret entry. Linux register convention in, System V for the body.
         // The kernel must call set_syscall_stack() with a 16-byte-aligned top first.
@@ -10930,7 +11350,7 @@ void gen_func(Codegen* cg, AstNode* n) {
         emit(cg, "    mov rsi, rdi\n");         // a1
         emit(cg, "    mov rdi, rax\n");         // syscall number
         emit(cg, "    push rbp\n    mov rbp, rsp\n");
-        emit(cg, "    sub rsp, __frame_%s\n", n->name);
+        emit(cg, "    sub rsp, __frame_%s\n", g_fn_name);
     } else {
         if (optimization_level >= 2 && !g_freestanding)
             plan_reg_locals(cg, n);
@@ -10939,7 +11359,7 @@ void gen_func(Codegen* cg, AstNode* n) {
         if (early.ok) {
             if (early.imm_rhs) emit(cg, "    cmp %s, %lld\n", early.lhs, early.imm);
             else emit(cg, "    cmp %s, %s\n", early.lhs, early.rhs);
-            emit(cg, "    %s .Lbase_%s\n", early.jcc, n->name);
+            emit(cg, "    %s .Lbase_%s\n", early.jcc, g_fn_name);
         }
         if (g_slim) {
             // No rbp. Callee-saved regs (and the call temp) are pushed.
@@ -10951,16 +11371,16 @@ void gen_func(Codegen* cg, AstNode* n) {
             emit(cg, "    push rbp\n    mov rbp, rsp\n");
             // Frame size is only known after the body is generated: use a NASM
             // forward-referenced constant defined after the function.
-            emit(cg, "    sub rsp, __frame_%s\n", n->name);
+            emit(cg, "    sub rsp, __frame_%s\n", g_fn_name);
             // Callee-saved r12-r15 live in the frame's spare bytes, below the locals.
             // r10 and r11 are not saved: a local is placed there only when no
             // call falls inside its live range. The call temp, if any, is next.
             for (int i = 0; i < g_reg_callee_n; i++)
                 emit(cg, "    mov [rbp - __frame_%s + %d], %s\n",
-                     n->name, 8 * (i + 1), g_reg_local_name[i]);
+                     g_fn_name, 8 * (i + 1), g_reg_local_name[i]);
             if (g_expr_tmp)
                 emit(cg, "    mov [rbp - __frame_%s + %d], %s\n",
-                     n->name, 8 * (g_reg_callee_n + 1), g_expr_tmp);
+                     g_fn_name, 8 * (g_reg_callee_n + 1), g_expr_tmp);
         }
     }
 
@@ -11068,7 +11488,7 @@ void gen_func(Codegen* cg, AstNode* n) {
             "rax", "rcx", "rdx", "rbx", "rbp", "rsi", "rdi",
             "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15"
         };
-        emit(cg, ".Lret_%s:\n", n->name);
+        emit(cg, ".Lret_%s:\n", g_fn_name);
         if (frame_ptr) {
             // Re-read the parameter. A store to it selects another saved
             // frame; stores through it change rip/rsp before iretq.
@@ -11087,7 +11507,7 @@ void gen_func(Codegen* cg, AstNode* n) {
         emit(cg, "    iretq\n");
     } else if (is_sys) {
         emit(cg, "    xor rax, rax\n");
-        emit(cg, ".Lret_%s:\n", n->name);
+        emit(cg, ".Lret_%s:\n", g_fn_name);
         emit(cg, "    leave\n");
         if (param_count >= 7) {
             // Spacer and a6 sit above the saved r11. Drop them without
@@ -11109,7 +11529,7 @@ void gen_func(Codegen* cg, AstNode* n) {
         emit_hosted_epilogue(cg);
         EarlyRet early_tail = match_early_ret(cg, n);
         if (early_tail.ok) {
-            emit(cg, ".Lbase_%s:\n", n->name);
+            emit(cg, ".Lbase_%s:\n", g_fn_name);
             emit(cg, "    mov rax, %s\n    ret\n", early_tail.ret_reg);
         }
     }
@@ -11129,7 +11549,7 @@ void gen_func(Codegen* cg, AstNode* n) {
     if (!naked) {
         int stack_size = cg->symtab->stack_size + 64;
         stack_size = ((stack_size + 15) / 16) * 16;   // keep rsp 16-byte aligned
-        emit(cg, "__frame_%s equ %d\n", n->name, stack_size);
+        emit(cg, "__frame_%s equ %d\n", g_fn_name, stack_size);
     }
     for (int i = 0; i < g_naked_slot_n; i++) {
         if (legacy_bits()) emit(cg, "%s: dd 0\n", g_naked_slots[i]);
@@ -11144,6 +11564,7 @@ void gen_func(Codegen* cg, AstNode* n) {
     g_fn_flags = 0;
     g_fn_bits = 0;
     g_fn_name[0] = '\0';
+    g_cur_mod = NULL;
     cg->symtab = old_symtab;
 }
 
@@ -11252,9 +11673,11 @@ void build_type_table(TypeTable* tt, AstNode* ast) {
     for (int i = 0; i < ast->child_count; i++) {
         if (ast->children[i]->type == AST_STRUCT_DEF) {
             AstNode* struct_def = ast->children[i];
-            typetab_add(tt, struct_def->name);
+            const char* tname = struct_def->mod ? link_sym(struct_def->mod, struct_def->name)
+                                                 : struct_def->name;
+            typetab_add(tt, (char*)tname);
             {
-                StructType* added = typetab_lookup(tt, struct_def->name);
+                StructType* added = typetab_lookup(tt, (char*)tname);
                 if (added) {
                     added->is_packed = (struct_def->flags & AF_PACKED) ? 1 : 0;
                     added->explicit_align = struct_def->align;
@@ -11282,14 +11705,14 @@ void build_type_table(TypeTable* tt, AstNode* ast) {
                 }
 
                 if (field->file) focus_file(field->file);
-                typetab_add_field(tt, struct_def->name, field->name, full_type, is_ptr,
+                typetab_add_field(tt, (char*)tname, field->name, full_type, is_ptr,
                                   (field->flags & AF_VOLATILE) ? 1 : 0, array_len,
                                   field->align, field->line, field->col);
 
                 if (full_type) free(full_type);
             }
             {
-                StructType* done = typetab_lookup(tt, struct_def->name);
+                StructType* done = typetab_lookup(tt, (char*)tname);
                 typetab_finish(done);
             }
         }
@@ -11407,15 +11830,19 @@ static int section_bin_addr(const NamedSection* sec) {
     return sec && sec->has_addr && !g_reloc;
 }
 
-static int func_is_defined(AstNode* ast, const char* name) {
+static int func_defined_mod(AstNode* ast, const char* name, const char* mod) {
     if (!ast || !name) return 0;
     for (int i = 0; i < ast->child_count; i++) {
         AstNode* fn = ast->children[i];
         if (fn->type == AST_FUNCTION && fn->name && !fn->is_forward_decl &&
-            !strcmp(fn->name, name))
+            !strcmp(fn->name, name) && same_mod(fn->mod, mod))
             return 1;
     }
     return 0;
+}
+
+static int func_is_defined(AstNode* ast, const char* name) {
+    return func_defined_mod(ast, name, NULL);
 }
 
 static int ast_calls(AstNode* n, const char* name) {
@@ -11445,8 +11872,8 @@ static void emit_link_syms(Codegen* cg, AstNode* ast, GlobalSymbolTable* gst) {
     for (int i = 0; i < ast->child_count; i++) {
         AstNode* fn = ast->children[i];
         if (fn->type != AST_FUNCTION || !fn->name || !(fn->flags & AF_EXTERN)) continue;
-        if (func_is_defined(ast, fn->name)) continue;
-        emit_once(cg, "extern", fn->name, seen, &nseen);
+        if (func_defined_mod(ast, fn->name, fn->mod)) continue;
+        emit_once(cg, "extern", func_nasm(fn), seen, &nseen);
         any = 1;
     }
     if (gst) {
@@ -11458,7 +11885,8 @@ static void emit_link_syms(Codegen* cg, AstNode* ast, GlobalSymbolTable* gst) {
             int defined = 0;
             for (int j = 0; j < ast->child_count; j++) {
                 AstNode* d = ast->children[j];
-                if (d->type == AST_DATA && d->name && !strcmp(d->name, gv->name)) defined = 1;
+                if (d->type == AST_DATA && d->name &&
+                    !strcmp(data_sym_of(d), gv->name)) defined = 1;
             }
             if (defined) continue;
             emit_once(cg, "extern", gv->name, seen, &nseen);
@@ -11489,10 +11917,10 @@ static void emit_link_syms(Codegen* cg, AstNode* ast, GlobalSymbolTable* gst) {
     for (int i = 0; i < ast->child_count; i++) {
         AstNode* item = ast->children[i];
         if (item->type == AST_FUNCTION && item->name && !item->is_forward_decl) {
-            emit_once(cg, "global", item->name, seen, &nseen);
+            emit_once(cg, "global", func_nasm(item), seen, &nseen);
             any = 1;
         } else if (item->type == AST_DATA && item->name) {
-            emit_once(cg, "global", item->name, seen, &nseen);
+            emit_once(cg, "global", data_sym_of(item), seen, &nseen);
             any = 1;
         }
     }
@@ -11600,14 +12028,25 @@ void codegen(AstNode* ast, const char* file, StringTable* strtab, TypeTable* typ
                            "volatile cannot apply to struct '%s'; mark fields volatile or use '*volatile %s'",
                            type_name, type_name);
             }
-            global_symtab_add_full(&global_symtab, gvar->name, type_name, 0, is_initialized, init_value,
+            const char* symn = gvar->mod ? link_sym(gvar->mod, gvar->name) : gvar->name;
+            if (gvar->file) focus_file(gvar->file);
+            global_symtab_add_full(&global_symtab, (char*)symn, type_name, 0, is_initialized, init_value,
                                    is_array, array_count, is_pointer, is_mutable);
             if (is_initialized && !is_array && gvar->child_count > 0) {
-                VTy dst_ty = ty_decl(&cg, 0, gvar->is_pointer, gvar->value);
+                const char* saved_mod = g_cur_mod;
+                VTy dst_ty;
+                g_cur_mod = gvar->mod;
+                dst_ty = ty_decl(&cg, 0, gvar->is_pointer, gvar->value);
                 check_types(gvar->children[0], "", dst_ty, expr_ty(&cg, gvar->children[0]));
+                g_cur_mod = saved_mod;
             }
             {
-                GlobalVar* added = global_symtab_lookup(&global_symtab, gvar->name);
+                GlobalVar* added = global_exact(&global_symtab, symn);
+                if (added) {
+                    added->src_name = gvar->name ? strdup(gvar->name) : NULL;
+                    added->mod = gvar->mod;
+                    added->is_pub = (gvar->flags & AF_PUB) ? 1 : 0;
+                }
                 if (added && (gvar->flags & AF_VOLATILE))
                     added->is_volatile = 1;
                 if (added && (gvar->flags & AF_EXTERN)) {
@@ -11628,7 +12067,7 @@ void codegen(AstNode* ast, const char* file, StringTable* strtab, TypeTable* typ
             // If array initialization, extract values
             if (is_initialized && gvar->children[0]->type == AST_ARRAY_LITERAL) {
                 AstNode* arr_lit = gvar->children[0];
-                GlobalVar* gv = global_symtab_lookup(&global_symtab, gvar->name);
+                GlobalVar* gv = global_exact(&global_symtab, symn);
                 if (gv) {
                     gv->array_init_count = arr_lit->child_count;
                     gv->array_init_values = malloc(sizeof(char*) * arr_lit->child_count);
@@ -11644,7 +12083,7 @@ void codegen(AstNode* ast, const char* file, StringTable* strtab, TypeTable* typ
             // If string literal initialization for byte array
             else if (is_initialized && gvar->children[0]->type == AST_STRING) {
                 AstNode* str_lit = gvar->children[0];
-                GlobalVar* gv = global_symtab_lookup(&global_symtab, gvar->name);
+                GlobalVar* gv = global_exact(&global_symtab, symn);
                 if (gv && is_array) {
                     // Convert string to array of bytes
                     char* str_val = str_lit->value;
@@ -11701,6 +12140,7 @@ void codegen(AstNode* ast, const char* file, StringTable* strtab, TypeTable* typ
     if (g_flat_org) {
         for (int i = 0; i < ast->child_count; i++)
             if (ast->children[i]->type == AST_FUNCTION && !ast->children[i]->is_forward_decl &&
+                !ast->children[i]->mod &&
                 !strcmp(ast->children[i]->name, "_start")) flat_entry = ast->children[i];
         if (!flat_entry) diag_error(1, 1, g_boot
             ? "--boot needs a function named _start (the entry point)"
@@ -11724,7 +12164,7 @@ void codegen(AstNode* ast, const char* file, StringTable* strtab, TypeTable* typ
         } else if (item->type == AST_DATA) {
             AstNode* d = item;
             emit_section_switch(&cg, d->section);
-            emit(&cg, "\n%s:\n", d->name);
+            emit(&cg, "\n%s:\n", data_sym_of(d));
             for (int j = 0; j < d->child_count; j++) {
                 AstNode* it = d->children[j];
                 if (!it || !it->name) continue;
@@ -11734,7 +12174,8 @@ void codegen(AstNode* ast, const char* file, StringTable* strtab, TypeTable* typ
                 else emit(&cg, "    %s %s\n", it->name, it->value ? it->value : "0");
             }
         } else if (item->type == AST_GLOBAL_VAR && item->section) {
-            GlobalVar* gv = global_symtab_lookup(&global_symtab, item->name);
+            GlobalVar* gv = global_exact(&global_symtab,
+                item->mod ? link_sym(item->mod, item->name) : item->name);
             if (gv && global_in_code(gv)) {
                 emit_section_switch(&cg, gv->section);
                 write_global_def(&cg, NULL, gv);

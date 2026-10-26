@@ -1,0 +1,2 @@
+module secret;
+fn hidden() -> i64 { return 1; }

@@ -1,0 +1,9 @@
+module a;
+
+import "mod_b.lap";
+
+fn hidden() -> i64 { return 10; }
+
+pub fn part() -> i64 {
+    return b::part() + hidden();
+}

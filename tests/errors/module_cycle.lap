@@ -1,0 +1,3 @@
+module root;
+import "parts/mcycle_a.lap";
+fn main() -> i64 { return 0; }

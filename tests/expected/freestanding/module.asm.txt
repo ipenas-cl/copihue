@@ -1,0 +1,24 @@
+section .data
+section .text
+mfs__answer:
+    push rbp
+    mov rbp, rsp
+    sub rsp, __frame_mfs__answer
+    mov rax, 42
+    leave
+    ret
+    xor rax, rax
+    leave
+    ret
+__frame_mfs__answer equ 64
+boot:
+    push rbp
+    mov rbp, rsp
+    sub rsp, __frame_boot
+    call mfs__answer
+    leave
+    ret
+    xor rax, rax
+    leave
+    ret
+__frame_boot equ 64

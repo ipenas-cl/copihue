@@ -1,0 +1,4 @@
+tests/errors/module_private.lap:3:20: error: item 'hidden' of module 'secret' is private
+      3 |     return secret::hidden();
+        |                    ^
+1 error, compilation failed
