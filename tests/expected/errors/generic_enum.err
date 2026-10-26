@@ -1,0 +1,4 @@
+tests/errors/generic_enum.lap:9:22: error: type argument 'Option' is not an integer, a pointer, or a struct
+      9 |     let x = id<Option>(o);
+        |                      ^
+1 error, compilation failed

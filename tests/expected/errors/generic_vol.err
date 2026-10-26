@@ -1,0 +1,4 @@
+tests/errors/generic_vol.lap:7:12: error: cannot infer type argument 'T' for 'star' from '*volatile u8'
+      7 |     return star(p);
+        |            ^
+1 error, compilation failed

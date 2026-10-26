@@ -1,0 +1,4 @@
+tests/errors/generic_builtin.lap:2:18: error: function 'print_int' takes 0 type arguments, not 1
+      2 |     print_int<i32>(1);
+        |                  ^
+1 error, compilation failed

@@ -1,0 +1,4 @@
+tests/errors/generic_op.lap:4:16: error: cannot apply '+' to 'Point' in 'add<Point>'
+      4 |     return a + b;
+        |                ^
+1 error, compilation failed

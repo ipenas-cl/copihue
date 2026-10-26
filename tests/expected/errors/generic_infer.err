@@ -1,0 +1,4 @@
+tests/errors/generic_infer.lap:9:12: error: type argument 'T' is 'i32' and 'i64' in 'max'
+      9 |     return max(a, b);
+        |            ^
+1 error, compilation failed
