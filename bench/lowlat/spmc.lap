@@ -1,0 +1,110 @@
+// SPMC ring. One producer, three consumers. Capacity 1024.
+// Cells are 64 bytes: seq and data share a line, neighbours do not.
+// 1000000 messages. Sum of 1..1000000 is 500000500000.
+align(64) struct Cell {
+    volatile seq: u64,
+    volatile data: u64,
+}
+
+let cells: [Cell; 1024];
+align(64) let volatile deq: u64 = 0;
+align(64) let volatile done: u64 = 0;
+let volatile next_id: u64 = 0;
+let sum0: u64 = 0;
+let sum1: u64 = 0;
+let sum2: u64 = 0;
+let volatile tid0: u32 = 0;
+let volatile tid1: u32 = 0;
+let volatile tid2: u32 = 0;
+let volatile tid3: u32 = 0;
+let stack0: [u8; 65536];
+let stack1: [u8; 65536];
+let stack2: [u8; 65536];
+let stack3: [u8; 65536];
+
+fn try_pop() -> i64 {
+    let pos = 0;
+    let seq = 0;
+    let again = 0;
+    let old = 0;
+    let v = 0;
+    while (1) {
+        pos = atomic_load_acquire(&deq);
+        seq = atomic_load_acquire(&cells[pos & 1023].seq);
+        if (seq != pos + 1) {
+            again = atomic_load_acquire(&deq);
+            if (again == pos) {
+                return 0;
+            }
+        } else {
+            old = compare_exchange(&deq, pos, pos + 1);
+            if (old == pos) {
+                v = cells[pos & 1023].data;
+                atomic_store_release(&cells[pos & 1023].seq, pos + 1024);
+                return v;
+            }
+        }
+    }
+    return 0;
+}
+
+fn consumer() -> i64 {
+    let id = fetch_add(&next_id, 1);
+    let sum = 0;
+    let v = 0;
+    while (1) {
+        v = try_pop();
+        if (v != 0) {
+            sum = sum + v;
+        } else {
+            if (atomic_load_acquire(&done) != 0) {
+                v = try_pop();
+                if (v == 0) {
+                    if (id == 0) { sum0 = sum; }
+                    else if (id == 1) { sum1 = sum; }
+                    else { sum2 = sum; }
+                    return 0;
+                }
+                sum = sum + v;
+            } else {
+                cpu_pause();
+            }
+        }
+    }
+    return 0;
+}
+
+fn producer() -> i64 {
+    let pos = 0;
+    let i = 1;
+    while (i <= 1000000) {
+        while (atomic_load_acquire(&cells[pos & 1023].seq) != pos) {
+            cpu_pause();
+        }
+        cells[pos & 1023].data = i;
+        atomic_store_release(&cells[pos & 1023].seq, pos + 1);
+        pos = pos + 1;
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn main() -> i64 {
+    let i = 0;
+    while (i < 1024) {
+        atomic_store_release(&cells[i].seq, i);
+        i = i + 1;
+    }
+    thread_spawn(&producer, stack0 + 65536, &tid0);
+    thread_spawn(&consumer, stack1 + 65536, &tid1);
+    thread_spawn(&consumer, stack2 + 65536, &tid2);
+    thread_spawn(&consumer, stack3 + 65536, &tid3);
+    thread_join(&tid0);
+    atomic_store_release(&done, 1);
+    thread_join(&tid1);
+    thread_join(&tid2);
+    thread_join(&tid3);
+    print_int(sum0 + sum1 + sum2);
+    println("");
+    return 0;
+}

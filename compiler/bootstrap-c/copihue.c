@@ -16,7 +16,7 @@
 
 // ==== NAMING (single place to change when the language is renamed) ====
 #define LANG_NAME     "Copihue"
-#define LANG_VERSION  "0.32.1"
+#define LANG_VERSION  "0.32.2"
 #define COMPILER_BIN  "copihue"
 #define SRC_EXT       ".lap"   /* Lapageria rosea, the copihue */
 #define OLD_SRC_EXT   ".cph"   /* v0.18.x extension, still accepted with a warning */
@@ -660,6 +660,10 @@ void emit(Codegen* cg, const char* fmt, ...);
 // writes that register. Cleared before the index expression itself runs,
 // so a nested a[b[i]] still loads the inner element into rax.
 static const char* g_index_dest;
+// The call that is the whole statement. Its result is discarded, so a
+// store, fence, or pause does not clear rax. A nested call is a different
+// node and still returns its value.
+static AstNode* g_stmt_expr;
 static int g_index_hit;
 
 // Cold copies of the hosted bounds trap, emitted after the function's ret
@@ -4224,6 +4228,35 @@ static int gen_label_addr(Codegen* cg, AstNode* n) {
 // lock cmpxchg and returns the old value, not a boolean. The pointer is in
 // r11 and the addend or the desired value is in r10. Both are caller-saved,
 // and a local lives there only when no call crosses its range.
+// `&name` of a scalar global or stack slot. Hosted -O2 then uses that
+// address as the memory operand, instead of lea / push / pop r11. A pointer
+// variable stays on the push path: the slot holds the address, not the cell.
+static int atomic_direct_mem(Codegen* cg, AstNode* e, char* buf, int n) {
+    AstNode* v;
+    if (!o2_hosted() || !e || e->type != AST_ADDR_OF || e->child_count < 1) return 0;
+    v = e->children[0];
+    if (!v || v->type != AST_IDENT || !v->name) return 0;
+    {
+        Symbol* sym = symtab_lookup_symbol(cg->symtab, v->name);
+        if (sym) {
+            if (sym->is_pointer || sym->is_array || sym->hwreg) return 0;
+            if (sym->mem) { snprintf(buf, n, "%s", sym->mem); return 1; }
+            snprintf(buf, n, "rbp%d", sym->offset);
+            return 1;
+        }
+    }
+    {
+        GlobalVar* gv = global_symtab_lookup(cg->global_symtab, v->name);
+        if (!gv || gv->is_pointer || gv->is_array) return 0;
+        snprintf(buf, n, "%s", gv->name);
+        return 1;
+    }
+}
+
+static int callee_saved_reg(const char* r) {
+    return r && (!strcmp(r, "r12") || !strcmp(r, "r13") || !strcmp(r, "r14") || !strcmp(r, "r15"));
+}
+
 static int gen_atomic_builtin(Codegen* cg, AstNode* n) {
     const char* f = n->name;
     int bits = 0, sg = 0;
@@ -4232,6 +4265,8 @@ static int gen_atomic_builtin(Codegen* cg, AstNode* n) {
     const char* width;
     const char* acc;
     const char* accd;
+    char mem[96];
+    int direct = 0;
     if (!store && !rmw && strcmp(f, "fence") && strcmp(f, "cpu_pause")) return 0;
     if (legacy_bits()) {
         diag_error(n->line, n->col, "%s() is a 64-bit operation", f);
@@ -4239,32 +4274,51 @@ static int gen_atomic_builtin(Codegen* cg, AstNode* n) {
     }
     if (!strcmp(f, "fence")) {
         emit(cg, "    mfence\n");
-        emit(cg, "    xor eax, eax\n");
+        if (n != g_stmt_expr) emit(cg, "    xor eax, eax\n");
         return 1;
     }
     if (!strcmp(f, "cpu_pause")) {
         emit(cg, "    pause\n");
-        emit(cg, "    xor eax, eax\n");
+        if (n != g_stmt_expr) emit(cg, "    xor eax, eax\n");
         return 1;
     }
     if (n->child_count < 1 || !atomic_pointee(cg, n->children[0], &bits, &sg)) return 1;
     width = (bits == 32) ? "dword" : "qword";
     acc = (bits == 32) ? "eax" : "rax";
     accd = (bits == 32) ? "r10d" : "r10";
-    gen_expr(cg, n->children[0]);
-    emit(cg, "    push rax\n");
+    direct = atomic_direct_mem(cg, n->children[0], mem, sizeof mem);
+    if (!direct) {
+        gen_expr(cg, n->children[0]);
+        // A load's address is already in rax. A store or RMW still pushes it,
+        // because the value expression runs before the memory operand is used.
+        if (!strcmp(f, "atomic_load_acquire") || !strcmp(f, "atomic_load_seq_cst"))
+            emit(cg, "    mov r11, rax\n");
+        else
+            emit(cg, "    push rax\n");
+    }
     if (!strcmp(f, "atomic_load_acquire") || !strcmp(f, "atomic_load_seq_cst")) {
-        emit(cg, "    pop r11\n");
-        emit(cg, "    mov %s, %s [r11]\n", acc, width);
+        emit(cg, "    mov %s, %s [%s]\n", acc, width, direct ? mem : "r11");
         if (!strcmp(f, "atomic_load_seq_cst")) emit(cg, "    mfence\n");
         return 1;
     }
     if (store) {
-        if (n->child_count >= 2) gen_expr(cg, n->children[1]);
-        emit(cg, "    pop r11\n");
-        if (!strcmp(f, "atomic_store_seq_cst")) emit(cg, "    xchg %s [r11], %s\n", width, acc);
-        else emit(cg, "    mov %s [r11], %s\n", width, acc);
-        emit(cg, "    xor eax, eax\n");
+        const char* src = acc;
+        int from_reg = 0;
+        // xchg writes the old cell back into its register, so a seq_cst
+        // store still moves the value through rax. A release store is mov.
+        if (direct && strcmp(f, "atomic_store_seq_cst") &&
+            n->child_count >= 2 && n->children[1] && n->children[1]->type == AST_IDENT) {
+            Symbol* vs = symtab_lookup_symbol(cg->symtab, n->children[1]->name);
+            const char* vr = local_reg(vs);
+            if (vr) { src = (bits == 32) ? reg_dword(vr) : vr; from_reg = 1; }
+        }
+        if (!from_reg && n->child_count >= 2) gen_expr(cg, n->children[1]);
+        if (!direct) emit(cg, "    pop r11\n");
+        if (!strcmp(f, "atomic_store_seq_cst"))
+            emit(cg, "    xchg %s [%s], %s\n", width, direct ? mem : "r11", src);
+        else
+            emit(cg, "    mov %s [%s], %s\n", width, direct ? mem : "r11", src);
+        if (n != g_stmt_expr) emit(cg, "    xor eax, eax\n");
         return 1;
     }
     if (!strcmp(f, "compare_exchange")) {
@@ -4275,18 +4329,18 @@ static int gen_atomic_builtin(Codegen* cg, AstNode* n) {
         if (n->child_count >= 3) gen_expr(cg, n->children[2]);
         emit(cg, "    mov %s, %s\n", accd, acc);
         emit(cg, "    pop %s\n", acc);
-        emit(cg, "    pop r11\n");
-        emit(cg, "    lock cmpxchg %s [r11], %s\n", width, accd);
+        if (!direct) emit(cg, "    pop r11\n");
+        emit(cg, "    lock cmpxchg %s [%s], %s\n", width, direct ? mem : "r11", accd);
         return 1;
     }
     if (n->child_count >= 2) gen_expr(cg, n->children[1]);
-    emit(cg, "    pop r11\n");
+    if (!direct) emit(cg, "    pop r11\n");
     if (!strcmp(f, "swap")) {
-        emit(cg, "    xchg %s [r11], %s\n", width, acc);
+        emit(cg, "    xchg %s [%s], %s\n", width, direct ? mem : "r11", acc);
         return 1;
     }
     if (!strcmp(f, "atomic_add")) emit(cg, "    mov %s, %s\n", accd, acc);
-    emit(cg, "    lock xadd %s [r11], %s\n", width, acc);
+    emit(cg, "    lock xadd %s [%s], %s\n", width, direct ? mem : "r11", acc);
     if (!strcmp(f, "atomic_add")) emit(cg, "    add %s, %s\n", acc, accd);
     return 1;
 }
@@ -5043,6 +5097,8 @@ static const char* addr_data_label(Codegen* cg, AstNode* e) {
     return NULL;
 }
 
+static int gen_field_addr(Codegen* cg, AstNode* obj, const char* field);
+
 // Helper: Generate address-of operator (&)
 void gen_addr_of(Codegen* cg, AstNode* n) {
     if (!n->children || n->child_count == 0) return;
@@ -5163,6 +5219,11 @@ void gen_addr_of(Codegen* cg, AstNode* n) {
             emit(cg, "    lea rbx, [rbp%d]\n", sym->offset);
             emit(cg, "    add rax, rbx\n");
         }
+    } else if (var->type == AST_FIELD_ACCESS && var->child_count == 1) {
+        // `&cells[i].seq`. The field path knows the struct address; without
+        // this, the atomic builtin stored through whatever was left in rax.
+        if (!gen_field_addr(cg, var->children[0], var->name))
+            diag_error(var->line, var->col, "cannot take the address of field '%s'", var->name ? var->name : "?");
     }
 }
 
@@ -6017,6 +6078,11 @@ static int can_emit_rbx(Codegen* cg, AstNode* n) {
     if (n->type == AST_BINOP && n->op && n->child_count == 2 &&
         n->op[0] != '/' && n->op[0] != '%')
         return can_emit_rbx(cg, n->children[0]) && rbx_leaf(cg, n->children[1]);
+    if (n->type == AST_CALL && n->name && n->child_count >= 1 &&
+        (!strcmp(n->name, "atomic_load_acquire") || !strcmp(n->name, "atomic_load_seq_cst"))) {
+        char mem[96];
+        return atomic_direct_mem(cg, n->children[0], mem, sizeof mem);
+    }
     return 0;
 }
 
@@ -6076,6 +6142,18 @@ static void emit_rbx(Codegen* cg, AstNode* n) {
                 emit_reg_trunc(cg, "rbx", t.bits, t.sg);
         }
         return;
+    }
+    if (n->type == AST_CALL && n->name && n->child_count >= 1 &&
+        (!strcmp(n->name, "atomic_load_acquire") || !strcmp(n->name, "atomic_load_seq_cst"))) {
+        char mem[96];
+        int bits = 0, sg = 0;
+        if (atomic_direct_mem(cg, n->children[0], mem, sizeof mem) &&
+            atomic_pointee(cg, n->children[0], &bits, &sg)) {
+            emit(cg, "    mov %s, %s [%s]\n", bits == 32 ? "ebx" : "rbx",
+                 bits == 32 ? "dword" : "qword", mem);
+            if (!strcmp(n->name, "atomic_load_seq_cst")) emit(cg, "    mfence\n");
+            return;
+        }
     }
     if (n->type == AST_UNARY) {
         emit_rbx(cg, n->children[0]);
@@ -6337,6 +6415,12 @@ static int can_place_k(Codegen* cg, AstNode* n, const char* dest, int allow) {
     if (ident_is_dest(cg, L, dest) && ident_is_dest(cg, R, dest)) return 1;
     if (can_ordered_k(cg, L, R, dest, allow)) return 1;
     if (is_comm_op(n->op) && can_ordered_k(cg, R, L, dest, allow)) return 1;
+    // `sum = sum + buf[i]` keeps sum in its register. The index load uses
+    // rax and does not call, so a callee-saved sum is still the old value.
+    if ((n->op[0] == '+' || (n->op[0] == '-' && !n->op[1])) && !is_shift_op(n->op) &&
+        ident_is_dest(cg, L, dest) && R->type == AST_INDEX && !node_has_call(R) &&
+        callee_saved_reg(dest))
+        return 1;
     return 0;
 }
 
@@ -6413,6 +6497,14 @@ static void place_k_raw(Codegen* cg, AstNode* n, const char* dest, int allow) {
     AstNode* L = n->children[0];
     AstNode* R = n->children[1];
     const char* op = n->op;
+    if ((op[0] == '+' || (op[0] == '-' && !op[1])) && !is_shift_op(op) &&
+        ident_is_dest(cg, L, dest) && R->type == AST_INDEX && !node_has_call(R) &&
+        callee_saved_reg(dest)) {
+        gen_array_index(cg, R);
+        if (op[0] == '+') emit(cg, "    add %s, rax\n", dest);
+        else emit(cg, "    sub %s, rax\n", dest);
+        return;
+    }
     if (is_shift_op(op)) {
         OpLeaf S;
         scalar_leaf(cg, R, &S);
@@ -6587,7 +6679,23 @@ static int assign_direct(Codegen* cg, AstNode* n) {
     if (expr_struct_type(cg, &dst)) return 0;
     Symbol* sym = symtab_lookup_symbol(cg->symtab, n->name);
     const char* rr = local_reg(sym);
-    if (!rr || !can_place(cg, n->children[0], rr)) return 0;
+    if (!rr) return 0;
+    if (n->children[0]->type == AST_CALL && n->children[0]->name &&
+        (!strcmp(n->children[0]->name, "atomic_load_acquire") ||
+         !strcmp(n->children[0]->name, "atomic_load_seq_cst")) &&
+        n->children[0]->child_count >= 1) {
+        char mem[96];
+        int bits = 0, sg = 0;
+        if (atomic_direct_mem(cg, n->children[0]->children[0], mem, sizeof mem) &&
+            atomic_pointee(cg, n->children[0]->children[0], &bits, &sg)) {
+            check_assign_types(cg, n);
+            emit(cg, "    mov %s, %s [%s]\n", bits == 32 ? reg_dword(rr) : rr,
+                 bits == 32 ? "dword" : "qword", mem);
+            if (!strcmp(n->children[0]->name, "atomic_load_seq_cst")) emit(cg, "    mfence\n");
+            return 1;
+        }
+    }
+    if (!can_place(cg, n->children[0], rr)) return 0;
     check_assign_types(cg, n);
     place_in(cg, n->children[0], rr);
     return 1;
@@ -7566,6 +7674,50 @@ void gen_expr(Codegen* cg, AstNode* n) {
                         if (disp == 0) snprintf(mem, sizeof mem, "%s", gvar->name);
                         else snprintf(mem, sizeof mem, "%s%+lld", gvar->name, disp);
                         if (emit_imm_store(cg, value_expr, mem, el)) return;
+                    }
+                }
+            }
+        }
+
+        // `buf[w & mask] = i` with i in a callee-saved register. The index
+        // uses rax/rbx and does not call, so the value does not need a push.
+        if (o2_hosted() && value_expr && value_expr->type == AST_IDENT &&
+            index_expr && !node_has_call(index_expr)) {
+            Symbol* vs = symtab_lookup_symbol(cg->symtab, value_expr->name);
+            const char* vr = local_reg(vs);
+            if (callee_saved_reg(vr)) {
+                Symbol* lsym = symtab_lookup_symbol(cg->symtab, arr->name);
+                GlobalVar* lg = lsym ? NULL : global_symtab_lookup(cg->global_symtab, arr->name);
+                int el = 0;
+                if (lsym && !lsym->is_pointer) {
+                    el = 8;
+                    if (lsym->type_name) {
+                        if (!strcmp(lsym->type_name, "i8") || !strcmp(lsym->type_name, "u8")) el = 1;
+                        else if (!strcmp(lsym->type_name, "i16") || !strcmp(lsym->type_name, "u16")) el = 2;
+                        else if (!strcmp(lsym->type_name, "i32") || !strcmp(lsym->type_name, "u32")) el = 4;
+                        else if (!strcmp(lsym->type_name, "i64") || !strcmp(lsym->type_name, "u64")) el = 8;
+                    }
+                    if (el == 8 && scale_ok(el)) {
+                        gen_expr(cg, index_expr);
+                        char mem[96];
+                        snprintf(mem, sizeof mem, "rbp%d+rax*%d", lsym->offset, el);
+                        emit_scaled_store(cg, mem, el, vr);
+                        return;
+                    }
+                } else if (lg && lg->is_array) {
+                    el = 1;
+                    if (lg->elem_type) {
+                        if (!strcmp(lg->elem_type, "i32") || !strcmp(lg->elem_type, "u32")) el = 4;
+                        else if (!strcmp(lg->elem_type, "i64") || !strcmp(lg->elem_type, "u64")) el = 8;
+                        else if (!strcmp(lg->elem_type, "i16") || !strcmp(lg->elem_type, "u16")) el = 2;
+                        else if (!strcmp(lg->elem_type, "i8") || !strcmp(lg->elem_type, "u8")) el = 1;
+                    }
+                    if (el == 8 && scale_ok(el)) {
+                        gen_expr(cg, index_expr);
+                        char mem[128];
+                        snprintf(mem, sizeof mem, "%s+rax*%d", lg->name, el);
+                        emit_scaled_store(cg, mem, el, vr);
+                        return;
                     }
                 }
             }
@@ -10174,6 +10326,17 @@ static void emit_cmp_acc(Codegen* cg, AstNode* n) {
     }
 }
 
+// The body of `while (cond) { cpu_pause(); }`, including the block the
+// parser wraps around that call. Nothing else: a second statement, or a
+// `for` increment, stays on the ordinary top-tested loop.
+static int pause_only_body(AstNode* n) {
+    if (!n) return 0;
+    if (n->type == AST_BLOCK && n->child_count == 1)
+        return pause_only_body(n->children[0]);
+    return n->type == AST_CALL && n->name && !strcmp(n->name, "cpu_pause") &&
+        n->child_count == 0;
+}
+
 static int cond_is_not(AstNode* n) {
     return n && n->type == AST_UNARY && n->op && n->op[0] == '!' && !n->op[1] &&
         n->child_count > 0;
@@ -10484,6 +10647,20 @@ void gen_stmt(Codegen* cg, AstNode* n) {
             emit(cg, ".L%d:\n", end_lab);
         }
     } else if (n->type == AST_WHILE) {
+        // A spin whose body is only cpu_pause() jumps to that pause when the
+        // condition is still true. The pause sits after ret. The exit falls
+        // through, so the fast path is the not-taken branch. This is not a
+        // general inversion of while: any other body keeps the top test.
+        if (o2_hosted() && n->child_count == 2 && pause_only_body(n->children[1])) {
+            int start_lab = new_label(cg);
+            int pause_lab = new_label(cg);
+            emit(cg, ".L%d:\n", start_lab);
+            branch_succeed(cg, n->children[0], pause_lab);
+            cold_emit(".L%d:\n", pause_lab);
+            cold_emit("    pause\n");
+            cold_emit("    jmp .L%d\n", start_lab);
+            return;
+        }
         int start_lab = new_label(cg);
         int end_lab = new_label(cg);
         int cont_lab = new_label(cg);
@@ -10535,9 +10712,12 @@ void gen_stmt(Codegen* cg, AstNode* n) {
     } else if (n->type == AST_MEM_STORE) {
         gen_mem_store(cg, n);
     } else if (n->type == AST_CALL || n->type == AST_ASSIGN || n->type == AST_ARRAY_ASSIGN || n->type == AST_FIELD_ASSIGN) {
+        AstNode* prev_stmt = g_stmt_expr;
         if (n->type == AST_ASSIGN && !assign_dest_narrow(cg, n) &&
             (assign_direct(cg, n) || assign_index(cg, n))) return;
+        if (n->type == AST_CALL) g_stmt_expr = n;
         gen_expr(cg, n);
+        g_stmt_expr = prev_stmt;
     }
 }
 

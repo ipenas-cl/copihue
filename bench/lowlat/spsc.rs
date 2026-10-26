@@ -10,7 +10,9 @@ struct Idx(AtomicU64);
 
 static WRITE_IDX: Idx = Idx(AtomicU64::new(0));
 static READ_IDX: Idx = Idx(AtomicU64::new(0));
-static mut BUF: [u64; 1024] = [0; 1024];
+#[repr(align(64))]
+struct Buf([u64; 1024]);
+static mut BUF: Buf = Buf([0; 1024]);
 
 fn pause_once() {
     std::hint::spin_loop();
@@ -24,7 +26,7 @@ fn producer() {
             pause_once();
         }
         unsafe {
-            BUF[(w & (CAP - 1)) as usize] = i;
+            BUF.0[(w & (CAP - 1)) as usize] = i;
         }
         w += 1;
         WRITE_IDX.0.store(w, Ordering::Release);
@@ -38,17 +40,15 @@ fn main() {
     let mut sum = 0u64;
     let mut got = 0u64;
     while got < N {
-        let wr = WRITE_IDX.0.load(Ordering::Acquire);
-        if r == wr {
+        while r == WRITE_IDX.0.load(Ordering::Acquire) {
             pause_once();
-        } else {
-            unsafe {
-                sum += BUF[(r & (CAP - 1)) as usize];
-            }
-            r += 1;
-            READ_IDX.0.store(r, Ordering::Release);
-            got += 1;
         }
+        unsafe {
+            sum += BUF.0[(r & (CAP - 1)) as usize];
+        }
+        r += 1;
+        READ_IDX.0.store(r, Ordering::Release);
+        got += 1;
     }
     p.join().unwrap();
     println!("{sum}");

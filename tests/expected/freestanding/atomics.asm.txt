@@ -12,7 +12,6 @@ bump:
     mov rax, 1
     pop r11
     mov qword [r11], rax
-    xor eax, eax
     mov rax, [rbp-8]
     push rax
     mov rax, 2
@@ -44,14 +43,10 @@ bump:
     mov rax, 6
     pop r11
     xchg qword [r11], rax
-    xor eax, eax
     mfence
-    xor eax, eax
     pause
-    xor eax, eax
     mov rax, [rbp-8]
-    push rax
-    pop r11
+    mov r11, rax
     mov rax, qword [r11]
     mfence
     leave
