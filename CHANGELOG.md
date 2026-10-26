@@ -2,6 +2,27 @@
 
 Todos los cambios importantes del proyecto.
 
+## [0.36.1] - 2026-10-26
+
+### Added
+- Hosted `-O2` emits a discarded `fetch_add` or `atomic_add` as `lock add`. An addend that fits in a signed 32-bit immediate is immediate (`lock add qword [cell], 1`). When the caller uses the old value or the new value, the instruction stays `lock xadd`. `-O0`, `--freestanding`, `--flat`, and `--boot` keep `lock xadd`.
+- The same mode addresses `&name` and `&name.field` as one memory operand when `name` is a global or a stack slot and not a pointer or an array. A field of a field adds the offsets. A pointer variable and an indexed element still compute the address.
+- `tests/lang/o2_atomic.lap` prints 0, 6, 10, 2, 9 at `-O0` and `-O2`. The `-O2` assembly contains `lock add qword [cell], 1`, `lock add qword [pair], 1`, `lock add qword [pair+8], 2`, and `lock xadd`.
+
+### Changed
+- Language version is 0.36.1, on top of 0.36.0. The 0.36.0 parameter and return inference, `vec`, and `own` are unchanged.
+
+### Measured
+- The counted `fetch_add` loop was reloading the cell (`lea`, `push`, `pop r11`) and doing `mov rax, 1` / `lock xadd`. `xadd` writes `rax`, so the next `mov rax, 1` waits on it. The index already lived in `r12` and the limit was an immediate `cmp`. Nothing in the loop spilled the counter. gcc `-O2` and rustc `-O` emit `lock add [rip], 1` (and unroll). This change does not unroll and does not align the loop.
+- Paired window 2026-10-26T04:44:36Z — 2026-10-26T04:44:44Z, same machine, no `taskset`, one warmup and seven runs, alternating which Copihue binary ran first. Milliseconds, median (min–max). The before binary is 0.35.2. The after binary is this `lock add`. Checksums stayed 8000000.
+- `split` 34.8 (34.6–34.9) to 20.4 (20.3–20.6). The ranges do not overlap. C++ in that window was 21.4 (20.9–21.7) and Rust 21.1 (20.8–21.4). The new maximum is below both minimums.
+- `free` 34.7 (30.1–34.9) to 20.4 (20.4–20.6). C++ 21.3 (21.1–21.4), Rust 21.2 (20.7–21.3). The new maximum is below both minimums.
+- `same` 60.4 (60.2–60.4) to 39.1 (38.8–39.3). C++ 39.7 (39.7–39.8), Rust 39.6 (39.4–39.7). The new maximum is below both minimums. Pinning both threads to cpu 0 is still slower than pinning them apart: `same` stays above `pin` and `free`.
+- `pin` 35.0 (34.7–45.9) to 20.6 (20.3–27.6). The ranges do not overlap. C++ 21.5 (21.4–21.6) and Rust 21.1 (20.7–21.4) overlap the new range.
+- `share` 160.0 (149.8–184.5) to 147.0 (121.9–155.3). The ranges overlap, and the new range overlaps C++ 137.4 (131.2–151.6) and Rust 154.3 (137.5–159.5). The shared line still dominates. The same `lock add` stays, because `split`, `free`, `same`, and `pin` got faster.
+- `examples/lowlat/bench/pool`, `book`, and `match`, and `bench/lowlat` `spsc`, `pool`, `spmc`, `mpmc`, and `tpool`, are the same bytes as 0.35.2. `watch` is the same bytes too. They were not retimed.
+- `examples/lowlat/RESULTS.md` is the 2026-10-26T04:45:25Z — 2026-10-26T04:45:37Z window of this codegen. The header names the compiler that produced it.
+
 ## [0.35.2] - 2026-10-26
 
 ### Added

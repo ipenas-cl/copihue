@@ -408,6 +408,19 @@ else
   pass=$((pass+1))
 fi
 
+# Hosted -O2: a discarded fetch_add is lock add on the cell, including a
+# struct field. A used fetch_add stays lock xadd.
+if ! ( cd "$WORK" && "$CC" -O2 -S -o o2at.asm "$ROOT/tests/lang/o2_atomic.lap" >/dev/null 2>err.txt ); then
+  fail=$((fail+1)); failed+=("o2_atomic asm"); echo "FAIL o2_atomic asm:"; cat "$WORK/err.txt"
+elif ! grep -q 'lock add qword \[cell\], 1' "$WORK/o2at.asm" || \
+     ! grep -q 'lock add qword \[pair\], 1' "$WORK/o2at.asm" || \
+     ! grep -q 'lock add qword \[pair+8\], 2' "$WORK/o2at.asm" || \
+     ! grep -q 'lock xadd' "$WORK/o2at.asm"; then
+  fail=$((fail+1)); failed+=("o2_atomic asm"); echo "FAIL o2_atomic asm: lock add missing"
+else
+  pass=$((pass+1))
+fi
+
 # []T. Hosted checks s[i], a for that assigns the index, and a for that
 # assigns the slice (three jae .Lslice_trap_). for x in, for i in 0..s.len,
 # for i in 0..4 on an array of at least 4 elements, s.ptr[i], and unsafe

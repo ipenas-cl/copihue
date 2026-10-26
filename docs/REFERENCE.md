@@ -1,4 +1,4 @@
-# Copihue Language Reference (v0.35.2)
+# Copihue Language Reference (v0.36.1)
 
 This document describes the language that `copihue` accepts today. Anything not listed here is not supported.
 Planned features are in the README roadmap.
@@ -183,8 +183,8 @@ These builtins work in hosted code and in `--freestanding`, `--flat`, and 64-bit
 | `atomic_load_seq_cst(p)` | `mov` then `mfence` | the value |
 | `atomic_store_release(p, v)` | `mov` | 0 |
 | `atomic_store_seq_cst(p, v)` | `xchg` (locked by itself) | 0 |
-| `fetch_add(p, v)` | `lock xadd` | the old value |
-| `atomic_add(p, v)` | `lock xadd`, then add the addend | the new value |
+| `fetch_add(p, v)` | `lock xadd`. A hosted `-O2` statement whose result is discarded is `lock add` | the old value |
+| `atomic_add(p, v)` | `lock xadd`, then add the addend. A hosted `-O2` statement whose result is discarded is `lock add` | the new value |
 | `swap(p, v)` | `xchg` | the old value |
 | `compare_exchange(p, expected, desired)` | `lock cmpxchg` | the old value, whether or not it matched |
 | `fence()` | `mfence` | 0 |
@@ -192,7 +192,7 @@ These builtins work in hosted code and in `--freestanding`, `--flat`, and 64-bit
 
 On x86 a plain load already has acquire semantics and a plain store already has release semantics. `seq_cst` is the stronger one: the load is followed by `mfence`, and the store is `xchg`. `compare_exchange` does not return a boolean. The caller compares the old value with `expected`. `r10` and `r11` hold the pointer and the addend; they are caller-saved. `tests/lang/atomics.lap` runs the sequence on one thread at `-O0` and `-O2`. `tests/freestanding/atomics.lap` is the instruction stream, assembled and not booted.
 
-Hosted `-O2` emits an atomic on `&name` as `mov` with that address when `name` is a scalar global or a scalar stack slot, and not a pointer or an array. A pointer variable still loads the pointer into `r11`. A load through any other address is `mov r11, rax` and then the `mov` from `[r11]`. A store or a read-modify-write still pushes that address, because the value expression runs first. A statement that is only a store, `fence()`, or `cpu_pause()` does not emit `xor eax, eax`. A nested call still returns 0. `&cells[i].field` is the address of that field, including a volatile field of an array element, so `atomic_store_release(&cells[i].seq, 7)` writes that cell. `tests/lang/field_atomic.lap` prints the load, the plain field, `sizeof` 64, and both `fetch_add` results.
+Hosted `-O2` emits an atomic on `&name` or `&name.field` as one memory operand when `name` is a global or a stack slot, and not a pointer or an array. A field of a field accumulates the offsets. A pointer variable still loads the pointer into `r11`. An indexed element still computes the address. A load through any other address is `mov r11, rax` and then the `mov` from `[r11]`. A store or a read-modify-write of that other address still pushes it, because the value expression runs first. A statement `fetch_add` or `atomic_add` whose result is discarded is `lock add` (an immediate addend is immediate). When the caller uses the old or the new value, the instruction stays `lock xadd`. `-O0`, `--freestanding`, `--flat`, and `--boot` keep `lock xadd` and the push. A statement that is only a store, `fence()`, or `cpu_pause()` does not emit `xor eax, eax`. A nested call still returns 0. `&cells[i].field` is the address of that field, including a volatile field of an array element, so `atomic_store_release(&cells[i].seq, 7)` writes that cell. `tests/lang/field_atomic.lap` prints the load, the plain field, `sizeof` 64, and both `fetch_add` results. `tests/lang/o2_atomic.lap` prints 0, 6, 10, 2, 9 at `-O0` and `-O2`.
 
 ### Function pointers
 
