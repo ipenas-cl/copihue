@@ -1,0 +1,4 @@
+tests/errors/enum_miss.lap:5:12: error: match does not cover 'None'
+      5 |     return match o {
+        |            ^
+1 error, compilation failed

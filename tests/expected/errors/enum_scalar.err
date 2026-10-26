@@ -1,0 +1,4 @@
+tests/errors/enum_scalar.lap:5:12: error: an enum is not a scalar; match it
+      5 |     return o + 1;
+        |            ^
+1 error, compilation failed

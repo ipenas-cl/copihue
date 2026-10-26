@@ -1,0 +1,30 @@
+section .data
+section .text
+pick:
+    push rbp
+    mov rbp, rsp
+    sub rsp, __frame_pick
+    mov rax, [rdi+0]
+    mov [rbp-16], rax
+    mov rax, [rdi+8]
+    mov [rbp-8], rax
+    cmp qword [rbp-16], 0
+    jne .L1
+    mov rax, 0
+    jmp .L0
+.L1:
+    cmp qword [rbp-16], 1
+    jne .L2
+    mov rax, [rbp-8]
+    mov [rbp-24], rax
+    mov rax, [rbp-24]
+    jmp .L0
+.L2:
+    ud2
+.L0:
+    leave
+    ret
+    xor rax, rax
+    leave
+    ret
+__frame_pick equ 96

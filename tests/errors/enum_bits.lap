@@ -1,0 +1,6 @@
+enum Option { None, Some(i64) }
+
+bits 16 naked fn k() {
+    let o: Option = Option::None;
+    return 0;
+}

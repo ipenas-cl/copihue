@@ -1,0 +1,7 @@
+enum Option { None, Some(i64) }
+
+fn main() -> i64 {
+    let p: *u8 = 0;
+    let o = Option::Some(p);
+    return 0;
+}
