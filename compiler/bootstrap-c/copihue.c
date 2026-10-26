@@ -16,7 +16,7 @@
 
 // ==== NAMING (single place to change when the language is renamed) ====
 #define LANG_NAME     "Copihue"
-#define LANG_VERSION  "0.34.1"
+#define LANG_VERSION  "0.35.0"
 #define COMPILER_BIN  "copihue"
 #define SRC_EXT       ".lap"   /* Lapageria rosea, the copihue */
 #define OLD_SRC_EXT   ".cph"   /* v0.18.x extension, still accepted with a warning */
@@ -33,8 +33,9 @@ static int g_no_brace = 0; // for-in operand must not swallow the body '{'
 #define MAX_LOOP_DEPTH 64
 static int g_loop_break[MAX_LOOP_DEPTH], g_loop_cont[MAX_LOOP_DEPTH], g_loop_depth = 0;
 int g_freestanding = 0;              // --freestanding: no OS, no syscalls, no _start
-int g_checked = 0;                   // --checked: slice bounds trap in freestanding/flat/boot
+int g_checked = 0;                   // --checked: slice and local-array traps in freestanding/flat/boot
 const char* g_flat_org = NULL;       // --flat ADDR: freestanding flat binary loaded at ADDR, entry _start
+int g_flat_elf = 0;                  // --elf with --flat: ELF64 ET_EXEC of that image, named sections kept
 int g_boot = 0;                      // --boot: flat sector at 0x7C00, padded to 512, signature 0xAA55
 int g_reloc = 0;                     // -c: one ELF64 relocatable object (nasm -f elf64), no ld
 
@@ -5809,6 +5810,15 @@ static int slice_checks(void) {
     return (!g_freestanding || g_checked) && !g_unsafe;
 }
 
+// A local array is checked in hosted code. --freestanding, --flat, and
+// --boot skip it unless --checked. The trap is the 64-bit syscall sequence,
+// so bits 16 and bits 32 stay unchecked. unsafe and a proven for-index are
+// applied by the caller.
+static int array_checks(void) {
+    if (legacy_bits()) return 0;
+    return !g_freestanding || g_checked;
+}
+
 static int for_proves_index(AstNode* ix, const char* base, int count) {
     if (!g_for_idx || !ix || ix->type != AST_IDENT || !ix->name) return 0;
     if (strcmp(ix->name, g_for_idx)) return 0;
@@ -6461,7 +6471,7 @@ void gen_addr_of(Codegen* cg, AstNode* n) {
             // Bounds checking for address-of. Primitive arrays keep the
             // historical count (slot count / 8). A struct array uses the
             // declared length so &table[0] is valid for a short table.
-            if (sym->size > 0 && !g_freestanding &&
+            if (sym->size > 0 && array_checks() &&
                 !hosted_array_check_skipped(var->children[1],
                     (sym->is_array && sym->array_len > 0) ? sym->array_len : (sym->size / 8))) {
                 int array_count = sym->size / 8;
@@ -6799,7 +6809,7 @@ void gen_array_index(Codegen* cg, AstNode* n) {
             int declared = (sym->is_array && sym->array_len > 0) ? sym->array_len : array_count;
             if (hosted_array_check_skipped(n->children[1], declared)) proven = 1;
         }
-        if (!proven && sym->size > 0 && !g_freestanding) {
+        if (!proven && sym->size > 0 && array_checks()) {
             if (o2_hosted()) {
                 int skip_neg = g_nonneg_reg && !strcmp(g_nonneg_reg, breg);
                 emit_bounds_hot(cg, breg, array_count, skip_neg);
@@ -13433,9 +13443,11 @@ static void usage(FILE* o) {
         "                      global definitions, extern declarations, no vstart\n"
         "  --freestanding      no OS: no _start, no syscalls, no hosted builtins;\n"
         "                      emits assembly to be included by your own entry code (implies -S)\n"
-        "  --checked           bounds-check []T in --freestanding, --flat, and --boot\n"
+        "  --checked           bounds-check []T and local arrays in --freestanding, --flat, and --boot\n"
         "  --flat <addr>       freestanding flat binary (nasm -f bin) loaded at <addr>;\n"
         "                      execution starts at fn _start, bss_start()/bss_end() give .bss bounds\n"
+        "  --elf               with --flat: ELF64 executable of that image (not a raw binary);\n"
+        "                      named sections keep their load address; several files are one image\n"
         "  --boot              boot sector: --flat 0x7C00, pad to 512 bytes, signature 0xAA55;\n"
         "                      _start must be 'bits 16 naked fn'\n"
         "  -v, --verbose       print compilation steps\n"
@@ -13447,6 +13459,398 @@ static int run_cmd(const char* fmt, const char* a, const char* b) {
     char cmd[4096];
     snprintf(cmd, sizeof(cmd), fmt, a, b);
     return system(cmd);
+}
+
+// --flat --elf. nasm -f bin is the image AtomicOS already loads: sections are
+// packed in the file, and `@` is vstart (the label's address), not a hole.
+// nasm -f elf64 ignores vstart, so the ELF is built from that bin plus the
+// map nasm writes for it. Section bytes in the ELF are the bin bytes. The
+// virtual address is the section's vstart. One invocation, every file and
+// every module, is one ET_EXEC. It is not a relocatable -c object.
+#define FLAT_MAX_SEC 64
+#define FLAT_MAX_SYM 2048
+
+typedef struct {
+    char name[128];
+    unsigned long long vstart, start, length;
+    int nobits;
+} FlatSec;
+
+typedef struct {
+    char name[128];
+    char sec[128];
+    unsigned long long virt;
+} FlatSym;
+
+static void flat_chomp(char* s) {
+    size_t n = strlen(s);
+    while (n && (s[n - 1] == '\n' || s[n - 1] == '\r')) s[--n] = 0;
+}
+
+static void wr_u16(unsigned char* p, unsigned v) {
+    p[0] = (unsigned char)(v & 255);
+    p[1] = (unsigned char)((v >> 8) & 255);
+}
+
+static void wr_u32(unsigned char* p, unsigned v) {
+    p[0] = (unsigned char)(v & 255);
+    p[1] = (unsigned char)((v >> 8) & 255);
+    p[2] = (unsigned char)((v >> 16) & 255);
+    p[3] = (unsigned char)((v >> 24) & 255);
+}
+
+static void wr_u64(unsigned char* p, unsigned long long v) {
+    for (int i = 0; i < 8; i++) p[i] = (unsigned char)((v >> (8 * i)) & 255);
+}
+
+static size_t flat_align(size_t x, size_t a) { return (x + a - 1) & ~(a - 1); }
+
+static int flat_sec_index(FlatSec* secs, int nsec, const char* name) {
+    for (int i = 0; i < nsec; i++)
+        if (!strcmp(secs[i].name, name)) return i;
+    return -1;
+}
+
+static unsigned long long flat_sh_flags(const FlatSec* s) {
+    if (s->nobits || !strcmp(s->name, ".bss") || !strcmp(s->name, ".data"))
+        return 3;              // SHF_WRITE | SHF_ALLOC
+    if (!strcmp(s->name, ".text"))
+        return 6;              // SHF_ALLOC | SHF_EXECINSTR
+    return 7;                  // a named section may hold code and data
+}
+
+static unsigned flat_ph_flags(const FlatSec* s) {
+    if (!strcmp(s->name, ".text")) return 5;                 // PF_R | PF_X
+    if (s->nobits || !strcmp(s->name, ".data") || !strcmp(s->name, ".bss"))
+        return 6;                                            // PF_R | PF_W
+    return 7;                                                // PF_R | PF_W | PF_X
+}
+
+static int flat_parse_map(const char* path, unsigned long long* origin,
+                          FlatSec* secs, int* nsec, FlatSym* syms, int* nsym) {
+    FILE* f = fopen(path, "r");
+    char line[512];
+    char cur[128];
+    int state = 0; // 1 origin, 2 summary, 3 symbols
+    int skip_sym = 0;
+    if (!f) {
+        fprintf(stderr, COMPILER_BIN ": error: flat map was not written\n");
+        return 0;
+    }
+    cur[0] = 0;
+    while (fgets(line, sizeof line, f)) {
+        char* p;
+        flat_chomp(line);
+        if (strstr(line, "Program origin")) { state = 1; continue; }
+        if (strstr(line, "Sections (summary)")) { state = 2; continue; }
+        if (strstr(line, "Symbols")) { state = 3; continue; }
+        if (!strncmp(line, "-- ", 3) && state != 3) { state = 0; continue; }
+        if (state == 1) {
+            char* end = NULL;
+            unsigned long long v;
+            p = line;
+            while (*p == ' ' || *p == '\t') p++;
+            if (!*p) continue;
+            v = strtoull(p, &end, 16);
+            if (end && end != p && *end == 0) { *origin = v; state = 0; }
+            continue;
+        }
+        if (state == 2) {
+            unsigned long long vstart, start, stop, length;
+            char cls[32], name[128];
+            if (sscanf(line, "%llx %llx %llx %llx %31s %127s",
+                       &vstart, &start, &stop, &length, cls, name) != 6)
+                continue;
+            if (*nsec >= FLAT_MAX_SEC) {
+                fprintf(stderr, COMPILER_BIN ": error: flat map has too many sections\n");
+                fclose(f);
+                return 0;
+            }
+            memset(&secs[*nsec], 0, sizeof secs[*nsec]);
+            snprintf(secs[*nsec].name, sizeof secs[*nsec].name, "%s", name);
+            secs[*nsec].vstart = vstart;
+            secs[*nsec].start = start;
+            secs[*nsec].length = length;
+            secs[*nsec].nobits = !strcmp(cls, "nobits");
+            (*nsec)++;
+            continue;
+        }
+        if (state == 3 && !strncmp(line, "---- ", 5)) {
+            if (strstr(line, "No Section")) { skip_sym = 1; cur[0] = 0; continue; }
+            p = strstr(line, "Section ");
+            skip_sym = 1;
+            cur[0] = 0;
+            if (!p) continue;
+            p += 8;
+            while (*p == ' ') p++;
+            {
+                int k = 0;
+                while (*p && *p != ' ' && k < 127) cur[k++] = *p++;
+                cur[k] = 0;
+            }
+            skip_sym = cur[0] == 0;
+            continue;
+        }
+        if (state == 3 && !skip_sym && cur[0]) {
+            unsigned long long real, virt;
+            char name[128];
+            if (sscanf(line, "%llx %llx %127s", &real, &virt, name) != 3) continue;
+            (void)real;
+            if (*nsym >= FLAT_MAX_SYM) {
+                fprintf(stderr, COMPILER_BIN ": error: flat map has too many symbols\n");
+                fclose(f);
+                return 0;
+            }
+            memset(&syms[*nsym], 0, sizeof syms[*nsym]);
+            snprintf(syms[*nsym].name, sizeof syms[*nsym].name, "%s", name);
+            snprintf(syms[*nsym].sec, sizeof syms[*nsym].sec, "%s", cur);
+            syms[*nsym].virt = virt;
+            (*nsym)++;
+        }
+    }
+    fclose(f);
+    if (*nsec == 0) {
+        fprintf(stderr, COMPILER_BIN ": error: flat map has no sections\n");
+        return 0;
+    }
+    return 1;
+}
+
+static int emit_flat_elf(const char* asm_path, const char* elf_path) {
+    const char* map_asm = "output.flatmap.asm";
+    const char* map_path = "output.flat.map";
+    const char* raw_path = "output.flat.bin";
+    FlatSec* secs = NULL;
+    FlatSym* syms = NULL;
+    unsigned char* raw = NULL;
+    unsigned char* elf = NULL;
+    FILE* in;
+    FILE* out;
+    FILE* rf;
+    char buf[8192];
+    unsigned long long origin = 0;
+    unsigned long long entry = 0;
+    int nsec = 0, nsym = 0, nph = 0, has_entry = 0;
+    size_t raw_len = 0;
+    size_t shstr_len = 1, str_len = 1;
+    size_t blob, sym_off, shoff, total;
+    int shstr_names[FLAT_MAX_SEC];
+    int str_names[FLAT_MAX_SYM];
+    int shstr_sh, shstr_sym, shstr_str;
+    unsigned char* sp;
+    int rc = 1;
+
+    in = fopen(asm_path, "r");
+    out = fopen(map_asm, "w");
+    if (!in || !out) {
+        fprintf(stderr, COMPILER_BIN ": error: cannot prepare the flat map assembly\n");
+        if (in) fclose(in);
+        if (out) fclose(out);
+        return 1;
+    }
+    while (fgets(buf, sizeof buf, in)) fputs(buf, out);
+    fprintf(out, "\n[map all %s]\n", map_path);
+    fclose(in);
+    fclose(out);
+    if (run_cmd("nasm -f bin '%s' -o '%s'", map_asm, raw_path) != 0) {
+        fprintf(stderr, COMPILER_BIN ": error: assembler (nasm) failed\n");
+        goto done;
+    }
+    secs = calloc(FLAT_MAX_SEC, sizeof *secs);
+    syms = calloc(FLAT_MAX_SYM, sizeof *syms);
+    if (!secs || !syms || !flat_parse_map(map_path, &origin, secs, &nsec, syms, &nsym))
+        goto done;
+    rf = fopen(raw_path, "rb");
+    if (!rf) {
+        fprintf(stderr, COMPILER_BIN ": error: flat image was not written\n");
+        goto done;
+    }
+    if (fseek(rf, 0, SEEK_END) != 0) { fclose(rf); goto done; }
+    raw_len = (size_t)ftell(rf);
+    if (fseek(rf, 0, SEEK_SET) != 0) { fclose(rf); goto done; }
+    raw = malloc(raw_len ? raw_len : 1);
+    if (!raw || (raw_len && fread(raw, 1, raw_len, rf) != raw_len)) {
+        fclose(rf);
+        fprintf(stderr, COMPILER_BIN ": error: cannot read the flat image\n");
+        goto done;
+    }
+    fclose(rf);
+
+    for (int i = 0; i < nsec; i++) {
+        if (!secs[i].nobits && secs[i].length > 0) nph++;
+        else if (secs[i].nobits && secs[i].length > 0) nph++;
+        if (secs[i].start < origin ||
+            (!secs[i].nobits && secs[i].start - origin + secs[i].length > raw_len)) {
+            fprintf(stderr, COMPILER_BIN ": error: section '%s' does not fit the flat image\n",
+                    secs[i].name);
+            goto done;
+        }
+        shstr_len += strlen(secs[i].name) + 1;
+    }
+    shstr_sh = (int)shstr_len;
+    shstr_len += strlen(".shstrtab") + 1;
+    shstr_sym = (int)shstr_len;
+    shstr_len += strlen(".symtab") + 1;
+    shstr_str = (int)shstr_len;
+    shstr_len += strlen(".strtab") + 1;
+
+    {
+        size_t at = 1;
+        for (int i = 0; i < nsec; i++) {
+            shstr_names[i] = (int)at;
+            at += strlen(secs[i].name) + 1;
+        }
+    }
+    for (int i = 0; i < nsym; i++) {
+        str_names[i] = (int)str_len;
+        str_len += strlen(syms[i].name) + 1;
+        if (!strcmp(syms[i].name, "_start")) { entry = syms[i].virt; has_entry = 1; }
+    }
+    if (!has_entry) {
+        fprintf(stderr, COMPILER_BIN ": error: flat ELF has no _start symbol\n");
+        goto done;
+    }
+
+    blob = flat_align(64 + (size_t)nph * 56, 16);
+    sym_off = flat_align(blob + raw_len + shstr_len + str_len, 8);
+    shoff = flat_align(sym_off + (size_t)(1 + nsec + nsym) * 24, 8);
+    total = shoff + (size_t)(1 + nsec + 3) * 64;
+    elf = calloc(1, total);
+    if (!elf) goto done;
+
+    elf[0] = 0x7f; elf[1] = 'E'; elf[2] = 'L'; elf[3] = 'F';
+    elf[4] = 2; elf[5] = 1; elf[6] = 1;
+    wr_u16(elf + 16, 2);
+    wr_u16(elf + 18, 62);
+    wr_u32(elf + 20, 1);
+    wr_u64(elf + 24, entry);
+    wr_u64(elf + 32, 64);
+    wr_u64(elf + 40, shoff);
+    wr_u16(elf + 52, 64);
+    wr_u16(elf + 54, 56);
+    wr_u16(elf + 56, (unsigned)nph);
+    wr_u16(elf + 58, 64);
+    wr_u16(elf + 60, (unsigned)(1 + nsec + 3));
+    wr_u16(elf + 62, (unsigned)(1 + nsec));
+
+    {
+        int pi = 0;
+        for (int i = 0; i < nsec; i++) {
+            unsigned char* ph;
+            size_t file_off;
+            unsigned long long filesz, memsz;
+            if (secs[i].length == 0) continue;
+            file_off = (size_t)(secs[i].start - origin);
+            filesz = secs[i].nobits ? 0 : secs[i].length;
+            memsz = secs[i].length;
+            ph = elf + 64 + pi * 56;
+            wr_u32(ph, 1);
+            wr_u32(ph + 4, flat_ph_flags(&secs[i]));
+            wr_u64(ph + 8, blob + file_off);
+            wr_u64(ph + 16, secs[i].vstart);
+            wr_u64(ph + 24, secs[i].vstart);
+            wr_u64(ph + 32, filesz);
+            wr_u64(ph + 40, memsz);
+            wr_u64(ph + 48, 1);
+            pi++;
+        }
+    }
+    if (raw_len) memcpy(elf + blob, raw, raw_len);
+
+    sp = elf + blob + raw_len;
+    sp[0] = 0;
+    {
+        size_t at = 1;
+        for (int i = 0; i < nsec; i++) {
+            size_t n = strlen(secs[i].name);
+            memcpy(sp + at, secs[i].name, n + 1);
+            at += n + 1;
+        }
+        memcpy(sp + at, ".shstrtab", 10); at += 10;
+        memcpy(sp + at, ".symtab", 8); at += 8;
+        memcpy(sp + at, ".strtab", 8);
+    }
+    sp = elf + blob + raw_len + shstr_len;
+    sp[0] = 0;
+    {
+        size_t at = 1;
+        for (int i = 0; i < nsym; i++) {
+            size_t n = strlen(syms[i].name);
+            memcpy(sp + at, syms[i].name, n + 1);
+            at += n + 1;
+        }
+    }
+    // Null symbol, then one local section symbol per section, then globals.
+    {
+        unsigned char* sy = elf + sym_off + 24;
+        for (int i = 0; i < nsec; i++) {
+            sy[4] = 3; // STT_SECTION, STB_LOCAL
+            wr_u16(sy + 6, (unsigned)(i + 1));
+            sy += 24;
+        }
+        for (int i = 0; i < nsym; i++) {
+            int si = flat_sec_index(secs, nsec, syms[i].sec);
+            if (si < 0) continue;
+            wr_u32(sy, (unsigned)str_names[i]);
+            sy[4] = 0x10; // STB_GLOBAL, STT_NOTYPE
+            wr_u16(sy + 6, (unsigned)(si + 1));
+            wr_u64(sy + 8, syms[i].virt);
+            sy += 24;
+        }
+    }
+    {
+        unsigned char* sh = elf + shoff + 64;
+        int link = 1 + nsec + 2; // .strtab
+        for (int i = 0; i < nsec; i++) {
+            size_t file_off = (size_t)(secs[i].start - origin);
+            wr_u32(sh, (unsigned)shstr_names[i]);
+            wr_u32(sh + 4, secs[i].nobits ? 8 : 1);
+            wr_u64(sh + 8, flat_sh_flags(&secs[i]));
+            wr_u64(sh + 16, secs[i].vstart);
+            wr_u64(sh + 24, blob + file_off);
+            wr_u64(sh + 32, secs[i].length);
+            wr_u64(sh + 48, 1);
+            sh += 64;
+        }
+        wr_u32(sh, (unsigned)shstr_sh);
+        wr_u32(sh + 4, 3);
+        wr_u64(sh + 24, blob + raw_len);
+        wr_u64(sh + 32, shstr_len);
+        wr_u64(sh + 48, 1);
+        sh += 64;
+        wr_u32(sh, (unsigned)shstr_sym);
+        wr_u32(sh + 4, 2);
+        wr_u32(sh + 40, (unsigned)link);
+        wr_u32(sh + 44, (unsigned)(1 + nsec));
+        wr_u64(sh + 24, sym_off);
+        wr_u64(sh + 32, (unsigned long long)(1 + nsec + nsym) * 24);
+        wr_u64(sh + 48, 8);
+        wr_u64(sh + 56, 24);
+        sh += 64;
+        wr_u32(sh, (unsigned)shstr_str);
+        wr_u32(sh + 4, 3);
+        wr_u64(sh + 24, blob + raw_len + shstr_len);
+        wr_u64(sh + 32, str_len);
+        wr_u64(sh + 48, 1);
+    }
+
+    out = fopen(elf_path, "wb");
+    if (!out || fwrite(elf, 1, total, out) != total) {
+        fprintf(stderr, COMPILER_BIN ": error: cannot write '%s'\n", elf_path);
+        if (out) fclose(out);
+        goto done;
+    }
+    fclose(out);
+    rc = 0;
+done:
+    remove(map_asm);
+    remove(map_path);
+    remove(raw_path);
+    free(secs);
+    free(syms);
+    free(raw);
+    free(elf);
+    return rc;
 }
 
 int main(int argc, char** argv) {
@@ -13464,6 +13868,7 @@ int main(int argc, char** argv) {
         else if (!strcmp(a, "-c")) g_reloc = 1;
         else if (!strcmp(a, "--freestanding")) g_freestanding = 1;
         else if (!strcmp(a, "--checked")) g_checked = 1;
+        else if (!strcmp(a, "--elf")) g_flat_elf = 1;
         else if (!strcmp(a, "--flat")) {
             if (i + 1 >= argc) { fprintf(stderr, COMPILER_BIN ": error: --flat needs a load address\n"); return 2; }
             if (g_boot) { fprintf(stderr, COMPILER_BIN ": error: --flat and --boot cannot be combined\n"); return 2; }
@@ -13485,6 +13890,14 @@ int main(int argc, char** argv) {
             fprintf(stderr, COMPILER_BIN ": error: too many input files (maximum %d)\n", MAX_LOADED);
             return 2;
         } else inputs[ninputs++] = a;
+    }
+    if (g_flat_elf && g_boot) {
+        fprintf(stderr, COMPILER_BIN ": error: --elf cannot be combined with --boot\n");
+        return 2;
+    }
+    if (g_flat_elf && !g_flat_org) {
+        fprintf(stderr, COMPILER_BIN ": error: --elf requires --flat\n");
+        return 2;
     }
     if (g_reloc && g_flat_org) {
         fprintf(stderr, COMPILER_BIN ": error: -c cannot be combined with --flat or --boot\n");
@@ -13543,12 +13956,16 @@ int main(int argc, char** argv) {
     if (verbose && !g_flat_org) fprintf(stderr, "  wrote %s\n", asm_out);
     if (only_asm) return 0;
     if (g_flat_org) {
-        if (run_cmd("nasm -f bin '%s' -o '%s'", asm_out, exe_out) != 0) {
-            fprintf(stderr, COMPILER_BIN ": error: assembler (nasm) failed\n");
+        int rc = g_flat_elf ? emit_flat_elf(asm_out, exe_out)
+                            : run_cmd("nasm -f bin '%s' -o '%s'", asm_out, exe_out);
+        if (rc != 0) {
+            if (!g_flat_elf)
+                fprintf(stderr, COMPILER_BIN ": error: assembler (nasm) failed\n");
             return 1;
         }
         remove(asm_out);
-        if (verbose) fprintf(stderr, "  wrote %s (flat binary, org %s)\n", exe_out, g_flat_org);
+        if (verbose) fprintf(stderr, "  wrote %s (%s, org %s)\n", exe_out,
+                             g_flat_elf ? "flat elf" : "flat binary", g_flat_org);
         return 0;
     }
     if (g_reloc) {

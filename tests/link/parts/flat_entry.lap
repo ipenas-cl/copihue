@@ -1,0 +1,5 @@
+// Flat entry for --flat --elf. console and note are other files on the
+// same command. _start stays in the default .text so it is byte 0.
+fn _start() -> i64 {
+    return console::putc(console::mark);
+}
