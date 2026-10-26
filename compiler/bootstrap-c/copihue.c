@@ -16,7 +16,7 @@
 
 // ==== NAMING (single place to change when the language is renamed) ====
 #define LANG_NAME     "Copihue"
-#define LANG_VERSION  "0.34.0"
+#define LANG_VERSION  "0.34.1"
 #define COMPILER_BIN  "copihue"
 #define SRC_EXT       ".lap"   /* Lapageria rosea, the copihue */
 #define OLD_SRC_EXT   ".cph"   /* v0.18.x extension, still accepted with a warning */
@@ -391,7 +391,10 @@ static int g_fn_bits = 0;   // 0 or 64: rax. 16 or 32: eax (legacy mode)
 // bits 16/32: ebx is the ALU scratch and also a naked lvalue (the INT 15h
 // continuation token). Every binary operator and every comparison used as a
 // value push/pops ebx, not only an if/while. A shift also push/pops ecx
-// (`shl`/`shr`/`sar` need cl). 64-bit rbx stays scratch.
+// (`shl`/`shr`/`sar` need cl). idiv and u32 div push/pop edx around the
+// divide, so a named edx survives. A store whose address is not a bare
+// operand, and lgdt/lidt/invlpg of a non-label pointer, push/pop ebx around
+// the address. 64-bit rbx stays scratch.
 // bits 16/32 unsigned 32-bit compare. 0 everywhere else, so setl/jl stay.
 static int g_cmp_unsigned = 0;
 static char g_fn_name[128];
@@ -5148,8 +5151,13 @@ static int gen_core_builtin(Codegen* cg, AstNode* n) {
         }
         gen_expr(cg, n->children[0]);
         if (legacy_bits()) {
+            // The address is not a data label, so it cannot be `[gdtr]`.
+            // bx/ebx is still the naked lvalue. Put it back after the op.
+            // `mov bx, ax` writes only the low half; `pop ebx` restores all of it.
+            emit(cg, "    push ebx\n");
             if (g_fn_bits == 16) emit(cg, "    mov bx, ax\n    %s [bx]\n", f);
             else emit(cg, "    mov ebx, eax\n    %s [ebx]\n", f);
+            emit(cg, "    pop ebx\n");
         } else {
             emit(cg, "    %s [rax]\n", f);
         }
@@ -7487,9 +7495,12 @@ static void emit_rbx(Codegen* cg, AstNode* n) {
     emit_leaf_reg(cg, n, "rbx");
 }
 
-// eax/ebx form for bits 16 and bits 32. edx is not touched by + - & | ^ *,
-// so an rdmsr high half survives `rdmsr(m) | imm`. The caller push/pops ebx.
-// u32 / and % zero edx for `div`. u32 >> is logical.
+// eax/ebx form for bits 16 and bits 32. + - & | ^ * do not touch edx, so an
+// rdmsr high half survives `rdmsr(m) | imm`. The caller push/pops ebx, and
+// has already popped edx from around the right-hand operand. / and % then
+// push edx again: cdq/idiv and `xor edx`/`div` both destroy it, including
+// the remainder (`mov eax, edx` runs before the pop) and the zero-divisor
+// path. u32 / and % are `div`. u32 >> is logical.
 static void emit_binop_legacy(Codegen* cg, const char* op, int u32) {
     // A shift count lives in cl. ecx is also a named register (the E820
     // buffer size), so put it back after shl/shr/sar, in a condition and outside.
@@ -7507,6 +7518,7 @@ static void emit_binop_legacy(Codegen* cg, const char* op, int u32) {
     else if (op[0] == '*') emit(cg, "    imul eax, ebx\n");
     else if (op[0] == '/' || op[0] == '%') {
         int skip_label = new_label(cg);
+        emit(cg, "    push edx\n");
         emit(cg, "    test ebx, ebx\n");
         emit(cg, "    jnz .L%d\n", skip_label);
         emit(cg, "    xor eax, eax\n");
@@ -7516,6 +7528,7 @@ static void emit_binop_legacy(Codegen* cg, const char* op, int u32) {
         else emit(cg, "    cdq\n    idiv ebx\n");
         if (op[0] == '%') emit(cg, "    mov eax, edx\n");
         emit(cg, ".L%d_end:\n", skip_label);
+        emit(cg, "    pop edx\n");
     }
 }
 
@@ -8226,12 +8239,20 @@ static void gen_mem_store(Codegen* cg, AstNode* n) {
         return;
     }
     if (addr) gen_expr(cg, addr);
-    if (legacy_bits()) emit(cg, "    push eax\n");
-    else emit(cg, "    push rax\n");
+    if (legacy_bits()) {
+        // ebx is a naked lvalue. The address uses it only for the store.
+        emit(cg, "    push ebx\n");
+        emit(cg, "    push eax\n");
+    } else emit(cg, "    push rax\n");
     if (val) gen_expr(cg, peel_store_cast(val, sz * 8));
-    if (legacy_bits()) emit(cg, "    pop ebx\n");
-    else emit(cg, "    pop rbx\n");
-    emit_acc_store(cg, legacy_bits() ? "ebx" : "rbx", sz, n->line, n->col);
+    if (legacy_bits()) {
+        emit(cg, "    pop ebx\n");
+        emit_acc_store(cg, "ebx", sz, n->line, n->col);
+        emit(cg, "    pop ebx\n");
+    } else {
+        emit(cg, "    pop rbx\n");
+        emit_acc_store(cg, "rbx", sz, n->line, n->col);
+    }
 }
 
 // ident, ident+imm, or ident-imm already in a register. add is the

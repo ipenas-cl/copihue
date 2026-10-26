@@ -2,6 +2,24 @@
 
 Todos los cambios importantes del proyecto.
 
+## [0.34.1] - 2026-10-26
+
+### Fixed
+- In `bits 16` and `bits 32`, `/` and `%` restore `edx`. `idiv` (`cdq`) and `div` of a `u32` (`xor edx, edx`) both `push edx` before the divide and `pop edx` after it. A remainder copies `edx` to `eax` before the pop. The zero-divisor path jumps to the same pop. `+`, `-`, `&`, `|`, `^`, `*`, and a shift still do not touch `edx`, so `rdmsr(m) | imm` is unchanged. `wrmsr(m, rdmsr(m) / 2)` keeps the high half the same way the OR does. 64-bit `/` and `%` are unchanged (`rdx` stays scratch).
+- In `bits 16` and `bits 32`, a store whose address is not a number, a naked register, or `reg±disp` pushes `ebx` before the address and pops it after the store. The address is in `ebx` only for the `mov`. A named `ebx` is unchanged. `*p = v` for a named pointer is still the older store. 64-bit code still stores a computed address through `rbx` and leaves that scratch as it is.
+- In `bits 16` and `bits 32`, `lgdt`, `lidt`, and `invlpg` of a pointer that is not a data label push `ebx`, use `[bx]` or `[ebx]`, and pop `ebx`. `mov bx, ax` writes only the low half; the pop restores all of `ebx`. A data label stays `lgdt [gdtr]` and does not touch `ebx`. 64-bit code stays `lgdt [rax]`.
+
+### Added
+- `tests/boot/edx_keep.lap` is a real-mode sector. QEMU prints `COPIHUE` only when `idiv` of 100/7 leaves 14, a `u32` `/` of 4294967295 leaves 2147483647, `*(bp + di)` stores 65, and `lgdt` of a register (not the `gdtr` label) leaves `edx` at 4660 and `ebx` at 7. `-O0` and `-O2` are the same 512-byte image. The GDT limit is 0; the sector does not enter protected mode.
+- `tests/freestanding/edx_keep.lap` is the instruction stream at `-O0` and `-O2` for those operations in `bits 16` and `bits 32`, plus a remainder, a zero divisor, `lidt`, `invlpg`, and `wrmsr` of `rdmsr / 2`. It is assembled, not booted. `lidt` and `invlpg` are not executed: a new IDT with interrupts enabled can triple-fault, and this sector does not need them.
+
+### Changed
+- Language version is 0.34.1, on top of 0.34.0. The 0.34.0 slice rules are unchanged.
+
+### Measured
+- No timed bench. These are a few instructions in `bits 16` and `bits 32`, not a hosted loop, and nothing was added to `make test` beyond the sector and the assemble check. `bench/slice` and `bench/lowlat` were not run again.
+- NASM listing of `tests/freestanding/edx_keep.lap`. In `bits 16`, `push edx` / `pop edx` and `push ebx` / `pop ebx` are `66 52`, `66 5A`, `66 53`, and `66 5B` (2 bytes each). In `bits 32` the same opcodes have no operand-size prefix (`52`, `5A`, `53`, `5B`, 1 byte each). Each `/` or `%` adds one push and one pop of `edx`: 4 bytes in `bits 16`, 2 bytes in `bits 32`. Each computed store and each non-label `lgdt` / `lidt` / `invlpg` adds one push and one pop of `ebx`: the same 4 or 2 bytes. The caller already push/pops `ebx` and `edx` around the other operand; those pairs were already there.
+
 ## [0.34.0] - 2026-10-26
 
 ### Added
