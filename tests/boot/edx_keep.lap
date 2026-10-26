@@ -1,0 +1,54 @@
+// bits 16, real mode. QEMU prints COPIHUE only when all of these hold:
+//   100/7 is 14 (idiv) and edx is still 4660
+//   a u32 4294967295/2 is 2147483647 (div) and edx is still 4660
+//   *(bp + di) stored 65 (read back through bp) and ebx is still 7
+//   lgdt of a register, not the gdtr label, left ebx at 7
+// lidt, invlpg, remainder, a zero divisor, and bits 32 are assembled in
+// tests/freestanding/edx_keep.lap and are not booted. The quotients are
+// not literals, so -O0 and -O2 match. Limit 0; this sector stays real-mode.
+
+data gdtr {
+    dw 0;
+    dd 0;
+}
+
+data msg {
+    db 67;
+    db 79;
+    db 80;
+    db 73;
+    db 72;
+    db 85;
+    db 69;
+}
+
+bits 16 naked fn _start() {
+    edx = 4660;
+    ebx = 7;
+    ax = 100;
+    ax = ax / 7;
+    ecx = ax;
+    edi = (4294967295 as u32) / 2;
+    si = &gdtr;
+    lgdt(si);
+    esi = edi;
+    bp = 32768;
+    di = 0;
+    *(bp + di) = 65;
+    if (ecx == 14) {
+        if (esi == 2147483647) {
+            if (*bp == 65) {
+                if (edx == 4660) {
+                    if (ebx == 7) {
+                        di = 0;
+                        while (di != 7) {
+                            outb(0x3F8, *(msg + di));
+                            di = di + 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    while (1) { hlt(); }
+}
