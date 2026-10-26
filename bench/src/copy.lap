@@ -12,7 +12,7 @@ fn main() -> i32 {
     let r = 0;
     let sum = 0;
     while (i < n) {
-        src[i] = i & 255;
+        src[i] = (i & 255) as u8;
         i = i + 1;
     }
     while (r < reps) {
