@@ -2,10 +2,10 @@
 
 Todos los cambios importantes del proyecto.
 
-## [0.39.2] - 2026-10-26
+## [0.40.1] - 2026-10-26
 
 ### Changed
-- Language version is 0.39.2, on top of 0.39.1. Hosted `-O2` rewrites one more shape of `while`. The body is straight-line statements around a single `if (x == k) { cold }`. The equal arm has a nested `if`, `while`, `match`, `break`, `continue`, `return`, or a call. The other statements do not, and they do not call. The tail after the `if` is not a `let`. The equal arm is placed after the back edge (`je`). The tail falls through and jumps back once. A straight `else` stays on that path. This is the 0.39.1 layout extended to a cold equal arm, including a field compare, which is not a direct leaf branch. `align 32` is not applied here. When that arm always returns or breaks, the compare is one field of `arr[i]`, and the tail loads another field of the same element into a register before writing `i`, the address is computed once (`imul` when the size is not a power of two) and both loads use it. `-O0`, `--freestanding`, `--flat`, `--boot`, `bits 16` / `bits 32`, a `let` in the tail, and a volatile array stay on the ordinary top-tested loop. `tests/lang/o2_outline.lap` prints the same four lines at `-O0` and `-O2`. The 0.39.1 `if`/`else` form is unchanged, including `align 32`.
+- Language version is 0.40.1, on top of 0.40.0. 0.40.0 monomorphization is unchanged. The numbers below were measured against 0.39.1, before 0.40.0 landed on main. This merge does not retime them. Hosted `-O2` rewrites one more shape of `while`. The body is straight-line statements around a single `if (x == k) { cold }`. The equal arm has a nested `if`, `while`, `match`, `break`, `continue`, `return`, or a call. The other statements do not, and they do not call. The tail after the `if` is not a `let`. The equal arm is placed after the back edge (`je`). The tail falls through and jumps back once. A straight `else` stays on that path. This is the 0.39.1 layout extended to a cold equal arm, including a field compare, which is not a direct leaf branch. `align 32` is not applied here. When that arm always returns or breaks, the compare is one field of `arr[i]`, and the tail loads another field of the same element into a register before writing `i`, the address is computed once (`imul` when the size is not a power of two) and both loads use it. `-O0`, `--freestanding`, `--flat`, `--boot`, `bits 16` / `bits 32`, a `let` in the tail, and a volatile array stay on the ordinary top-tested loop. `tests/lang/o2_outline.lap` prints the same four lines at `-O0` and `-O2`. The 0.39.1 `if`/`else` form is unchanged, including `align 32`.
 
 ### Not shipped
 - `align 32` on the cold-arm loop. On the book, padding that loop to a 32-byte boundary moved `main` by 17 bytes. Book median 45.8 (45.3–49.7) against 48.7 (48.2–51.4) without a clean separation, and `match` went the wrong way: 47.5 (47.4–51.0) against 46.3 (46.1–47.2), the new minimum above the old maximum. Without the pad the book separates and `match` does not move. The pad is not emitted.
@@ -24,6 +24,33 @@ Todos los cambios importantes del proyecto.
 - `pool` 12.18 (11.94–12.32) and 12.17 (11.95–12.49). `fib` 392.07 (391.86–396.00) and 392.17 (391.90–395.80). `parse` 13.59 (13.39–13.68) and 13.57 (13.51–13.72). `sort` 51.79 (51.71–52.55) and 51.70 (51.64–52.07). `list` 39.66 (39.51–39.93) and 39.76 (39.23–40.01). `lpool` 19.78 (19.59–20.16) and 19.89 (19.76–20.12). The ranges overlap. Same bytes.
 - `spsc` 51.16 (47.58–53.12) and 55.96 (50.02–62.72). `spmc` 288.28 (221.77–327.95) and 291.40 (252.35–318.76). `mpmc` 191.71 (164.04–226.11) and 182.85 (166.34–241.68). `tpool` 273.08 (230.32–344.69) and 277.44 (266.22–352.68). The ranges overlap. Same bytes.
 - `vec` 8.44 (7.30–11.14) and 7.48 (7.32–9.70). The ranges overlap. Same bytes. gcc and rustc are in the not-shipped note above; they ran in this window.
+
+## [0.40.0] - 2026-10-26
+
+### Added
+- `fn max<T>(a: T, b: T) -> T` and `struct Par<A, B>` are generic. The compiler emits one ordinary copy for each combination the program uses. There is no dictionary and no runtime cost. A type argument is an integer, a pointer (`*T`, `*mut T`, `*volatile T`), or a struct, including an instantiated generic struct. `mut` is not part of the type, so `*mut i32` and `*i32` are one copy. An enum, a slice, an array, a `vec`, or `own *T` is rejected. `vec` and `Option` are not rewritten.
+- `max(a, b)` infers `T` from the arguments. A bare `T` binds the whole argument type, including a pointer. A literal is `i64`, so `max(1, 2)` is `max<i64>`. Two arguments that disagree are `type argument 'T' is 'i32' and 'i64' in 'max'`. Nothing to infer from is `cannot infer type argument 'T' for 'make'`. `*T` against `*volatile u8` is `cannot infer type argument 'T' for 'star' from '*volatile u8'`. `max<i32>(a, b)` is the explicit form; a literal that fits is then checked as usual. The wrong count is `function 'max' takes 1 type argument, not 2`.
+- The symbol is stable and works with modules and `-c`. `max<i32>` is `max$1$i32`. `id<*u8>` is `id$1$p$u8`. `Par<i32, *u8>` is `Par$2$i32$p$u8`. `Box<Par<i32, u8>>` is `Box$1$Par$2$i32$u8`. Inside a module that name is wrapped: `mem__max$1$i32`. The template is not a symbol. The defining object emits `global max$1$i32`. `extern fn max<T>` emits `extern max$1$i32`. `>>` inside a type-argument list is two `>`. A value `x >> 2` stays a shift, and `a < b` stays a comparison.
+- There are no traits. The operation is checked when the copy is generated. `cannot apply '+' to 'Point' in 'add<Point>'` names the operator, the type, and the instantiation. The diagnostic points at the template. Integer copies keep that width's truncation. A parameter `s: []T` infers `T` from the element. `[]T` is still not a type argument. A struct literal writes the arguments (`Par<i32, i64> { a: 4, b: 5 }`). `--freestanding` and `--flat` use the same code when the function does not need `malloc`. The note is `docs/DESIGN_GENERICS.md`.
+
+### Left out
+- Traits, interfaces, `where` clauses, and specialization.
+- Generic enums, generic methods, and using a generic name as a value (`let f = max`).
+- A type argument that is an enum, a slice, an array, a `vec`, or `own *T`.
+- Rewriting `vec` or `Option`.
+- Const generics, higher-kinded types, and a generic global.
+- COMDAT or a weak symbol, so two `-c` objects that both emit the same body still fail at `ld`.
+- Inferring the arguments of a struct literal. Returning a struct from a generic function stays the unchecked `rax` path of a handwritten struct return.
+- A `bits 16` or `bits 32` generic is not in the suite. The copy keeps `bits` and `naked`, and a `bits 16` `max<i32>` assembled; it was not booted.
+
+### Changed
+- Language version is 0.40.0, on top of 0.39.1. The 0.39.1 hosted `-O2` `while` whose body is one `if (x == k)` stays: the not-equal arm falls through, one global array is `[r8+index*scale]`, and that loop label is `align 32`. The 0.39.0 enum return (hidden pointer in `rdi`), pass-by-value, `_`, block arms, globals, and struct fields stay. Hosted `-O2` still loads an enum tag once into `rbx`. The 0.38.1 note rejected sharing one register between two scalars whose live ranges do not overlap. That pass is not emitted. The 0.37.2 note rejected aligning `.text` to 16 or 32, and 0.37.1 rejected a direct `arr[i].field` store. Neither is emitted here.
+
+### Measured
+- No timed bench was added to `make test`. `bench/slice`, `bench/lowlat`, and the 0.39 enum-versus-`if` windows were not run again. The sources stayed in `/tmp`.
+- NASM listing (`nasm -f elf64 -l`), hosted, of `fn max_i32(a: i32, b: i32) -> i32 { if (a > b) { return a; } return b; }` against `fn max<T>(a: T, b: T) -> T` instantiated as `max<i32>`. The label length is not counted. `sub rsp, __frame_...` resolves to the same immediate (`4883EC50`, 80) in both. Listing produced 2026-10-26T08:11:52Z.
+- `-O0`, from the label through the first `ret`: 52 bytes and 52 bytes. That `ret` is `return a`. After it, both still have the unreachable `jmp` and `return b`. The whole function through the last `ret` is 65 bytes and 65 bytes.
+- Hosted `-O2`, from the label through the first `ret`: 43 bytes and 43 bytes. The first instruction is `cmp rdi, rsi`. That `ret` is the `a <= b` path (`movsxd` into `r12` and `r13`, then `mov rax, r13`). The `a > b` path is `jg` to `mov rax, rdi` / `ret` after that first `ret`. The whole function through the last `ret` is 59 bytes and 59 bytes. The instantiated copy adds no instruction. The same listing after merging 0.39.1, at 2026-10-26T08:18:23Z, is those same four counts.
 
 ## [0.39.1] - 2026-10-26
 

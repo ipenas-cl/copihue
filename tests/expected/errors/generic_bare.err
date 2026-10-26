@@ -1,0 +1,4 @@
+tests/errors/generic_bare.lap:4:9: error: struct 'Par' needs type arguments
+      4 |     let x: Par;
+        |         ^
+1 error, compilation failed
