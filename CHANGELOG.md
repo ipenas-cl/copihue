@@ -2,6 +2,28 @@
 
 Todos los cambios importantes del proyecto.
 
+## [0.35.2] - 2026-10-26
+
+### Added
+- `examples/lowlat/share.lap` runs two threads. Each `fetch_add`s only its own counter, 1000 times. One struct is `align(64)` with both fields at their natural offsets (`sizeof` 64, same cache line). The other repeats `align(64)` on each field (`sizeof` 128, second counter at offset 64). The lines are `share 64`, `2000`, `split 128`, `2000`.
+- `examples/lowlat/pin.lap` calls `sched_setaffinity` on the current thread. Cpu 0 returns 0. Cpu 1024 returns -1 and does not enter the kernel. Two workers then pin themselves to cpu 0 and cpu 1 and add their own counters. The lines are `self 0`, `bad -1`, `cpu0 0`, `cpu1 0`, `2000`.
+- `examples/lowlat/watch.lap` starts a thread that release-stores a heartbeat from 1 to 1000 and then stops. Main waits for that stop and acquire-loads the word until 100 samples match. The quiet window is a count of loads, not a wall-clock timeout. The lines are `beat 1000`, `miss 0`.
+- The timed forms are `examples/lowlat/bench/share`, `split`, `pin`, `same`, `free`, and `watch`, each with a C++ file and a Rust file. `share` and `split` do 4000000 `fetch_add`s per thread and print 8000000. `pin` fixes the threads to cpu 0 and cpu 1, `same` fixes both to cpu 0, and `free` does not call `sched_setaffinity`. Those three use the split layout. A failed pin prints 0. `watch` stores 4000000 heartbeats and then requires 1000000 identical loads. It prints `4000000 0`. Rust calls syscall 203 itself: `std` has no affinity function. C++ uses `sched_setaffinity`.
+
+### Changed
+- Language version is 0.35.2, on top of 0.35.1. The only edit in `compiler/bootstrap-c/copihue.c` is that version string. No instruction selection changed.
+- `examples/lowlat/bench/run.sh` still times the pool, the book, and the engine with `taskset -c 0` against C and Rust. It also times the six programs above with no `taskset`, against C++ and Rust, and rewrites `examples/lowlat/RESULTS.md`.
+
+### Measured
+- `examples/lowlat/RESULTS.md` is the 2026-10-26T04:26:27Z — 2026-10-26T04:26:40Z window. The binary prints 0.35.2. One warmup and seven runs. The machine reports 4 CPUs. Milliseconds, median (min–max).
+- False sharing is visible on all three compilers. `share` against `split`: Copihue 158.1 (155.0–170.3) against 34.5 (33.7–34.8), C++ 144.8 (132.1–155.9) against 21.0 (20.7–21.4), Rust 151.0 (136.7–255.0) against 20.8 (20.5–21.6). Each minimum of `share` is above the maximum of `split`. The ratio of the Copihue medians is 4.58.
+- On the shared line Copihue overlaps C++ and Rust. On the split line Copihue is above both: 34.5 (33.7–34.8) against C++ 21.0 (20.7–21.4) and Rust 20.8 (20.5–21.6). The ratio to C++ is 1.64. The ratio to Rust is 1.66. The field `fetch_add` is `lea`, `push`, `pop r11`, `lock xadd`. C++ and Rust emit `lock xadd` on the symbol. That was not changed.
+- Affinity succeeded: `pin` and `same` print 8000000, not 0. Pinning both threads to cpu 0 is slower than pinning them to cpu 0 and cpu 1, on all three compilers. `same` against `pin`: Copihue 60.2 (60.0–64.0) against 34.7 (34.5–45.8), C++ 39.4 (39.3–39.7) against 21.1 (20.9–21.4), Rust 39.2 (39.0–39.3) against 20.7 (20.3–21.1). The ranges do not overlap. The ratio of the Copihue medians is 1.73.
+- Pinning to cpu 0 and cpu 1 overlaps leaving the threads unpinned. `pin` against `free`: Copihue 34.7 (34.5–45.8) against 34.6 (34.3–34.9), C++ 21.1 (20.9–21.4) against 21.2 (20.6–21.5), Rust 20.7 (20.3–21.1) against 20.9 (20.6–21.5). On this machine the scheduler already spreads the two threads, so a separate pin does not show a further gain.
+- Copihue is above C++ and Rust on `pin`, `same`, and `free`. `pin` 34.7 (34.5–45.8) against C++ 21.1 (20.9–21.4) and Rust 20.7 (20.3–21.1): ratios 1.64 and 1.68. `same` 60.2 (60.0–64.0) against C++ 39.4 (39.3–39.7) and Rust 39.2 (39.0–39.3): ratios 1.53 and 1.54. `free` 34.6 (34.3–34.9) against C++ 21.2 (20.6–21.5) and Rust 20.9 (20.6–21.5): ratios 1.63 and 1.66.
+- The watchdog prints `4000000 0` in all three languages. Copihue 2.8 (2.5–3.2) overlaps C++ 3.2 (3.1–3.4) and Rust 2.9 (2.3–3.3). The run is a few milliseconds. There is no order to claim.
+- The pool, the book, and the engine were timed again because the script rewrites the whole file. The generator is the 0.35.1 one. Pool 13.1 (12.8–13.4) overlaps the 0.35.1 window 13.0 (12.6–13.2) and is still above C 8.8 (8.4–9.0) and Rust 9.0 (8.6–9.4). Book 49.4 (49.1–50.1) overlaps 49.4 (49.1–49.9) and is still above C 38.5 (38.2–38.9) and Rust 33.4 (33.1–33.7). Match 47.3 (46.7–47.4) overlaps 47.1 (46.9–47.5) and is still above C 33.1 (32.5–33.3) and Rust 33.4 (33.0–33.6). Checksums 2052000, 2160927, 2853449. `bench/lowlat` was not run again.
+
 ## [0.35.1] - 2026-10-26
 
 ### Added
