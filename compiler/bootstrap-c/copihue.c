@@ -16,7 +16,7 @@
 
 // ==== NAMING (single place to change when the language is renamed) ====
 #define LANG_NAME     "Copihue"
-#define LANG_VERSION  "0.40.0"
+#define LANG_VERSION  "0.41.0"
 #define COMPILER_BIN  "copihue"
 #define SRC_EXT       ".lap"   /* Lapageria rosea, the copihue */
 #define OLD_SRC_EXT   ".cph"   /* v0.18.x extension, still accepted with a warning */
@@ -303,6 +303,7 @@ typedef struct AstNode {
     const char* mod;      // Defining module. NULL is the flat namespace
     char* qual;           // Use of Mod::item. NULL is unqualified. name is the link spelling
     char** tparams;       // Generic parameters. The template is not codegen'd
+    char** tbounds;       // Parallel to tparams. "Ord" or "Ord+Eq". NULL is unbounded
     int ntparams;
     char** targs;         // Explicit type arguments on a call, mangled
     int ntargs;
@@ -325,6 +326,7 @@ typedef struct AstNode {
 #define AF_BORROW   8192   // compiler `for in` may copy a vec's pointer and length
 #define AF_ENUM_PAREN 16384 // a match arm wrote parentheses, even if empty
 #define AF_DIAG      32768 // this node already reported a generic error
+#define AF_METHOD    65536 // x.f() parsed as f(x); resolve it to an impl, or error
 
 // Symbol table
 typedef struct {
@@ -585,6 +587,7 @@ static int prim_width(const char* name) {
     if (!strcmp(name, "i16") || !strcmp(name, "u16")) return 2;
     if (!strcmp(name, "i32") || !strcmp(name, "u32")) return 4;
     if (!strcmp(name, "i64") || !strcmp(name, "u64")) return 8;
+    if (!strcmp(name, "bool")) return 8;
     return 0;
 }
 
@@ -1691,10 +1694,12 @@ static char* decode_string_literal(const char* s, int len) {
 static int builtin_type_name(const char* s) {
     return s && (!strcmp(s, "i8") || !strcmp(s, "u8") || !strcmp(s, "i16") ||
                  !strcmp(s, "u16") || !strcmp(s, "i32") || !strcmp(s, "u32") ||
-                 !strcmp(s, "i64") || !strcmp(s, "u64"));
+                 !strcmp(s, "i64") || !strcmp(s, "u64") || !strcmp(s, "bool"));
 }
 
 static int is_tparse(const char* s);
+/* Trait signatures keep the word Self. An impl substitutes the concrete type. */
+static int g_keep_self = 0;
 
 // A type name, possibly `Mod::Item`. Inside a module a struct name becomes
 // its link spelling so the type table can see it. Builtin integers stay.
@@ -1716,6 +1721,7 @@ static char* take_type_name(Parser* p) {
         return out;
     }
     if (is_tparse(raw)) return raw;
+    if (g_keep_self && !strcmp(raw, "Self")) return raw;
     if (g_file_mod && !builtin_type_name(raw)) {
         char* out = strdup(link_sym(g_file_mod, raw));
         free(raw);
@@ -1749,6 +1755,9 @@ static void take_qual(Parser* p, Tok* name, char** qual) {
 #define MAX_TPARAMS 8
 static char* g_tparse_names[MAX_TPARAMS];
 static int g_ntparse = 0;
+static int g_self_on = 0;
+static TypeSpec g_self_spec;
+static char* g_self_base = NULL;
 
 static int is_tparse(const char* s) {
     if (!s) return 0;
@@ -2140,6 +2149,32 @@ static int parse_mangled_args(Parser* p, char** out, int* nout) {
     }
 }
 
+/* `T: Ord` or `T: Ord + Eq`. The names are checked after every trait is parsed. */
+static char* parse_trait_bound(Parser* p) {
+    char buf[192];
+    int n = 0;
+    buf[0] = 0;
+    for (;;) {
+        Tok id, got;
+        if (!check_tok(p, T_IDENT)) {
+            got = peek_tok(p);
+            diag_error(got.line, got.col, "expected a trait name, found '%.*s'", got.len, got.s);
+            return strdup(n ? buf : "");
+        }
+        id = advance_tok(p);
+        if (id.len > 63 || n + 1 + id.len >= (int)sizeof buf) {
+            diag_error(id.line, id.col, "trait bound is too long");
+            return strdup(buf);
+        }
+        if (n) buf[n++] = '+';
+        memcpy(buf + n, id.s, (size_t)id.len);
+        n += id.len;
+        buf[n] = 0;
+        if (!match_tok(p, T_PLUS)) break;
+    }
+    return strdup(buf);
+}
+
 static int parse_tparams(Parser* p, AstNode* n) {
     Tok lt;
     if (!check_tok(p, T_LT)) return 1;
@@ -2151,6 +2186,7 @@ static int parse_tparams(Parser* p, AstNode* n) {
     for (;;) {
         Tok id, got;
         char* name;
+        char* bound;
         int i;
         if (!check_tok(p, T_IDENT)) {
             got = peek_tok(p);
@@ -2169,8 +2205,13 @@ static int parse_tparams(Parser* p, AstNode* n) {
             free(name);
             return 0;
         }
+        bound = NULL;
+        if (match_tok(p, T_COLON)) bound = parse_trait_bound(p);
         n->tparams = realloc(n->tparams, sizeof(char*) * (size_t)(n->ntparams + 1));
-        n->tparams[n->ntparams++] = name;
+        n->tbounds = realloc(n->tbounds, sizeof(char*) * (size_t)(n->ntparams + 1));
+        n->tparams[n->ntparams] = name;
+        n->tbounds[n->ntparams] = bound;
+        n->ntparams++;
         if (match_gt(p)) return 1;
         if (!match_tok(p, T_COMMA)) {
             got = peek_tok(p);
@@ -2249,6 +2290,27 @@ static AstNode* parse_match(Parser* p) {
         if (first.t != T_IDENT) {
             diag_error(first.line, first.col, "expected a variant");
             arm->name = strdup("_");
+        } else if (check_tok(p, T_LT) && type_arg_follow(p, T_COLONCOLON)) {
+            char* args[MAX_TPARAMS];
+            int n = 0, gi;
+            char* base = strndup(first.s, first.len);
+            char* app;
+            Tok item;
+            parse_mangled_args(p, args, &n);
+            app = n > 0 ? mangle_app(base, args, n) : base;
+            if (app != base) free(base);
+            for (gi = 0; gi < n; gi++) free(args[gi]);
+            expect(p, T_COLONCOLON);
+            item = advance_tok(p);
+            arm->struct_type = app;
+            if (item.t != T_IDENT) {
+                diag_error(item.line, item.col, "expected a variant after '::'");
+                arm->name = strdup("_");
+            } else {
+                arm->name = strndup(item.s, item.len);
+                arm->line = item.line;
+                arm->col = item.col;
+            }
         } else if (check_tok(p, T_COLONCOLON)) {
             Tok col = advance_tok(p);
             Tok item = advance_tok(p);
@@ -2343,6 +2405,18 @@ AstNode* parse_primary(Parser* p) {
         char* gargs[MAX_TPARAMS];
         int ngargs = 0;
         int as_call, as_lit, gi;
+        /* `Option<i64>::Some` is a constructor. The qualifier is the mangled enum. */
+        if (check_tok(p, T_LT) && type_arg_follow(p, T_COLONCOLON)) {
+            char* base = strndup(t.s, t.len);
+            char* app;
+            parse_mangled_args(p, gargs, &ngargs);
+            app = ngargs > 0 ? mangle_app(base, gargs, ngargs) : base;
+            if (app != base) free(base);
+            for (gi = 0; gi < ngargs; gi++) free(gargs[gi]);
+            ngargs = 0;
+            t.s = app;
+            t.len = (int)strlen(app);
+        }
         take_qual(p, &t, &qual);
         // `<...>` is a type-argument list only when a real `>` closes it and
         // the next token is `(` (a call) or `{` (a struct literal). `a < b` stays a comparison.
@@ -2545,6 +2619,39 @@ AstNode* parse_postfix_base(Parser* p) {
     return parse_unary(p);
 }
 
+/* `obj.f(a)` is the call `f(obj, a)`. `ptr->f(a)` is `f(*ptr, a)`.
+ * Without `(`, both stay a field access. The call resolves to an impl later. */
+static AstNode* postfix_member(Parser* p, AstNode* left, int arrow) {
+    Tok field = advance_tok(p);
+    AstNode* recv = left;
+    if (arrow) {
+        AstNode* deref = ast_new(AST_DEREF);
+        ast_add(deref, left);
+        recv = deref;
+    }
+    if (field.t == T_IDENT && check_tok(p, T_LPAREN)) {
+        AstNode* call = ast_new(AST_CALL);
+        call->name = strndup(field.s, field.len);
+        call->flags |= AF_METHOD;
+        call->line = field.line;
+        call->col = field.col;
+        ast_add(call, recv);
+        advance_tok(p);
+        while (!check_tok(p, T_RPAREN) && !check_tok(p, T_EOF)) {
+            ast_add(call, parse_expr(p));
+            if (!check_tok(p, T_RPAREN)) expect(p, T_COMMA);
+        }
+        expect(p, T_RPAREN);
+        return call;
+    }
+    {
+        AstNode* field_node = ast_new(AST_FIELD_ACCESS);
+        field_node->name = strndup(field.s, field.len);
+        ast_add(field_node, recv);
+        return field_node;
+    }
+}
+
 AstNode* parse_postfix(Parser* p) {
     AstNode* left = parse_postfix_base(p);
     while (1) {
@@ -2557,24 +2664,11 @@ AstNode* parse_postfix(Parser* p) {
             expect(p, T_RBRACKET);
             left = index_node;
         } else if (check_tok(p, T_ARROW)) {
-            // Arrow operator: ptr->field
             advance_tok(p);
-            Tok field = advance_tok(p);
-            // Desugar: ptr->field becomes (*ptr).field
-            AstNode* deref = ast_new(AST_DEREF);
-            ast_add(deref, left);
-            AstNode* field_node = ast_new(AST_FIELD_ACCESS);
-            field_node->name = strndup(field.s, field.len);
-            ast_add(field_node, deref);
-            left = field_node;
+            left = postfix_member(p, left, 1);
         } else if (check_tok(p, T_DOT)) {
-            // Field access
             advance_tok(p);
-            Tok field = advance_tok(p);
-            AstNode* field_node = ast_new(AST_FIELD_ACCESS);
-            field_node->name = strndup(field.s, field.len);
-            ast_add(field_node, left);
-            left = field_node;
+            left = postfix_member(p, left, 0);
         } else {
             break;
         }
@@ -3278,6 +3372,8 @@ static int enum_field_primitive(TypeSpec spec) {
         return 0;
     if (spec.is_volatile && !spec.is_pointer) return 0;
     if (spec.is_pointer) return 1;
+    /* A type parameter is checked again when the enum copy is built. */
+    if (spec.base_type && is_tparse(spec.base_type)) return 1;
     return prim_width(spec.base_type) != 0;
 }
 
@@ -3285,6 +3381,8 @@ AstNode* parse_enum_def(Parser* p) {
     Tok kw = advance_tok(p);
     Tok name = advance_tok(p);
     AstNode* en = ast_new(AST_ENUM_DEF);
+    int saved_tp = 0;
+    char* saved_tpn[MAX_TPARAMS];
     en->line = kw.line;
     en->col = kw.col;
     if (name.t != T_IDENT) {
@@ -3293,6 +3391,9 @@ AstNode* parse_enum_def(Parser* p) {
     } else {
         en->name = strndup(name.s, name.len);
     }
+    tparse_save(&saved_tp, saved_tpn);
+    parse_tparams(p, en);
+    tparse_bind(en);
     expect(p, T_LBRACE);
     if (check_tok(p, T_RBRACE))
         diag_error(kw.line, kw.col, "an enum needs a variant");
@@ -3344,6 +3445,7 @@ AstNode* parse_enum_def(Parser* p) {
         if (!check_tok(p, T_RBRACE)) expect(p, T_COMMA);
     }
     expect(p, T_RBRACE);
+    tparse_restore(saved_tp, saved_tpn);
     return en;
 }
 
@@ -3525,6 +3627,15 @@ TypeSpec parse_type(Parser* p) {
     }
 
     // Basic type or struct name (i32, i64, Point, mem::Cell, Par<i32, i64>, ...)
+    // Inside an impl, Self is that concrete type, pointer bits included.
+    if (g_self_on && peek_word(p, "Self") && !peek_tok_at(p, 1, T_COLONCOLON)) {
+        Tok self = advance_tok(p);
+        spec = g_self_spec;
+        spec.base_type = g_self_spec.base_type ? strdup(g_self_spec.base_type) : strdup("");
+        if (check_tok(p, T_LT))
+            diag_error(self.line, self.col, "Self is not a generic type");
+        return spec;
+    }
     if (!check_tok(p, T_IDENT)) error_expected_type(p);
     spec.base_type = take_type_name(p);
     if (check_tok(p, T_LT)) {
@@ -4353,6 +4464,364 @@ static void parse_module_decl(Parser* p) {
     expect(p, T_SEMI);
 }
 
+/* A trait is a list of signatures. An impl is ordinary functions whose
+ * names are `method$Trait$Type`. A call resolves to one of those and is a
+ * direct `call`. There is no vtable. */
+#define MAX_TRAITS 32
+#define MAX_TRAIT_METH 8
+#define MAX_METH_PARAMS 16
+#define MAX_IMPLS 128
+
+typedef struct {
+    char* name;
+    char** params;
+    int nparams;
+    char* retm;
+} TraitMeth;
+
+typedef struct {
+    char* name;
+    TraitMeth* meths;
+    int nmeths;
+    int line, col;
+    const char* file;
+} TraitDef;
+
+static TraitDef g_traits[MAX_TRAITS];
+static int g_ntraits = 0;
+
+typedef struct {
+    int group;
+    char* trait;
+    char* ty;
+    char* disp;
+    char* method;
+    char* symbol;
+    AstNode* fn;
+    int line, col;
+    const char* file;
+} ImplEnt;
+
+static ImplEnt g_impls[MAX_IMPLS];
+static int g_nimpls = 0;
+static int g_impl_seq = 0;
+
+static int trait_index(const char* name) {
+    int i;
+    if (!name) return -1;
+    for (i = 0; i < g_ntraits; i++)
+        if (g_traits[i].name && !strcmp(g_traits[i].name, name)) return i;
+    return -1;
+}
+
+static int type_implements(const char* trait, const char* ty) {
+    int i;
+    if (!trait || !ty) return 0;
+    for (i = 0; i < g_nimpls; i++) {
+        if (!g_impls[i].trait || !g_impls[i].ty) continue;
+        if (!strcmp(g_impls[i].trait, trait) && !strcmp(g_impls[i].ty, ty)) return 1;
+    }
+    return 0;
+}
+
+static int next_bound_name(const char** p, char* name, int cap) {
+    int k = 0;
+    const char* s;
+    if (!p || !*p || !**p) return 0;
+    s = *p;
+    while (*s && *s != '+' && k + 1 < cap) name[k++] = *s++;
+    name[k] = 0;
+    if (*s == '+') s++;
+    *p = s;
+    return name[0] != 0;
+}
+
+static void set_self_spec(TypeSpec spec) {
+    free(g_self_base);
+    g_self_base = spec.base_type ? strdup(spec.base_type) : strdup("");
+    g_self_spec = spec;
+    g_self_spec.base_type = g_self_base;
+    g_self_on = 1;
+}
+
+static char* meth_symbol(const char* meth, const char* trait, const char* ty) {
+    size_t n = strlen(meth ? meth : "") + strlen(trait ? trait : "") + strlen(ty ? ty : "") + 3;
+    char* o = malloc(n);
+    sprintf(o, "%s$%s$%s", meth ? meth : "", trait ? trait : "", ty ? ty : "");
+    return o;
+}
+
+static void parse_trait_method(Parser* p, TraitDef* tr) {
+    Tok name;
+    TraitMeth* m;
+    int i;
+    expect(p, T_FN);
+    name = advance_tok(p);
+    if (tr->nmeths >= MAX_TRAIT_METH) {
+        diag_error(name.line, name.col, "too many methods");
+        return;
+    }
+    if (name.t != T_IDENT) {
+        diag_error(name.line, name.col, "expected a method name");
+        return;
+    }
+    if (check_tok(p, T_LT))
+        diag_error(name.line, name.col, "a trait method cannot be generic");
+    for (i = 0; i < tr->nmeths; i++) {
+        if (tr->meths[i].name && name.len == (int)strlen(tr->meths[i].name) &&
+            !strncmp(tr->meths[i].name, name.s, (size_t)name.len))
+            diag_error(name.line, name.col, "method '%s' is already defined", tr->meths[i].name);
+    }
+    tr->meths = realloc(tr->meths, sizeof(TraitMeth) * (size_t)(tr->nmeths + 1));
+    m = &tr->meths[tr->nmeths];
+    memset(m, 0, sizeof *m);
+    m->name = strndup(name.s, name.len);
+    tr->nmeths++;
+    expect(p, T_LPAREN);
+    g_keep_self = 1;
+    while (!check_tok(p, T_RPAREN) && !check_tok(p, T_EOF)) {
+        Tok pn = advance_tok(p);
+        TypeSpec spec;
+        char* mang;
+        if (pn.t != T_IDENT)
+            diag_error(pn.line, pn.col, "expected a parameter name");
+        if (!match_tok(p, T_COLON)) {
+            Tok got = peek_tok(p);
+            diag_error(got.line, got.col, "expected ':' after a parameter name");
+            break;
+        }
+        if (m->nparams >= MAX_METH_PARAMS) {
+            diag_error(pn.line, pn.col, "too many parameters");
+            break;
+        }
+        spec = parse_type(p);
+        mang = mangle_spec(spec);
+        free(spec.base_type);
+        m->params = realloc(m->params, sizeof(char*) * (size_t)(m->nparams + 1));
+        m->params[m->nparams++] = mang;
+        if (!check_tok(p, T_RPAREN)) expect(p, T_COMMA);
+    }
+    expect(p, T_RPAREN);
+    if (match_tok(p, T_ARROW)) {
+        TypeSpec spec = parse_type(p);
+        m->retm = mangle_spec(spec);
+        free(spec.base_type);
+    } else {
+        m->retm = strdup("i64");
+    }
+    g_keep_self = 0;
+    if (check_tok(p, T_SEMI)) {
+        advance_tok(p);
+    } else if (check_tok(p, T_LBRACE)) {
+        diag_error(name.line, name.col, "a trait method has no body");
+        parse_block(p);
+    }
+}
+
+static void parse_trait(Parser* p, AstNode* prog) {
+    Tok kw, name;
+    TraitDef* tr;
+    int keep, i;
+    (void)prog;
+    kw = advance_tok(p);
+    name = advance_tok(p);
+    keep = 1;
+    if (g_file_mod) {
+        diag_error(kw.line, kw.col, "a trait must be in the flat namespace");
+        keep = 0;
+    }
+    if (name.t != T_IDENT) {
+        diag_error(kw.line, kw.col, "expected a name after 'trait'");
+        return;
+    }
+    {
+        char* nm = strndup(name.s, name.len);
+        if (keep && trait_index(nm) >= 0) {
+            diag_error(name.line, name.col, "trait '%s' is already defined", nm);
+            keep = 0;
+        }
+        if (keep && g_ntraits >= MAX_TRAITS) {
+            diag_error(name.line, name.col, "too many traits");
+            keep = 0;
+        }
+        if (!keep) {
+            free(nm);
+            expect(p, T_LBRACE);
+            while (!check_tok(p, T_RBRACE) && !check_tok(p, T_EOF)) {
+                if (check_tok(p, T_FN)) {
+                    TraitDef dummy;
+                    memset(&dummy, 0, sizeof dummy);
+                    parse_trait_method(p, &dummy);
+                } else {
+                    diag_error(peek_tok(p).line, peek_tok(p).col, "expected a method");
+                    break;
+                }
+            }
+            expect(p, T_RBRACE);
+            return;
+        }
+        tr = &g_traits[g_ntraits];
+        memset(tr, 0, sizeof *tr);
+        tr->name = nm;
+        tr->line = kw.line;
+        tr->col = kw.col;
+        tr->file = g_src_file;
+    }
+    expect(p, T_LBRACE);
+    if (check_tok(p, T_RBRACE))
+        diag_error(kw.line, kw.col, "a trait needs a method");
+    while (!check_tok(p, T_RBRACE) && !check_tok(p, T_EOF)) {
+        if (!check_tok(p, T_FN)) {
+            diag_error(peek_tok(p).line, peek_tok(p).col, "expected a method");
+            break;
+        }
+        parse_trait_method(p, tr);
+    }
+    expect(p, T_RBRACE);
+    if (tr->nmeths > 0) g_ntraits++;
+    else {
+        for (i = 0; i < tr->nmeths; i++) free(tr->meths[i].name);
+        free(tr->name);
+        tr->name = NULL;
+    }
+}
+
+static int impl_group_has(int group, const char* trait, const char* ty) {
+    int i;
+    for (i = 0; i < g_nimpls; i++) {
+        if (g_impls[i].group == group) continue;
+        if (!g_impls[i].trait || !g_impls[i].ty) continue;
+        if (!strcmp(g_impls[i].trait, trait) && !strcmp(g_impls[i].ty, ty)) return 1;
+    }
+    return 0;
+}
+
+static void parse_impl(Parser* p, AstNode* prog) {
+    Tok kw, tname, forg;
+    TypeSpec spec;
+    char* tshow;
+    char* tym;
+    char* disp;
+    int group, keep, bad_ty, saved_self;
+    kw = advance_tok(p);
+    tname = advance_tok(p);
+    keep = 1;
+    bad_ty = 0;
+    if (g_file_mod) {
+        diag_error(kw.line, kw.col, "an impl must be in the flat namespace");
+        keep = 0;
+    }
+    if (tname.t != T_IDENT) {
+        diag_error(kw.line, kw.col, "expected a trait name after 'impl'");
+        return;
+    }
+    tshow = strndup(tname.s, tname.len);
+    if (!check_tok(p, T_FOR)) {
+        Tok got = peek_tok(p);
+        diag_error(got.line, got.col, "expected 'for' after the trait name");
+        free(tshow);
+        return;
+    }
+    forg = advance_tok(p);
+    (void)forg;
+    spec = parse_type(p);
+    if (spec.is_slice || spec.is_array || spec.is_vec || spec.is_own) {
+        diag_error(tname.line, tname.col,
+                   "an impl type cannot be a slice, an array, a vec, or an owning pointer");
+        bad_ty = 1;
+        keep = 0;
+    }
+    tym = bad_ty ? strdup("i64") : mangle_spec(spec);
+    disp = demangle_disp(tym);
+    if (keep && impl_group_has(0, tshow, tym)) {
+        diag_error(kw.line, kw.col, "type '%s' already implements '%s'", disp, tshow);
+        keep = 0;
+    }
+    if (keep && g_nimpls >= MAX_IMPLS) {
+        diag_error(kw.line, kw.col, "too many impls");
+        keep = 0;
+    }
+    group = ++g_impl_seq;
+    saved_self = g_self_on;
+    if (!bad_ty) set_self_spec(spec);
+    else g_self_on = 0;
+    free(spec.base_type);
+    if (keep) {
+        ImplEnt* h = &g_impls[g_nimpls++];
+        memset(h, 0, sizeof *h);
+        h->group = group;
+        h->trait = strdup(tshow);
+        h->ty = strdup(tym);
+        h->disp = strdup(disp);
+        h->line = kw.line;
+        h->col = kw.col;
+        h->file = g_src_file;
+    }
+    expect(p, T_LBRACE);
+    while (!check_tok(p, T_RBRACE) && !check_tok(p, T_EOF)) {
+        AstNode* fn;
+        char* sym;
+        int mi;
+        if (!check_tok(p, T_FN)) {
+            diag_error(peek_tok(p).line, peek_tok(p).col, "expected a method");
+            break;
+        }
+        fn = parse_func(p);
+        if (!fn || !fn->name) continue;
+        if (fn->ntparams > 0) {
+            diag_error(fn->line, fn->col, "a trait method cannot be generic");
+            continue;
+        }
+        if (!keep) continue;
+        {
+            int dup = 0;
+            for (mi = 0; mi < g_nimpls; mi++) {
+                if (g_impls[mi].group == group && g_impls[mi].method &&
+                    !strcmp(g_impls[mi].method, fn->name))
+                    dup = 1;
+            }
+            if (dup) {
+                diag_error(fn->line, fn->col, "method '%s' is already defined", fn->name);
+                continue;
+            }
+        }
+        sym = meth_symbol(fn->name, tshow, tym);
+        if (strlen(sym) > 180) {
+            diag_error(fn->line, fn->col, "impl symbol is too long");
+            free(sym);
+            continue;
+        }
+        if (g_nimpls >= MAX_IMPLS) {
+            diag_error(fn->line, fn->col, "too many impls");
+            free(sym);
+            continue;
+        }
+        {
+            ImplEnt* e = &g_impls[g_nimpls++];
+            char* src = fn->name;
+            memset(e, 0, sizeof *e);
+            e->group = group;
+            e->trait = strdup(tshow);
+            e->ty = strdup(tym);
+            e->disp = strdup(disp);
+            e->method = strdup(src);
+            e->symbol = strdup(sym);
+            e->fn = fn;
+            e->line = fn->line;
+            e->col = fn->col;
+            e->file = fn->file ? fn->file : g_src_file;
+            free(src);
+            fn->name = sym;
+            add_top(prog, fn);
+        }
+    }
+    expect(p, T_RBRACE);
+    g_self_on = saved_self;
+    free(tshow);
+    free(tym);
+    free(disp);
+}
+
 static void parse_top_item(Parser* p, AstNode* prog) {
     int item_align = 0;
     g_item_pub = 0;
@@ -4404,6 +4873,16 @@ static void parse_top_item(Parser* p, AstNode* prog) {
         parse_extern(p, prog);
     } else if (peek_word(p, "bits") || peek_word(p, "naked")) {
         add_top(prog, parse_bits_naked_fn(p));
+    } else if (peek_word(p, "trait") && peek_tok_at(p, 1, T_IDENT)) {
+        Tok kw = peek_tok(p);
+        if (item_align)
+            diag_error(kw.line, kw.col, "align() does not apply to a trait");
+        parse_trait(p, prog);
+    } else if (peek_word(p, "impl") && peek_tok_at(p, 1, T_IDENT) && peek_tok_at(p, 2, T_FOR)) {
+        Tok kw = peek_tok(p);
+        if (item_align)
+            diag_error(kw.line, kw.col, "align() does not apply to an impl");
+        parse_impl(p, prog);
     } else if (peek_word(p, "enum") && peek_tok_at(p, 1, T_IDENT)) {
         Tok kw = peek_tok(p);
         if (item_align)
@@ -4572,8 +5051,14 @@ static AstNode* find_func_mod(Codegen* cg, const char* name, const char* mod, in
 static AstNode* find_func(Codegen* cg, const char* name) {
     const char* mod = NULL;
     const char* src = NULL;
+    AstNode* hit;
     if (split_link(name, &mod, &src)) return find_func_mod(cg, src, mod, 1);
-    return find_func_mod(cg, name, g_cur_mod, 1);
+    hit = find_func_mod(cg, name, g_cur_mod, 1);
+    /* Impl symbols and copies are the full spelling. A flat impl is visible
+     * from a module once the call has been rewritten to that spelling. */
+    if (!hit && name && strchr(name, '$') && g_cur_mod)
+        hit = find_func_mod(cg, name, NULL, 0);
+    return hit;
 }
 
 static const char* func_nasm(AstNode* fn) {
@@ -4629,6 +5114,8 @@ static int int_name(const char* s, int* bits, int* sg) {
     if (!strcmp(s, "u32")) { *bits = 32; *sg = 0; return 1; }
     if (!strcmp(s, "i64")) { *bits = 64; *sg = 1; return 1; }
     if (!strcmp(s, "u64")) { *bits = 64; *sg = 0; return 1; }
+    /* bool is a 64-bit 0 or 1, so a comparison return typechecks and the bytes match i64. */
+    if (!strcmp(s, "bool")) { *bits = 64; *sg = 1; return 1; }
     return 0;
 }
 
@@ -5699,6 +6186,12 @@ static EnumType* call_return_enum(Codegen* cg, AstNode* call) {
     if (!call || call->type != AST_CALL || !call->name || !cg) return NULL;
     if (call->qual && enum_lookup(call->qual)) return NULL;
     fn = find_func(cg, call->name);
+    /* A generic callee still has `Option$1$T` until this call is copied.
+     * The copy's return type is the enum the caller has to store. */
+    if (fn && fn->ntparams > 0) {
+        if (!monomorphize_call(cg, call)) return NULL;
+        fn = find_func(cg, call->name);
+    }
     if (!fn || !enum_ret_allowed(fn)) return NULL;
     return enum_lookup(fn->value);
 }
@@ -5956,7 +6449,10 @@ static void gen_sret_call(Codegen* cg, AstNode* n, EnumType* rete) {
 static AstNode* g_pending[MAX_MONO];
 static int g_npending = 0;
 static int g_made_struct = 0;
+static int g_made_enum = 0;
 static int g_made_fn = 0;
+static char* g_enum_bad[16];
+static int g_nenum_bad = 0;
 static int g_mono_capped = 0;
 static char* g_ens_name[16];
 static const char* g_ens_mod[16];
@@ -5966,6 +6462,7 @@ static int g_nextern = 0;
 
 static void ast_insert(AstNode* p, int at, AstNode* c);
 static void add_one_struct(TypeTable* tt, AstNode* sd);
+static void add_one_enum(AstNode* def);
 static int ensure_struct_app(AstNode* prog, TypeTable* tt, const char* app,
                              const char* file, int line, int col, int missing_bad);
 static void walk_type_uses(AstNode* prog, TypeTable* tt, AstNode* n);
@@ -6048,9 +6545,52 @@ static void subst_decl(AstNode* n, int full, char** params, char** args, int np)
     n->is_pointer = bits;
 }
 
+static void subst_qual_name(AstNode* n, char** params, char** args, int np) {
+    char* nq;
+    int qn;
+    if (!n || !n->qual || !strchr(n->qual, '$')) return;
+    nq = subst_mangled(n->qual, params, args, np);
+    qn = (int)strlen(n->qual);
+    if (n->name && (int)strlen(n->name) > qn + 2 &&
+        n->name[qn] == '_' && n->name[qn + 1] == '_') {
+        const char* rest = n->name + qn;
+        char* nn = malloc(strlen(nq) + strlen(rest) + 1);
+        sprintf(nn, "%s%s", nq, rest);
+        free(n->name);
+        n->name = nn;
+    }
+    free(n->qual);
+    n->qual = nq;
+}
+
 static void subst_node(AstNode* n, char** params, char** args, int np) {
     int i;
     if (!n || np <= 0) return;
+    /* An enum field already spells `*T`. subst_full keeps that star; the
+     * decl path would add a second one because is_pointer is also set. */
+    if (n->type == AST_ENUM_DEF) {
+        for (i = 0; i < n->child_count; i++) {
+            AstNode* var = n->children[i];
+            int fi;
+            if (!var) continue;
+            for (fi = 0; fi < var->child_count; fi++) {
+                AstNode* f = var->children[fi];
+                char* o;
+                if (!f || !f->value || f->value[0] == '[') continue;
+                o = subst_full(f->value, params, args, np);
+                free(f->value);
+                f->value = o;
+                f->is_pointer = (o && o[0] == '*') ? 1 : 0;
+            }
+        }
+        return;
+    }
+    subst_qual_name(n, params, args, np);
+    if (n->type == AST_MATCH_ARM && n->struct_type && strchr(n->struct_type, '$')) {
+        char* o = subst_mangled(n->struct_type, params, args, np);
+        free(n->struct_type);
+        n->struct_type = o;
+    }
     if (n->type == AST_FUNCTION) {
         subst_decl(n, 1, params, args, np);
     } else if (n->type == AST_IDENT || n->type == AST_LET || n->type == AST_GLOBAL_VAR ||
@@ -6158,6 +6698,45 @@ static AstNode* match_struct_template(AstNode* prog, const char* app, int* count
     return best;
 }
 
+static AstNode* match_enum_template(AstNode* prog, const char* app, int* count, int* args_at) {
+    AstNode* best = NULL;
+    int best_n = 0;
+    int i;
+    if (!prog || !app) return NULL;
+    for (i = 0; i < prog->child_count; i++) {
+        AstNode* s = prog->children[i];
+        int n, c, p;
+        if (!s || s->type != AST_ENUM_DEF || s->ntparams <= 0 || !s->name) continue;
+        n = (int)strlen(s->name);
+        if (n <= best_n || strncmp(app, s->name, (size_t)n) || app[n] != '$' ||
+            !isdigit((unsigned char)app[n + 1]))
+            continue;
+        c = 0;
+        p = n + 1;
+        while (app[p] && isdigit((unsigned char)app[p])) {
+            c = c * 10 + (app[p] - '0');
+            p++;
+        }
+        if (app[p] != '$') continue;
+        best = s;
+        best_n = n;
+        *count = c;
+        *args_at = p + 1;
+    }
+    return best;
+}
+
+static AstNode* enum_template_named(AstNode* prog, const char* name) {
+    int i;
+    if (!prog || !name) return NULL;
+    for (i = 0; i < prog->child_count; i++) {
+        AstNode* s = prog->children[i];
+        if (!s || s->type != AST_ENUM_DEF || s->ntparams <= 0 || !s->name) continue;
+        if (!strcmp(s->name, name)) return s;
+    }
+    return NULL;
+}
+
 static AstNode* template_by_link(AstNode* prog, const char* link) {
     int i;
     if (!prog || !link) return NULL;
@@ -6233,7 +6812,9 @@ static int arg_class(AstNode* prog, TypeTable* tt, const char* m,
     j = mangled_ident_end(m, 0, end);
     if (j <= 0) return -1;
     if (j + 1 < end && m[j] == '$' && isdigit((unsigned char)m[j + 1])) {
+        int ec = 0, ea = 0;
         if (mangled_ty_end(m, 0, end, 0) != end) return -1;
+        if (match_enum_template(prog, m, &ec, &ea) || enum_lookup(m)) return -2;
         if (!ensure_struct_app(prog, tt, m, file, line, col, 1)) return 0;
         return 1;
     }
@@ -6248,6 +6829,14 @@ static int arg_class(AstNode* prog, TypeTable* tt, const char* m,
         }
     }
     if (concrete_struct_named(prog, tt, m)) return 1;
+    {
+        AstNode* en = enum_template_named(prog, m);
+        if (en) {
+            mono_focus(file);
+            diag_error(line, col, "enum '%s' needs type arguments", en->name ? en->name : m);
+            return 0;
+        }
+    }
     if (enum_lookup(m)) return -2;
     return -1;
 }
@@ -6283,6 +6872,30 @@ static int struct_ready(TypeTable* tt, AstNode* tmpl, const char* src) {
     }
     st = typetab_lookup(tt, (char*)key);
     return st && st->align > 0;
+}
+
+static int bounds_hold(const char* file, int line, int col, AstNode* fn, char** args, int nargs) {
+    int i, ok = 1;
+    if (!fn || !fn->tbounds || nargs <= 0) return 1;
+    for (i = 0; i < nargs && i < fn->ntparams; i++) {
+        const char* p;
+        if (!fn->tbounds[i] || !fn->tbounds[i][0]) continue;
+        p = fn->tbounds[i];
+        while (*p) {
+            char name[64];
+            char* d;
+            if (!next_bound_name(&p, name, (int)sizeof name)) break;
+            if (trait_index(name) < 0) continue;
+            if (type_implements(name, args[i])) continue;
+            d = demangle_disp(args[i] ? args[i] : "");
+            mono_focus(file);
+            diag_error(line, col, "type '%s' does not implement '%s'",
+                       d && d[0] ? d : "?", name);
+            free(d);
+            ok = 0;
+        }
+    }
+    return ok;
 }
 
 static int ensure_struct_app(AstNode* prog, TypeTable* tt, const char* app,
@@ -6338,6 +6951,11 @@ static int ensure_struct_app(AstNode* prog, TypeTable* tt, const char* app,
         free(src);
         return 0;
     }
+    if (!bounds_hold(file, line, col, tmpl, args, count)) {
+        free_args(args, count);
+        free(src);
+        return 0;
+    }
     g_ens_name[g_nens] = strdup(src);
     g_ens_mod[g_nens] = tmpl->mod;
     g_nens++;
@@ -6364,6 +6982,142 @@ static int ensure_struct_app(AstNode* prog, TypeTable* tt, const char* app,
     return 1;
 }
 
+static int enum_bad_seen(const char* src) {
+    int i;
+    if (!src) return 0;
+    for (i = 0; i < g_nenum_bad; i++)
+        if (g_enum_bad[i] && !strcmp(g_enum_bad[i], src)) return 1;
+    return 0;
+}
+
+static void enum_bad_note(const char* src) {
+    if (!src || enum_bad_seen(src) || g_nenum_bad >= 16) return;
+    g_enum_bad[g_nenum_bad++] = strdup(src);
+}
+
+static int enum_exists(AstNode* prog, const char* src) {
+    int i;
+    if (!src) return 0;
+    if (ens_now(src, NULL)) return 1;
+    if (enum_lookup(src)) return 1;
+    if (prog) {
+        for (i = 0; i < prog->child_count; i++) {
+            AstNode* s = prog->children[i];
+            if (!s || s->type != AST_ENUM_DEF || s->ntparams > 0 || !s->name) continue;
+            if (!strcmp(s->name, src)) return 1;
+        }
+    }
+    for (i = 0; i < g_npending; i++) {
+        if (g_pending[i] && g_pending[i]->type == AST_ENUM_DEF &&
+            g_pending[i]->name && !strcmp(g_pending[i]->name, src))
+            return 1;
+    }
+    return 0;
+}
+
+/* After substitution a field is still `i64` or `*u8`. A struct stays out. */
+static int enum_fields_prim(AstNode* inst, const char* file, int line, int col) {
+    int vi, fi;
+    if (!inst) return 0;
+    for (vi = 0; vi < inst->child_count; vi++) {
+        AstNode* var = inst->children[vi];
+        if (!var) continue;
+        for (fi = 0; fi < var->child_count; fi++) {
+            AstNode* f = var->children[fi];
+            if (!f || !f->value) continue;
+            if (f->value[0] == '*' || prim_width(f->value)) continue;
+            mono_focus(file);
+            diag_error(line, col, "an enum field must be an integer or a pointer");
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static int ensure_enum_app(AstNode* prog, TypeTable* tt, const char* app,
+                           const char* file, int line, int col, int missing_bad) {
+    AstNode* tmpl;
+    AstNode* inst;
+    char* args[MAX_TPARAMS];
+    char* src;
+    int count = 0, args_at = 0, i, ok, nlen;
+    if (!app || !app[0]) return 0;
+    tmpl = match_enum_template(prog, app, &count, &args_at);
+    if (!tmpl) {
+        if (missing_bad) type_arg_fail(file, line, col, app, 1);
+        return 0;
+    }
+    nlen = tmpl->name ? (int)strlen(tmpl->name) : 0;
+    src = instance_src(tmpl, app, nlen);
+    {
+        int have = enum_exists(prog, src);
+        if (enum_bad_seen(src) || have) {
+            free(src);
+            return have;
+        }
+    }
+    if (count != tmpl->ntparams) {
+        mono_focus(file);
+        diag_error(line, col, "enum '%s' takes %d type %s, not %d",
+                   tmpl->name, tmpl->ntparams, tmpl->ntparams == 1 ? "argument" : "arguments",
+                   count);
+        free(src);
+        return 0;
+    }
+    if (g_nens >= 16 || g_made_enum >= MAX_MONO) {
+        mono_cap(file, line, col);
+        free(src);
+        return 0;
+    }
+    memset(args, 0, sizeof args);
+    if (!split_app_args(app, args_at, count, args)) {
+        type_arg_fail(file, line, col, app, 1);
+        free_args(args, count);
+        free(src);
+        return 0;
+    }
+    ok = 1;
+    for (i = 0; i < count; i++) {
+        if (!type_arg_ok(prog, tt, args[i], file, line, col)) ok = 0;
+    }
+    if (!ok || !bounds_hold(file, line, col, tmpl, args, count)) {
+        free_args(args, count);
+        free(src);
+        return 0;
+    }
+    g_ens_name[g_nens] = strdup(src);
+    g_ens_mod[g_nens] = NULL;
+    g_nens++;
+    inst = ast_clone(tmpl);
+    free(inst->name);
+    inst->name = src;
+    inst->ntparams = 0;
+    inst->inst_disp = demangle_disp(src);
+    subst_node(inst, tmpl->tparams, args, count);
+    free_args(args, count);
+    if (!enum_fields_prim(inst, file, line, col)) {
+        enum_bad_note(src);
+        g_nens--;
+        free(g_ens_name[g_nens]);
+        g_ens_name[g_nens] = NULL;
+        return 0;
+    }
+    walk_type_uses(prog, tt, inst);
+    g_made_enum++;
+    add_one_enum(inst);
+    if (tt) {
+        if (prog) ast_add(prog, inst);
+    } else if (g_npending < MAX_MONO) {
+        g_pending[g_npending++] = inst;
+    } else {
+        mono_cap(file, line, col);
+    }
+    g_nens--;
+    free(g_ens_name[g_nens]);
+    g_ens_name[g_nens] = NULL;
+    return 1;
+}
+
 static void note_mangled_type(AstNode* prog, TypeTable* tt, const char* m,
                               const char* file, int line, int col) {
     int pre = 0, j, end;
@@ -6377,15 +7131,26 @@ static void note_mangled_type(AstNode* prog, TypeTable* tt, const char* m,
     j = mangled_ident_end(m, 0, end);
     if (j <= 0) return;
     if (j + 1 < end && m[j] == '$' && isdigit((unsigned char)m[j + 1])) {
-        if (mangled_ty_end(m, 0, end, 0) == end)
-            ensure_struct_app(prog, tt, m, file, line, col, 0);
+        int c = 0, a = 0;
+        if (mangled_ty_end(m, 0, end, 0) == end) {
+            if (match_struct_template(prog, m, &c, &a))
+                ensure_struct_app(prog, tt, m, file, line, col, 0);
+            else
+                ensure_enum_app(prog, tt, m, file, line, col, 0);
+        }
         return;
     }
     if (j != end) return;
     bare = template_by_link(prog, m);
+    if (bare) {
+        mono_focus(file);
+        diag_error(line, col, "struct '%s' needs type arguments", bare->name ? bare->name : m);
+        return;
+    }
+    bare = enum_template_named(prog, m);
     if (!bare) return;
     mono_focus(file);
-    diag_error(line, col, "struct '%s' needs type arguments", bare->name ? bare->name : m);
+    diag_error(line, col, "enum '%s' needs type arguments", bare->name ? bare->name : m);
 }
 
 static void note_stored(AstNode* prog, TypeTable* tt, AstNode* n, int full) {
@@ -6415,7 +7180,8 @@ static void note_stored(AstNode* prog, TypeTable* tt, AstNode* n, int full) {
 static void walk_type_uses(AstNode* prog, TypeTable* tt, AstNode* n) {
     int i;
     if (!n) return;
-    if ((n->type == AST_FUNCTION || n->type == AST_STRUCT_DEF) && n->ntparams > 0)
+    if ((n->type == AST_FUNCTION || n->type == AST_STRUCT_DEF || n->type == AST_ENUM_DEF) &&
+        n->ntparams > 0)
         return;
     if (n->type == AST_FUNCTION)
         note_stored(prog, tt, n, 1);
@@ -6427,8 +7193,30 @@ static void walk_type_uses(AstNode* prog, TypeTable* tt, AstNode* n) {
         note_mangled_type(prog, tt, m, n->file, n->line, n->col);
         free(m);
     }
-    if (n->type == AST_IDENT && n->name && strchr(n->name, '$'))
-        note_mangled_type(prog, tt, n->name, n->file, n->line, n->col);
+    /* `Option$1$i64__None` is a constructor, not a type. The qualifier is the
+     * type. `sizeof(Par<i32>)` stores only the mangled type in the name. */
+    if (n->type == AST_IDENT && n->name && strchr(n->name, '$')) {
+        const char* us = strstr(n->name, "__");
+        int noted = 0;
+        while (us) {
+            int pre = (int)(us - n->name);
+            if (pre > 0 && mangled_ty_end(n->name, 0, pre, 0) == pre && us[2] &&
+                !strchr(us + 2, '$')) {
+                char* pfx = strndup(n->name, (size_t)pre);
+                note_mangled_type(prog, tt, pfx, n->file, n->line, n->col);
+                free(pfx);
+                noted = 1;
+                break;
+            }
+            us = strstr(us + 2, "__");
+        }
+        if (!noted)
+            note_mangled_type(prog, tt, n->name, n->file, n->line, n->col);
+    }
+    if (n->qual && strchr(n->qual, '$'))
+        note_mangled_type(prog, tt, n->qual, n->file, n->line, n->col);
+    if (n->type == AST_MATCH_ARM && n->struct_type && strchr(n->struct_type, '$'))
+        note_mangled_type(prog, tt, n->struct_type, n->file, n->line, n->col);
     if (n->type == AST_CALL && n->targs) {
         for (i = 0; i < n->ntargs; i++)
             note_mangled_type(prog, tt, n->targs[i], n->file, n->line, n->col);
@@ -6703,6 +7491,111 @@ static int mono_fail(AstNode* n) {
     return 0;
 }
 
+/* 1 rewritten to one impl, 0 not a method, -1 diagnosed. */
+static int resolve_method(Codegen* cg, AstNode* n) {
+    VTy tv;
+    char* m;
+    int hits, one, i;
+    if (!n || !n->name || n->child_count < 1) {
+        if (n && (n->flags & AF_METHOD)) {
+            mono_focus(n->file);
+            diag_error(n->line, n->col, "no method '%s' for 'untyped'", n->name ? n->name : "?");
+            return -1;
+        }
+        return 0;
+    }
+    tv = expr_ty(cg, n->children[0]);
+    m = vty_mangled(tv);
+    if (!m) {
+        if (n->flags & AF_METHOD) {
+            mono_focus(n->file);
+            diag_error(n->line, n->col, "no method '%s' for '%s'",
+                       n->name, tv.disp[0] ? tv.disp : "untyped");
+            return -1;
+        }
+        return 0;
+    }
+    hits = 0;
+    one = -1;
+    for (i = 0; i < g_nimpls; i++) {
+        if (!g_impls[i].method || !g_impls[i].symbol || !g_impls[i].ty) continue;
+        if (strcmp(g_impls[i].method, n->name) || strcmp(g_impls[i].ty, m)) continue;
+        if (hits == 0) one = i;
+        hits++;
+    }
+    if (hits == 1) {
+        char* neu = strdup(g_impls[one].symbol);
+        free(n->name);
+        n->name = neu;
+        free(m);
+        return 1;
+    }
+    if (hits > 1) {
+        char* d = demangle_disp(m);
+        mono_focus(n->file);
+        diag_error(n->line, n->col, "ambiguous method '%s' for '%s'", n->name, d ? d : "?");
+        free(d);
+        free(m);
+        return -1;
+    }
+    if (n->flags & AF_METHOD) {
+        char* d = demangle_disp(m);
+        mono_focus(n->file);
+        diag_error(n->line, n->col, "no method '%s' for '%s'", n->name, d ? d : "?");
+        free(d);
+        free(m);
+        return -1;
+    }
+    free(m);
+    return 0;
+}
+
+/* The copy's body still says `lt(a, b)`. Rewrite that to the impl before
+ * the frame is chosen, so a direct call is what -O2 already does for a
+ * function written by hand. A user function of the same name wins. */
+static void bind_instance_call(Codegen* cg, AstNode* fn, AstNode* n) {
+    AstNode* arg;
+    AstNode* par;
+    char* m;
+    int i, pc, hits, one;
+    if (!n || n->type != AST_CALL || !n->name || !fn) return;
+    if (find_func(cg, n->name)) return;
+    if (n->child_count < 1) return;
+    arg = n->children[0];
+    if (!arg || arg->type != AST_IDENT || arg->qual || !arg->name) return;
+    pc = fn->child_count - 1;
+    par = NULL;
+    for (i = 0; i < pc; i++) {
+        if (fn->children[i] && fn->children[i]->name &&
+            !strcmp(fn->children[i]->name, arg->name)) {
+            par = fn->children[i];
+            break;
+        }
+    }
+    if (!par || !par->value) return;
+    m = decl_mangled(par->is_pointer, par->value, 0);
+    hits = 0;
+    one = -1;
+    for (i = 0; i < g_nimpls; i++) {
+        if (!g_impls[i].method || !g_impls[i].symbol || !g_impls[i].ty) continue;
+        if (strcmp(g_impls[i].method, n->name) || strcmp(g_impls[i].ty, m)) continue;
+        if (hits == 0) one = i;
+        hits++;
+    }
+    free(m);
+    if (hits != 1) return;
+    free(n->name);
+    n->name = strdup(g_impls[one].symbol);
+}
+
+static void bind_instance_methods(Codegen* cg, AstNode* fn, AstNode* n) {
+    int i;
+    if (!n) return;
+    if (n->type == AST_CALL) bind_instance_call(cg, fn, n);
+    for (i = 0; i < n->child_count; i++)
+        bind_instance_methods(cg, fn, n->children[i]);
+}
+
 static int monomorphize_call(Codegen* cg, AstNode* n) {
     AstNode* fn;
     AstNode* inst;
@@ -6730,12 +7623,15 @@ static int monomorphize_call(Codegen* cg, AstNode* n) {
         return 1;
     }
     if (!fn) {
+        int resolved;
         if (n->ntargs > 0) {
             mono_focus(n->file);
             diag_error(n->line, n->col, "function '%s' takes 0 type arguments, not %d",
                        shown, n->ntargs);
             return mono_fail(n);
         }
+        resolved = resolve_method(cg, n);
+        if (resolved < 0) return mono_fail(n);
         return 1;
     }
     if (fn->mod && !(fn->flags & AF_PUB) && !same_mod(fn->mod, g_cur_mod))
@@ -6769,7 +7665,7 @@ static int monomorphize_call(Codegen* cg, AstNode* n) {
         if (!type_arg_ok(cg->program, cg->types, args[i], n->file, n->line, n->col))
             ok = 0;
     }
-    if (!ok) {
+    if (!ok || !bounds_hold(n->file, n->line, n->col, fn, args, nargs)) {
         free_args(args, nargs);
         return mono_fail(n);
     }
@@ -6794,6 +7690,12 @@ static int monomorphize_call(Codegen* cg, AstNode* n) {
         if (cg->program) ast_add(cg->program, inst);
         g_made_fn++;
         walk_type_uses(cg->program, cg->types, inst);
+        {
+            const char* saved_mod = g_cur_mod;
+            g_cur_mod = inst->mod;
+            bind_instance_methods(cg, inst, inst);
+            g_cur_mod = saved_mod;
+        }
         if (inst->is_forward_decl)
             emit_extern_sym(cg, func_nasm(inst));
     }
@@ -17202,18 +18104,14 @@ void gen_helpers(Codegen* cg) {
     emit(cg, "    leave\n    ret\n");
 }
 
-static EnumTable* build_enum_table(AstNode* ast) {
-    EnumTable* et = calloc(1, sizeof(EnumTable));
-    int i;
-    g_enums = et;
-    if (!ast) return et;
-    for (i = 0; i < ast->child_count; i++) {
-        AstNode* def = ast->children[i];
-        EnumType* e;
-        int j, payload, v;
-        if (!def || def->type != AST_ENUM_DEF || !def->name) continue;
-        if (def->mod) continue;
-        if (enum_lookup_tab(et, def->name)) continue;
+static void add_one_enum(AstNode* def) {
+    EnumTable* et = g_enums;
+    EnumType* e;
+    int j, payload, v;
+    if (!et || !def || def->type != AST_ENUM_DEF || !def->name) return;
+    if (def->ntparams > 0 || def->mod) return;
+    if (enum_lookup_tab(et, def->name)) return;
+    {
         et->count++;
         et->types = safe_realloc(et->types, sizeof(EnumType) * et->count);
         e = &et->types[et->count - 1];
@@ -17279,8 +18177,17 @@ static EnumTable* build_enum_table(AstNode* ast) {
         if (payload < 8) payload = 8;
         e->size = align_up(payload, 8);
     }
+}
+
+static EnumTable* build_enum_table(AstNode* ast) {
+    EnumTable* et = calloc(1, sizeof(EnumTable));
+    int i;
+    g_enums = et;
+    if (!ast) return et;
+    for (i = 0; i < ast->child_count; i++) add_one_enum(ast->children[i]);
     return et;
 }
+
 
 static void add_one_struct(TypeTable* tt, AstNode* struct_def) {
     const char* tname;
@@ -18390,6 +19297,123 @@ done:
     return rc;
 }
 
+static char* param_mangled(AstNode* p) {
+    if (!p) return strdup("");
+    return decl_mangled(p->is_pointer, p->value, 0);
+}
+
+static int sig_matches(TraitMeth* m, AstNode* fn, const char* tym) {
+    char* selfn = "Self";
+    char* arg = (char*)tym;
+    int i, pc;
+    if (!m || !fn) return 0;
+    pc = fn->child_count - 1;
+    if (pc < 0) pc = 0;
+    if (pc != m->nparams) return 0;
+    for (i = 0; i < pc; i++) {
+        char* want = subst_mangled(m->params && m->params[i] ? m->params[i] : "", &selfn, &arg, 1);
+        char* got = param_mangled(fn->children[i]);
+        int eq = want && got && !strcmp(want, got);
+        free(want);
+        free(got);
+        if (!eq) return 0;
+    }
+    {
+        char* want = subst_mangled(m->retm ? m->retm : "i64", &selfn, &arg, 1);
+        char* got = mangle_spelled(fn->value ? fn->value : "i64");
+        int eq = want && got && !strcmp(want, got);
+        free(want);
+        free(got);
+        if (!eq) return 0;
+    }
+    return 1;
+}
+
+static int group_meth(int group, const char* name) {
+    int i;
+    for (i = 0; i < g_nimpls; i++) {
+        if (g_impls[i].group != group || !g_impls[i].method || !name) continue;
+        if (!strcmp(g_impls[i].method, name)) return i;
+    }
+    return -1;
+}
+
+static int trait_has_meth(TraitDef* tr, const char* name) {
+    int i;
+    if (!tr || !name) return 0;
+    for (i = 0; i < tr->nmeths; i++)
+        if (tr->meths[i].name && !strcmp(tr->meths[i].name, name)) return 1;
+    return 0;
+}
+
+static void check_bound_names(AstNode* n) {
+    int i;
+    if (!n || n->ntparams <= 0 || !n->tbounds) return;
+    for (i = 0; i < n->ntparams; i++) {
+        const char* p;
+        if (!n->tbounds[i] || !n->tbounds[i][0]) continue;
+        p = n->tbounds[i];
+        while (*p) {
+            char name[64];
+            if (!next_bound_name(&p, name, (int)sizeof name)) break;
+            if (trait_index(name) >= 0) continue;
+            if (n->file) focus_file(n->file);
+            diag_error(n->line, n->col, "unknown trait '%s'", name);
+        }
+    }
+}
+
+static void check_traits(AstNode* prog, TypeTable* tt) {
+    int i, k;
+    if (prog) {
+        for (i = 0; i < prog->child_count; i++) {
+            AstNode* n = prog->children[i];
+            if (n && (n->type == AST_FUNCTION || n->type == AST_STRUCT_DEF))
+                check_bound_names(n);
+        }
+    }
+    for (i = 0; i < g_nimpls; i++) {
+        TraitDef* tr;
+        int ti, cls, j;
+        if (g_impls[i].method) continue;
+        if (g_impls[i].file) focus_file(g_impls[i].file);
+        cls = arg_class(prog, tt, g_impls[i].ty, g_impls[i].file, g_impls[i].line, g_impls[i].col);
+        if (cls != 1 && cls != 0)
+            diag_error(g_impls[i].line, g_impls[i].col,
+                       "type '%s' is not an integer, a pointer, or a struct",
+                       g_impls[i].disp && g_impls[i].disp[0] ? g_impls[i].disp : "?");
+        ti = trait_index(g_impls[i].trait);
+        if (ti < 0) {
+            diag_error(g_impls[i].line, g_impls[i].col, "unknown trait '%s'",
+                       g_impls[i].trait ? g_impls[i].trait : "?");
+            continue;
+        }
+        tr = &g_traits[ti];
+        for (k = 0; k < tr->nmeths; k++) {
+            int ix = group_meth(g_impls[i].group, tr->meths[k].name);
+            if (ix < 0) {
+                diag_error(g_impls[i].line, g_impls[i].col,
+                           "impl '%s' for '%s' is missing method '%s'",
+                           g_impls[i].trait, g_impls[i].disp ? g_impls[i].disp : "?",
+                           tr->meths[k].name ? tr->meths[k].name : "?");
+                continue;
+            }
+            if (!sig_matches(&tr->meths[k], g_impls[ix].fn, g_impls[i].ty))
+                diag_error(g_impls[ix].line, g_impls[ix].col,
+                           "method '%s' of impl '%s' for '%s' does not match the trait",
+                           tr->meths[k].name, g_impls[i].trait,
+                           g_impls[i].disp ? g_impls[i].disp : "?");
+        }
+        for (j = 0; j < g_nimpls; j++) {
+            if (g_impls[j].group != g_impls[i].group || !g_impls[j].method) continue;
+            if (!trait_has_meth(tr, g_impls[j].method))
+                diag_error(g_impls[j].line, g_impls[j].col,
+                           "method '%s' is not in trait '%s'",
+                           g_impls[j].method, g_impls[i].trait);
+        }
+    }
+}
+
 int main(int argc, char** argv) {
     const char* inputs[MAX_LOADED];
     int ninputs = 0;
@@ -18483,6 +19507,7 @@ int main(int argc, char** argv) {
     build_enum_table(ast);
     instantiate_structs(ast);
     build_type_table(types, ast);
+    check_traits(ast, types);
 
     StringTable* strtab = strtab_new();
     codegen(ast, asm_out, strtab, types);

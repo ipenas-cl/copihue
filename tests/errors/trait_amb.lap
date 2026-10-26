@@ -1,0 +1,16 @@
+trait Ord { fn lt(a: Self, b: Self) -> bool }
+trait Cmp { fn lt(a: Self, b: Self) -> bool }
+
+impl Ord for i64 {
+    fn lt(a: Self, b: Self) -> bool { return a < b; }
+}
+
+impl Cmp for i64 {
+    fn lt(a: Self, b: Self) -> bool { return b < a; }
+}
+
+fn main() -> i64 {
+    let a: i64 = 1;
+    let b: i64 = 2;
+    return lt(a, b);
+}

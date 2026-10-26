@@ -1,0 +1,30 @@
+enum Option<T> { None, Some(T) }
+
+fn wrap<T>(v: T) -> Option<T> {
+    return Option<T>::Some(v);
+}
+
+fn unwrap_i64(o: Option<i64>) -> i64 {
+    return match o {
+        Some(v) => v,
+        None => 0
+    };
+}
+
+fn main() -> i64 {
+    let x: Option<i64> = Option<i64>::Some(7);
+    let y: Option<i64> = Option<i64>::None;
+    let p: Option<*u8> = Option<*u8>::Some("hi");
+    let a = wrap(4);
+    print_int(match x { Some(v) => v, None => 0 });
+    println("");
+    print_int(match y { Option<i64>::Some(v) => v, None => 0 });
+    println("");
+    print_int(match p { Some(q) => q[0], None => 0 });
+    println("");
+    print_int(unwrap_i64(a));
+    println("");
+    print_int(sizeof(Option<i64>));
+    println("");
+    return 0;
+}
