@@ -1,0 +1,128 @@
+// Early return, a call on the right of &&, and a call in a while condition.
+// -O0 and -O2 print the same lines. A leaf inliner was measured and not kept.
+
+fn add1(x: i64) -> i64 {
+    if (x == 0) { return 7; }
+    return x + 1;
+}
+
+fn twice(x: i64) -> i64 {
+    return add1(x) + add1(x);
+}
+
+let g: i64 = 0;
+
+fn bump() -> i64 {
+    g = g + 1;
+    return g;
+}
+
+struct Box { n: i64, tag: u8 }
+
+fn setbox(p: *Box, v: i64) -> i64 {
+    p->tag = 1;
+    p->n = v;
+    return p->n;
+}
+
+fn small(n: i64) -> i64 {
+    let s = 0;
+    let i = 0;
+    while (i < n) {
+        if (i == 3) { return s; }
+        s = s + i;
+        i = i + 1;
+    }
+    return s;
+}
+
+let c: i64 = 0;
+
+fn tick() -> i64 {
+    c = c + 1;
+    return c;
+}
+
+fn gate(x: i64) -> i64 {
+    if (x == 0 && tick() == 1) { return 1; }
+    return 0;
+}
+
+fn steps(n: i64) -> i64 {
+    let i = 0;
+    while (tick() < n) {
+        i = i + 1;
+        if (i > 10) { return -1; }
+    }
+    return i;
+}
+
+fn pick(x: i64) -> i64 {
+    let t = x;
+    if (t == 0) { return 0; }
+    return t;
+}
+
+fn idp(p: *Box) -> *Box {
+    if (p == 0) { return 0; }
+    p->n = p->n + 1;
+    return p;
+}
+
+fn main() -> i64 {
+    print_int(add1(0));
+    println("");
+    print_int(add1(3));
+    println("");
+    print_int(twice(4));
+    println("");
+    print_int(bump() + bump());
+    println("");
+    let b: Box;
+    print_int(setbox(&b, 9));
+    println("");
+    print_int(b.tag);
+    println("");
+    print_int(small(5));
+    println("");
+    print_int(small(2));
+    println("");
+    print_int(gate(0));
+    println("");
+    print_int(gate(1));
+    println("");
+    print_int(c);
+    println("");
+    print_int(steps(3));
+    println("");
+    let a = add1(0);
+    print_int(a);
+    println("");
+    let q = add1(8);
+    print_int(q);
+    println("");
+    let v = pick(4);
+    print_int(v);
+    println("");
+    let z = pick(0);
+    print_int(z);
+    println("");
+    let b2: Box;
+    b2.n = 3;
+    let qp = idp(&b2);
+    print_int(qp->n);
+    println("");
+    let typed: *Box = idp(&b2);
+    print_int(typed->n);
+    println("");
+    v = pick(v);
+    print_int(v);
+    println("");
+    let sm = small(5);
+    print_int(sm);
+    println("");
+    let sm2 = small(2);
+    print_int(sm2);
+    println("");
+    return 0;
+}
