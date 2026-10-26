@@ -1,0 +1,271 @@
+// SPMC, MPMC, and a thread pool. Each phase pushes 1..4096.
+// The sum is 8390656. fetch_add on seen[] must return 0 the first time.
+// A second claim of the same value counts as a duplicate.
+align(64) struct Cell {
+    volatile seq: u64,
+    volatile data: u64,
+}
+
+struct Seen {
+    volatile n: u64,
+}
+
+let cells: [Cell; 1024];
+align(64) let volatile enq: u64 = 0;
+align(64) let volatile deq: u64 = 0;
+align(64) let volatile done: u64 = 0;
+let volatile next_id: u64 = 0;
+let seen: [Seen; 4096];
+let out_sum0: u64 = 0;
+let out_sum1: u64 = 0;
+let out_sum2: u64 = 0;
+let out_sum3: u64 = 0;
+let out_dup0: u64 = 0;
+let out_dup1: u64 = 0;
+let out_dup2: u64 = 0;
+let out_dup3: u64 = 0;
+let out_n0: u64 = 0;
+let out_n1: u64 = 0;
+let out_n2: u64 = 0;
+let out_n3: u64 = 0;
+let volatile tid0: u32 = 0;
+let volatile tid1: u32 = 0;
+let volatile tid2: u32 = 0;
+let volatile tid3: u32 = 0;
+let stack0: [u8; 65536];
+let stack1: [u8; 65536];
+let stack2: [u8; 65536];
+let stack3: [u8; 65536];
+
+fn try_push(v: i64) -> i64 {
+    let pos = 0;
+    let seq = 0;
+    let again = 0;
+    let old = 0;
+    while (1) {
+        pos = atomic_load_acquire(&enq);
+        seq = atomic_load_acquire(&cells[pos & 1023].seq);
+        if (seq != pos) {
+            again = atomic_load_acquire(&enq);
+            if (again == pos) {
+                return 0;
+            }
+        } else {
+            old = compare_exchange(&enq, pos, pos + 1);
+            if (old == pos) {
+                cells[pos & 1023].data = v;
+                atomic_store_release(&cells[pos & 1023].seq, pos + 1);
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
+fn try_pop() -> i64 {
+    let pos = 0;
+    let seq = 0;
+    let again = 0;
+    let old = 0;
+    let v = 0;
+    while (1) {
+        pos = atomic_load_acquire(&deq);
+        seq = atomic_load_acquire(&cells[pos & 1023].seq);
+        if (seq != pos + 1) {
+            again = atomic_load_acquire(&deq);
+            if (again == pos) {
+                return 0;
+            }
+        } else {
+            old = compare_exchange(&deq, pos, pos + 1);
+            if (old == pos) {
+                v = cells[pos & 1023].data;
+                atomic_store_release(&cells[pos & 1023].seq, pos + 1024);
+                return v;
+            }
+        }
+    }
+    return 0;
+}
+
+fn reset_queue() -> i64 {
+    let i = 0;
+    atomic_store_release(&enq, 0);
+    atomic_store_release(&deq, 0);
+    atomic_store_release(&done, 0);
+    atomic_store_release(&next_id, 0);
+    while (i < 1024) {
+        atomic_store_release(&cells[i].seq, i);
+        i = i + 1;
+    }
+    i = 0;
+    while (i < 4096) {
+        atomic_store_release(&seen[i].n, 0);
+        i = i + 1;
+    }
+    out_sum0 = 0;
+    out_sum1 = 0;
+    out_sum2 = 0;
+    out_sum3 = 0;
+    out_dup0 = 0;
+    out_dup1 = 0;
+    out_dup2 = 0;
+    out_dup3 = 0;
+    out_n0 = 0;
+    out_n1 = 0;
+    out_n2 = 0;
+    out_n3 = 0;
+    return 0;
+}
+
+fn store_out(id: i64, sum: i64, dups: i64, n: i64) -> i64 {
+    if (id == 0) {
+        out_sum0 = sum;
+        out_dup0 = dups;
+        out_n0 = n;
+    } else if (id == 1) {
+        out_sum1 = sum;
+        out_dup1 = dups;
+        out_n1 = n;
+    } else if (id == 2) {
+        out_sum2 = sum;
+        out_dup2 = dups;
+        out_n2 = n;
+    } else {
+        out_sum3 = sum;
+        out_dup3 = dups;
+        out_n3 = n;
+    }
+    return 0;
+}
+
+fn consumer() -> i64 {
+    let id = fetch_add(&next_id, 1);
+    let sum = 0;
+    let dups = 0;
+    let n = 0;
+    let v = 0;
+    while (1) {
+        v = try_pop();
+        if (v != 0) {
+            let old = fetch_add(&seen[v - 1].n, 1);
+            if (old != 0) {
+                dups = dups + 1;
+            }
+            sum = sum + v;
+            n = n + 1;
+        } else {
+            if (atomic_load_acquire(&done) != 0) {
+                v = try_pop();
+                if (v == 0) {
+                    store_out(id, sum, dups, n);
+                    return 0;
+                }
+                let old2 = fetch_add(&seen[v - 1].n, 1);
+                if (old2 != 0) {
+                    dups = dups + 1;
+                }
+                sum = sum + v;
+                n = n + 1;
+            } else {
+                cpu_pause();
+            }
+        }
+    }
+    return 0;
+}
+
+fn prod_all() -> i64 {
+    let pos = 0;
+    let i = 1;
+    while (i <= 4096) {
+        while (atomic_load_acquire(&cells[pos & 1023].seq) != pos) {
+            cpu_pause();
+        }
+        cells[pos & 1023].data = i;
+        atomic_store_release(&cells[pos & 1023].seq, pos + 1);
+        pos = pos + 1;
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn prod_lo() -> i64 {
+    let i = 1;
+    while (i <= 2048) {
+        while (try_push(i) == 0) {
+            cpu_pause();
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn prod_hi() -> i64 {
+    let i = 2049;
+    while (i <= 4096) {
+        while (try_push(i) == 0) {
+            cpu_pause();
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn report() -> i64 {
+    print_int(out_sum0 + out_sum1 + out_sum2 + out_sum3);
+    println("");
+    print_int(out_dup0 + out_dup1 + out_dup2 + out_dup3);
+    println("");
+    print_int(out_n0 + out_n1 + out_n2 + out_n3);
+    println("");
+    return 0;
+}
+
+fn main() -> i64 {
+    reset_queue();
+    thread_spawn(&prod_all, stack0 + 65536, &tid0);
+    thread_spawn(&consumer, stack1 + 65536, &tid1);
+    thread_spawn(&consumer, stack2 + 65536, &tid2);
+    thread_spawn(&consumer, stack3 + 65536, &tid3);
+    thread_join(&tid0);
+    atomic_store_release(&done, 1);
+    thread_join(&tid1);
+    thread_join(&tid2);
+    thread_join(&tid3);
+    report();
+
+    reset_queue();
+    thread_spawn(&prod_lo, stack0 + 65536, &tid0);
+    thread_spawn(&prod_hi, stack1 + 65536, &tid1);
+    thread_spawn(&consumer, stack2 + 65536, &tid2);
+    thread_spawn(&consumer, stack3 + 65536, &tid3);
+    thread_join(&tid0);
+    thread_join(&tid1);
+    atomic_store_release(&done, 1);
+    thread_join(&tid2);
+    thread_join(&tid3);
+    report();
+
+    reset_queue();
+    thread_spawn(&consumer, stack1 + 65536, &tid1);
+    thread_spawn(&consumer, stack2 + 65536, &tid2);
+    thread_spawn(&consumer, stack3 + 65536, &tid3);
+    let pos = 0;
+    let i = 1;
+    while (i <= 4096) {
+        while (atomic_load_acquire(&cells[pos & 1023].seq) != pos) {
+            cpu_pause();
+        }
+        cells[pos & 1023].data = i;
+        atomic_store_release(&cells[pos & 1023].seq, pos + 1);
+        pos = pos + 1;
+        i = i + 1;
+    }
+    atomic_store_release(&done, 1);
+    thread_join(&tid1);
+    thread_join(&tid2);
+    thread_join(&tid3);
+    report();
+    return 0;
+}

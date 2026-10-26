@@ -1,0 +1,33 @@
+// Address of a volatile field of an array element. sizeof stays 64.
+align(64) struct Cell {
+    volatile seq: u64,
+    data: u64,
+}
+
+struct Seen {
+    volatile n: u64,
+}
+
+let cells: [Cell; 4];
+let seen: [Seen; 4];
+
+fn main() -> i64 {
+    let i = 1;
+    atomic_store_release(&cells[i].seq, 7);
+    cells[i].data = 9;
+    print_int(atomic_load_acquire(&cells[i].seq));
+    println("");
+    print_int(cells[i].data);
+    println("");
+    print_int(sizeof(Cell));
+    println("");
+    print_int(fetch_add(&cells[i].seq, 1));
+    println("");
+    print_int(atomic_load_acquire(&cells[i].seq));
+    println("");
+    print_int(fetch_add(&seen[i].n, 1));
+    println("");
+    print_int(fetch_add(&seen[i].n, 1));
+    println("");
+    return 0;
+}

@@ -13,7 +13,7 @@ struct alignas(64) Idx {
 
 static Idx write_idx;
 static Idx read_idx;
-static std::uint64_t buf[CAP];
+alignas(64) static std::uint64_t buf[CAP];
 
 static void pause_once() {
     asm volatile("pause");
@@ -35,15 +35,11 @@ int main() {
     std::uint64_t sum = 0;
     std::uint64_t got = 0;
     while (got < N) {
-        std::uint64_t wr = write_idx.v.load(std::memory_order_acquire);
-        if (r == wr) {
-            pause_once();
-        } else {
-            sum += buf[r & (CAP - 1)];
-            r++;
-            read_idx.v.store(r, std::memory_order_release);
-            got++;
-        }
+        while (r == write_idx.v.load(std::memory_order_acquire)) pause_once();
+        sum += buf[r & (CAP - 1)];
+        r++;
+        read_idx.v.store(r, std::memory_order_release);
+        got++;
     }
     p.join();
     std::printf("%llu\n", (unsigned long long)sum);
