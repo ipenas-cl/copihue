@@ -1,0 +1,8 @@
+extern fn slen(s: str) -> i64;
+
+fn main() -> i64 {
+    let s: str = "hello";
+    print_int(slen(s));
+    println("");
+    return 0;
+}

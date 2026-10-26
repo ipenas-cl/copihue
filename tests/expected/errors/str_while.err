@@ -1,0 +1,4 @@
+tests/errors/str_while.lap:2:17: error: '==' on str in a while condition needs a local
+      2 |     while (a == b) {
+        |                 ^
+1 error, compilation failed

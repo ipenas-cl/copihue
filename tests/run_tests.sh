@@ -404,6 +404,34 @@ elif grep -q "^COMPILE ERROR" "$WORK/rlink0"; then
 else
   check "result link" "tests/expected/tests/link/result.out" "$WORK/rlink0"
 fi
+# A str parameter is the []u8 ABI. The defining object exports `slen`.
+strlink_run() {
+  local opt=$1
+  ( cd "$WORK" && rm -f str_prog str_def.o str_use.o &&
+    "$CC" "$opt" -c -o str_def.o "$ROOT/tests/link/parts/str_def.lap" &&
+    "$CC" "$opt" -c -o str_use.o "$ROOT/tests/link/parts/str_use.lap" &&
+    ld str_def.o str_use.o -o str_prog ) >/dev/null 2>err.txt || {
+      echo "COMPILE ERROR"; sed "s|$ROOT/||g" "$WORK/err.txt"; return; }
+  ( cd "$WORK" && ./str_prog </dev/null; echo "exit=$?" ) | mask
+}
+strlink_run -O0 > "$WORK/slink0"
+if ! nm "$WORK/str_def.o" | grep -q ' T slen$' || \
+   nm "$WORK/str_def.o" | grep -q ' _start$' || \
+   ! nm -u "$WORK/str_use.o" | grep -q ' slen$' || \
+   ! nm "$WORK/str_use.o" | grep -q ' T main' || \
+   ! nm "$WORK/str_use.o" | grep -q ' T _start'; then
+  fail=$((fail+1)); failed+=("str link symbols"); echo "FAIL str link symbols"; nm "$WORK/str_def.o"; nm "$WORK/str_use.o"
+else
+  pass=$((pass+1))
+fi
+strlink_run -O2 > "$WORK/slink2"
+if ! cmp -s "$WORK/slink0" "$WORK/slink2"; then
+  fail=$((fail+1)); failed+=("str link (-O0 vs -O2)"); echo "FAIL str link: -O0 and -O2 differ"; diff "$WORK/slink0" "$WORK/slink2" | head -10
+elif grep -q "^COMPILE ERROR" "$WORK/slink0"; then
+  fail=$((fail+1)); failed+=("str link"); echo "FAIL str link:"; cat "$WORK/slink0"
+else
+  check "str link" "tests/expected/tests/link/str.out" "$WORK/slink0"
+fi
 # The same instantiation inside a module is `mem__max$1$i32`.
 mgenlink_run() {
   local opt=$1

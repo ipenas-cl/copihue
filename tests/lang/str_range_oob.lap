@@ -1,0 +1,7 @@
+fn main() -> i64 {
+    let s: str = "hi";
+    let t: str = s[0..3];
+    print_int(t.len);
+    println("");
+    return 0;
+}
