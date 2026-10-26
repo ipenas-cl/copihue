@@ -1,0 +1,4 @@
+tests/errors/generic_count.lap:9:24: error: function 'max' takes 1 type argument, not 2
+      9 |     return max<i32, i64>(a, b);
+        |                        ^
+1 error, compilation failed

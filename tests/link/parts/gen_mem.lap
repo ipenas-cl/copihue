@@ -1,0 +1,10 @@
+module mem;
+
+pub fn max<T>(a: T, b: T) -> T {
+    if (a > b) { return a; }
+    return b;
+}
+
+pub fn use_max(a: i32, b: i32) -> i32 {
+    return max<i32>(a, b);
+}

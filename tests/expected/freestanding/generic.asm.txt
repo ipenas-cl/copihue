@@ -1,0 +1,55 @@
+section .data
+section .text
+pick:
+    push rbp
+    mov rbp, rsp
+    sub rsp, __frame_pick
+    mov rax, rdi
+    movsxd rax, eax
+    mov [rbp-8], rax
+    mov rax, rsi
+    movsxd rax, eax
+    mov [rbp-16], rax
+    mov rax, [rbp-8]
+    push rax
+    mov rax, [rbp-16]
+    push rax
+    pop rsi
+    pop rdi
+    call max$1$i32
+    leave
+    ret
+    xor rax, rax
+    leave
+    ret
+__frame_pick equ 80
+max$1$i32:
+    push rbp
+    mov rbp, rsp
+    sub rsp, __frame_max$1$i32
+    mov rax, rdi
+    movsxd rax, eax
+    mov [rbp-8], rax
+    mov rax, rsi
+    movsxd rax, eax
+    mov [rbp-16], rax
+    mov rax, [rbp-8]
+    push rax
+    mov rax, [rbp-16]
+    mov rbx, rax
+    pop rax
+    cmp rax, rbx
+    jle .L0
+    mov rax, [rbp-8]
+    leave
+    ret
+    jmp .L1
+.L0:
+.L1:
+    mov rax, [rbp-16]
+    leave
+    ret
+    xor rax, rax
+    leave
+    ret
+__frame_max$1$i32 equ 80

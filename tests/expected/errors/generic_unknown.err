@@ -1,0 +1,4 @@
+tests/errors/generic_unknown.lap:6:18: error: unknown type argument 'Foo'
+      6 |     return id<Foo>(1);
+        |                  ^
+1 error, compilation failed

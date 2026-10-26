@@ -2,6 +2,8 @@
 
 **Esto es una propuesta. No está implementado.** El compilador de este árbol, cuando se escribió la propuesta, era Copihue 0.19.0 (`compiler/bootstrap-c/copihue.c`).
 
+**Corte 0.40.0.** Una función o un struct puede ser genérico (`fn max<T>`, `struct Par<A, B>`). El compilador emite una copia por combinación usada. El detalle está en [`DESIGN_GENERICS.md`](DESIGN_GENERICS.md).
+
 **Corte 0.39.0.** Un enum se devuelve por un puntero oculto en `rdi` (no por `rax:rdx`: `Pair` mide 24) y se pasa por valor. `match` acepta `_`, un bloque, un global y un campo (`s.o` y `p->o`). En hosted `-O2` la etiqueta se carga una vez en `rbx`. El detalle está en [`DESIGN_ENUMS.md`](DESIGN_ENUMS.md).
 
 **Corte 0.38.0.** `enum` con campos enteros o punteros, y `match` que exige todas las variantes. El valor es etiqueta más payload en un local o un parámetro: sin heap y sin libc, también en `--freestanding` y `--flat`. `Option` lo escribe el programa; no es un tipo del compilador. No se devuelve un enum, no vive en un global, ni en un campo, ni en un slice, un array o un `vec`. El detalle está en [`DESIGN_ENUMS.md`](DESIGN_ENUMS.md).

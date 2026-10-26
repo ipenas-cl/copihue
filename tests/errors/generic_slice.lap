@@ -1,0 +1,8 @@
+fn id<T>(x: T) -> T {
+    return x;
+}
+
+fn main() -> i64 {
+    let x = id<[]i32>(0);
+    return 0;
+}

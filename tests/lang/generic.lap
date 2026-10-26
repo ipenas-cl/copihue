@@ -1,0 +1,112 @@
+import "parts/gen_mem.lap";
+
+struct Par<A, B> { a: A, b: B }
+struct Box<T> { inner: T }
+struct Node<T> { v: T, nxt: *Node<T> }
+struct Hold { p: Par<i32, i64> }
+
+fn max<T>(a: T, b: T) -> T {
+    if (a > b) { return a; }
+    return b;
+}
+
+fn id<T>(x: T) -> T {
+    return x;
+}
+
+fn add<T>(a: T, b: T) -> T {
+    return a + b;
+}
+
+fn shr2<T>(x: T) -> T {
+    return x >> 2;
+}
+
+fn pick<A, B>(a: A, b: B) -> A {
+    return a;
+}
+
+fn star<T>(p: *T) -> T {
+    return *p;
+}
+
+fn down<T>(n: T, k: i64) -> T {
+    if (k < 1) { return n; }
+    return down(n, k - 1);
+}
+
+fn first<T>(s: []T) -> T {
+    return s[0];
+}
+
+fn main() -> i64 {
+    let a: i32 = 3;
+    let b: i32 = 9;
+    let p: *u8 = 0;
+    let q: *u8 = id(p);
+    let par = Par<i32, i64> { a: 4, b: 5 };
+    let box = Box<Par<i32, u8>> { inner: Par<i32, u8> { a: 2, b: 9 } };
+    let n = Node<i32> { v: 6, nxt: 0 };
+    let h = Hold { p: Par<i32, i64> { a: 7, b: 8 } };
+    let x: i32 = 1;
+    let y: i64 = 2;
+    let byte: u8 = 7;
+    let slot: *u8 = &byte;
+    let maxv: i32 = 1;
+    let u: u8 = 200;
+    let v: u8 = 100;
+    let cell = mem::Cell<i32> { v: 5 };
+    print_int(max<i32>(a, b));
+    println("");
+    print_int(max(a, b));
+    println("");
+    print_int(max(1, 2));
+    println("");
+    print_int(id<i32>(a));
+    println("");
+    print_int(q as i64);
+    println("");
+    print_int(par.a);
+    println("");
+    print_int(par.b);
+    println("");
+    print_int(box.inner.a);
+    println("");
+    print_int(box.inner.b);
+    println("");
+    print_int(n.v);
+    println("");
+    print_int(h.p.a);
+    println("");
+    print_int(h.p.b);
+    println("");
+    print_int(pick<i32, i64>(1, 2));
+    println("");
+    print_int(pick(x, y));
+    println("");
+    print_int(star(slot));
+    println("");
+    print_int(shr2<i32>(20));
+    println("");
+    if (maxv < 3) { print_int(1); } else { print_int(0); }
+    println("");
+    print_int(add<u8>(u, v));
+    println("");
+    print_int(down<i32>(11, 3));
+    println("");
+    print_int(mem::pick<i32>(2, 8));
+    println("");
+    print_int(mem::pick(a, b));
+    println("");
+    print_int(cell.v);
+    println("");
+    print_int(sizeof(Par<i32, i64>));
+    println("");
+    print_int(sizeof(Box<Par<i32, u8>>));
+    println("");
+    let arr: [i32; 2] = [4, 5];
+    let sl: []i32 = arr;
+    print_int(first(sl));
+    println("");
+    return 0;
+}

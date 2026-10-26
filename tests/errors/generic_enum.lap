@@ -1,0 +1,11 @@
+enum Option { None, Some(i64) }
+
+fn id<T>(x: T) -> T {
+    return x;
+}
+
+fn main() -> i64 {
+    let o = Option::None;
+    let x = id<Option>(o);
+    return 0;
+}
