@@ -1,0 +1,313 @@
+// Byte-for-byte comparison of compiler/native/x64.c against `nasm -f elf64`.
+//
+//   test_x64 NASM_WORKDIR corpus FILE.asm ...   instructions of generated assembly
+//   test_x64 NASM_WORKDIR vectors FILE.asm      hand-written edge cases
+//   test_x64 NASM_WORKDIR branches              rel8 / rel32 forms with known displacements
+//
+// Every distinct instruction is encoded by x64.c and assembled by nasm in one
+// object. The .text bytes and the relocations (offset, type, symbol, addend)
+// must be equal. Symbols are renamed symN so that nasm sees them as extern.
+// Exit status 1 when an instruction the encoder claims to cover differs, or
+// nasm rejects the batch. Instructions the encoder does not cover are counted,
+// not failed.
+#include <ctype.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "../../compiler/native/x64.h"
+
+#define MARK 0x7A3C91E5D2B84F06ULL
+
+typedef struct {
+    char text[256];       // text given to both nasm and the encoder
+    long weight;          // occurrences in the input
+    int enc_ok;           // encoder produced bytes
+    const char* why;
+    XEnc enc;
+    int pre_encoded;      // branch items carry their own encoding
+} Item;
+
+static Item* items; static size_t nitems, capitems;
+static size_t* htab; static size_t hcap;
+
+static uint64_t fnv(const char* s) {
+    uint64_t h = 1469598103934665603ULL;
+    while (*s) { h ^= (unsigned char)*s++; h *= 1099511628211ULL; }
+    return h;
+}
+
+static Item* add_item(const char* text, long weight) {
+    if (!hcap) { hcap = 1 << 16; htab = calloc(hcap, sizeof *htab); }
+    if (nitems * 2 >= hcap) {
+        size_t nc = hcap * 2; size_t* nt = calloc(nc, sizeof *nt);
+        for (size_t i = 0; i < nitems; i++) {
+            size_t k = fnv(items[i].text) & (nc - 1);
+            while (nt[k]) k = (k + 1) & (nc - 1);
+            nt[k] = i + 1;
+        }
+        free(htab); htab = nt; hcap = nc;
+    }
+    size_t k = fnv(text) & (hcap - 1);
+    while (htab[k]) {
+        if (!strcmp(items[htab[k] - 1].text, text)) { items[htab[k] - 1].weight += weight; return &items[htab[k] - 1]; }
+        k = (k + 1) & (hcap - 1);
+    }
+    if (nitems == capitems) { capitems = capitems ? capitems * 2 : 4096; items = realloc(items, capitems * sizeof *items); }
+    Item* it = &items[nitems];
+    memset(it, 0, sizeof *it);
+    snprintf(it->text, sizeof it->text, "%s", text);
+    it->weight = weight;
+    htab[k] = ++nitems;
+    return it;
+}
+
+// ---- symbols: renamed sym0, sym1 ...
+static char (*syms)[128]; static int nsyms, capsyms;
+static int sym_id(const char* name) {
+    for (int i = 0; i < nsyms; i++) if (!strcmp(syms[i], name)) return i;
+    if (nsyms == capsyms) { capsyms = capsyms ? capsyms * 2 : 256; syms = realloc(syms, (size_t)capsyms * sizeof *syms); }
+    snprintf(syms[nsyms], 128, "%s", name);
+    return nsyms++;
+}
+
+static int ident_start(int c) { return isalpha(c) || c == '_' || c == '.' || c == '$' || c == '@'; }
+static int ident_char(int c) { return isalnum(c) || c == '_' || c == '.' || c == '$' || c == '@' || c == '#' || c == '~'; }
+
+// ---- equ constants of the file being read
+static struct { char name[128]; int64_t v; } eq[8192]; static int neq;
+static int find_eq(const char* name, int64_t* v) {
+    for (int i = 0; i < neq; i++) if (!strcmp(eq[i].name, name)) { *v = eq[i].v; return 1; }
+    return 0;
+}
+
+// Replace each identifier by `f(id)` when f writes a replacement; others copy.
+typedef int (*Repl)(const char* id, char* out, size_t n, void* ctx);
+static void rewrite(const char* in, char* out, size_t outsz, Repl f, void* ctx) {
+    size_t o = 0;
+    for (const char* p = in; *p;) {
+        if (ident_start((unsigned char)*p)) {
+            const char* q = p; while (ident_char((unsigned char)*q)) q++;
+            char id[128]; size_t l = (size_t)(q - p); if (l > 127) l = 127;
+            memcpy(id, p, l); id[l] = 0;
+            char rep[160];
+            if (f(id, rep, sizeof rep, ctx)) { for (char* r = rep; *r && o + 1 < outsz; r++) out[o++] = *r; }
+            else for (size_t i = 0; i < l && o + 1 < outsz; i++) out[o++] = id[i];
+            p = q;
+        } else if (isdigit((unsigned char)*p)) {   // 0x1F, 12: keep whole so `x` is not an identifier
+            while (ident_char((unsigned char)*p) && o + 1 < outsz) out[o++] = *p++;
+        } else if (o + 1 < outsz) out[o++] = *p++;
+    }
+    out[o] = 0;
+}
+static int repl_eq(const char* id, char* out, size_t n, void* ctx) {
+    (void)ctx; int64_t v;
+    if (!find_eq(id, &v)) return 0;
+    snprintf(out, n, "%lld", (long long)v);
+    return 1;
+}
+static int repl_sym(const char* id, char* out, size_t n, void* ctx) {
+    (void)ctx; const char* target = ctx;
+    if (strcmp(id, target)) return 0;
+    snprintf(out, n, "sym%d", sym_id(id));
+    return 1;
+}
+
+// Turn one raw instruction line into the text both sides receive.
+static void normalize(const char* raw, char* out, size_t outsz) {
+    char t[512];
+    rewrite(raw, t, sizeof t, repl_eq, NULL);
+    XInsn in; char err[64];
+    x64_set_consts(NULL, NULL);
+    if (x64_parse(t, &in, err, sizeof err) == 0) {
+        for (int i = 0; i < in.nops; i++)
+            if (in.op[i].has_sym) {
+                char t2[512];
+                rewrite(t, t2, sizeof t2, repl_sym, in.op[i].sym);
+                strcpy(t, t2);
+            }
+    }
+    snprintf(out, outsz, "%s", t);
+}
+
+// ---- inputs
+static int load_asm(const char* path, int vectors) {
+    FILE* f = fopen(path, "r");
+    if (!f) { perror(path); return 0; }
+    char line[1024];
+    neq = 0;
+    while (fgets(line, sizeof line, f)) {
+        XLine xl; x64_classify(line, &xl);
+        if (xl.kind == XL_EQU && neq < 8192) { snprintf(eq[neq].name, sizeof eq[neq].name, "%s", xl.name); eq[neq].v = xl.val; neq++; }
+    }
+    rewind(f);
+    while (fgets(line, sizeof line, f)) {
+        XLine xl; x64_classify(line, &xl);
+        if (xl.kind != XL_INSN) continue;
+        char text[256];
+        if (vectors) snprintf(text, sizeof text, "%s", xl.text);
+        else normalize(xl.text, text, sizeof text);
+        add_item(text, 1);
+    }
+    fclose(f);
+    return 1;
+}
+
+static void load_branches(void) {
+    static const char* const J[] = {"jmp","jo","jno","jb","jae","je","jne","jbe","ja","js","jns","jp","jnp","jl","jge","jle","jg","jz","jnz","jc","jnc"};
+    static const int R[] = {0, 1, 5, 100, 127, -1, -2, -128, -129, 128, 1000, -100000, 2000000};
+    for (size_t j = 0; j < sizeof J / sizeof J[0]; j++)
+        for (size_t r = 0; r < sizeof R / sizeof R[0]; r++)
+            for (int sh = 0; sh < 2; sh++) {
+                int size = x64_branch_size(J[j], sh);
+                if (sh && (R[r] < -128 || R[r] > 127)) continue;
+                char t[64]; snprintf(t, sizeof t, "%s %s $%+d", J[j], sh ? "short" : "near", R[r] + size);
+                Item* it = add_item(t, 1);
+                it->pre_encoded = 1;
+                it->enc_ok = x64_encode_branch(J[j], sh, R[r], &it->enc) > 0;
+            }
+    for (size_t r = 0; r < sizeof R / sizeof R[0]; r++) {
+        char t[64]; snprintf(t, sizeof t, "call $%+d", R[r] + 5);
+        Item* it = add_item(t, 1);
+        it->pre_encoded = 1;
+        it->enc_ok = x64_encode_branch("call", 0, R[r], &it->enc) > 0;
+    }
+}
+
+// ---- ELF64 object reader
+static uint8_t* obj; static size_t objn;
+static uint64_t rd(const uint8_t* p, int n) { uint64_t v = 0; for (int i = n - 1; i >= 0; i--) v = v << 8 | p[i]; return v; }
+
+typedef struct { uint64_t off; uint32_t type; char sym[128]; int64_t addend; } NRel;
+static NRel* nrel; static size_t nnrel;
+static const uint8_t* text; static size_t textn;
+
+static int read_obj(const char* path) {
+    FILE* f = fopen(path, "rb");
+    if (!f) return 0;
+    fseek(f, 0, SEEK_END); objn = (size_t)ftell(f); fseek(f, 0, SEEK_SET);
+    obj = malloc(objn); if (fread(obj, 1, objn, f) != objn) { fclose(f); return 0; }
+    fclose(f);
+    uint64_t shoff = rd(obj + 0x28, 8); int shent = (int)rd(obj + 0x3A, 2), shnum = (int)rd(obj + 0x3C, 2), shstr = (int)rd(obj + 0x3E, 2);
+#define SH(i, off, n) rd(obj + shoff + (size_t)(i) * (size_t)shent + (off), n)
+    const char* names = (const char*)obj + SH(shstr, 0x18, 8);
+    int itext = -1, irela = -1, isym = -1;
+    for (int i = 0; i < shnum; i++) {
+        const char* nm = names + SH(i, 0, 4);
+        if (!strcmp(nm, ".text")) itext = i;
+        else if (!strcmp(nm, ".rela.text")) irela = i;
+        else if (!strcmp(nm, ".symtab")) isym = i;
+    }
+    if (itext < 0) return 0;
+    text = obj + SH(itext, 0x18, 8); textn = (size_t)SH(itext, 0x20, 8);
+    if (irela >= 0 && isym >= 0) {
+        const uint8_t* rp = obj + SH(irela, 0x18, 8); size_t rn = (size_t)SH(irela, 0x20, 8) / 24;
+        const uint8_t* sp = obj + SH(isym, 0x18, 8);
+        int istr = (int)SH(isym, 0x28, 4);
+        const char* strt = (const char*)obj + SH(istr, 0x18, 8);
+        nrel = calloc(rn ? rn : 1, sizeof *nrel); nnrel = rn;
+        for (size_t i = 0; i < rn; i++) {
+            nrel[i].off = rd(rp + i * 24, 8);
+            uint64_t info = rd(rp + i * 24 + 8, 8);
+            nrel[i].type = (uint32_t)(info & 0xFFFFFFFF);
+            nrel[i].addend = (int64_t)rd(rp + i * 24 + 16, 8);
+            uint32_t si = (uint32_t)(info >> 32);
+            snprintf(nrel[i].sym, sizeof nrel[i].sym, "%s", strt + rd(sp + (size_t)si * 24, 4));
+        }
+    }
+    return 1;
+}
+
+static void hex(const uint8_t* b, size_t n, char* out) {
+    for (size_t i = 0; i < n; i++) sprintf(out + 2 * i, "%02X", b[i]);
+    if (!n) strcpy(out, "(none)");
+}
+
+int main(int argc, char** argv) {
+    if (argc < 3) { fprintf(stderr, "usage: test_x64 WORKDIR corpus|vectors|branches [FILE...]\n"); return 2; }
+    const char* work = argv[1]; const char* mode = argv[2];
+    if (!strcmp(mode, "corpus") || !strcmp(mode, "vectors")) {
+        for (int i = 3; i < argc; i++) if (!load_asm(argv[i], mode[0] == 'v')) return 2;
+    } else if (!strcmp(mode, "branches")) load_branches();
+    else { fprintf(stderr, "unknown mode %s\n", mode); return 2; }
+
+    // encode
+    x64_set_consts(NULL, NULL);
+    long total = 0, w_enc = 0, w_same = 0, w_diff = 0, w_unsup = 0, w_unparsed = 0;
+    size_t n_enc = 0, n_unsup = 0;
+    for (size_t i = 0; i < nitems; i++) {
+        Item* it = &items[i];
+        total += it->weight;
+        if (it->pre_encoded) { if (it->enc_ok) { n_enc++; w_enc += it->weight; } continue; }
+        XInsn in; char err[96];
+        if (x64_parse(it->text, &in, err, sizeof err) != 0) { it->why = "parse"; w_unparsed += it->weight; n_unsup++; continue; }
+        const char* why = "";
+        int len = x64_encode(&in, &it->enc, &why);
+        it->enc_ok = len > 0; it->why = why;
+        if (len > 0) { n_enc++; w_enc += it->weight; } else { n_unsup++; w_unsup += it->weight; }
+    }
+
+    // nasm
+    char asmp[512], objp[512], errp[512], cmd[1536];
+    snprintf(asmp, sizeof asmp, "%s/t.asm", work); snprintf(objp, sizeof objp, "%s/t.o", work); snprintf(errp, sizeof errp, "%s/t.err", work);
+    FILE* f = fopen(asmp, "w");
+    if (!f) { perror(asmp); return 2; }
+    fprintf(f, "bits 64\n");
+    for (int i = 0; i < nsyms; i++) fprintf(f, "extern sym%d\n", i);
+    fprintf(f, "section .text\n");
+    for (size_t i = 0; i < nitems; i++)
+        if (items[i].enc_ok) fprintf(f, "%s\ndq 0x%llX\n", items[i].text, (unsigned long long)MARK);
+    fclose(f);
+    snprintf(cmd, sizeof cmd, "nasm -f elf64 -w-all '%s' -o '%s' 2>'%s'", asmp, objp, errp);
+    if (system(cmd) != 0 || !read_obj(objp)) {
+        fprintf(stderr, "nasm rejected the batch (%s):\n", asmp);
+        snprintf(cmd, sizeof cmd, "head -20 '%s' >&2", errp); (void)!system(cmd);
+        return 1;
+    }
+
+    // compare
+    size_t cur = 0, bad = 0; long mism_w = 0;
+    for (size_t i = 0; i < nitems; i++) {
+        Item* it = &items[i];
+        if (!it->enc_ok) continue;
+        size_t m = cur;
+        while (m + 8 <= textn && rd(text + m, 8) != MARK) m++;
+        if (m + 8 > textn) { printf("MISSING MARKER after %s\n", it->text); bad++; break; }
+        size_t seglen = m - cur;
+        int same = seglen == (size_t)it->enc.n && !memcmp(text + cur, it->enc.b, seglen);
+        // relocations of this segment
+        NRel* got = NULL; int ngot = 0;
+        for (size_t r = 0; r < nnrel; r++) if (nrel[r].off >= cur && nrel[r].off < m) { got = &nrel[r]; ngot++; }
+        if (ngot > 1) same = 0;
+        else if (ngot == 1 || it->enc.has_rel) {
+            if (ngot != it->enc.has_rel) same = 0;
+            else if (got->off - cur != (uint64_t)it->enc.rel.off || got->type != (uint32_t)it->enc.rel.type ||
+                     got->addend != it->enc.rel.addend || strcmp(got->sym, it->enc.rel.sym)) same = 0;
+        }
+        if (same) w_same += it->weight;
+        else {
+            bad++; mism_w += it->weight; w_diff += it->weight;
+            char a[128], b[128];
+            hex(text + cur, seglen > 24 ? 24 : seglen, a); hex(it->enc.b, (size_t)it->enc.n, b);
+            printf("DIFF  %-48s nasm=%s mine=%s", it->text, a, b);
+            if (ngot) printf("  nasm-rel(off=%llu type=%u %s %+lld)", (unsigned long long)(got->off - cur), got->type, got->sym, (long long)got->addend);
+            if (it->enc.has_rel) printf("  mine-rel(off=%d type=%d %s %+lld)", it->enc.rel.off, it->enc.rel.type, it->enc.rel.sym, (long long)it->enc.rel.addend);
+            printf("\n");
+        }
+        cur = m + 8;
+    }
+
+    printf("distinct instructions: %zu; occurrences: %ld\n", nitems, total);
+    printf("encoder covers: %zu distinct, %ld occurrences (%.2f%%)\n", n_enc, w_enc, total ? 100.0 * (double)w_enc / (double)total : 0.0);
+    printf("not covered:    %zu distinct, %ld occurrences (%.2f%%), of which unparsed %ld\n", n_unsup, w_unsup + w_unparsed,
+           total ? 100.0 * (double)(w_unsup + w_unparsed) / (double)total : 0.0, w_unparsed);
+    printf("equal to nasm:  %ld occurrences (%.2f%% of all)\n", w_same, total ? 100.0 * (double)w_same / (double)total : 0.0);
+    printf("different:      %zu distinct, %ld occurrences\n", bad, mism_w);
+    if (n_unsup) {
+        int shown = 0;
+        for (size_t i = 0; i < nitems && shown < 15; i++)
+            if (!items[i].enc_ok && !items[i].pre_encoded) { printf("  not covered: %-44s x%ld (%s)\n", items[i].text, items[i].weight, items[i].why ? items[i].why : ""); shown++; }
+    }
+    return bad ? 1 : 0;
+}

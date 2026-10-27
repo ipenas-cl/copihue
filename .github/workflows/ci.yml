@@ -17,6 +17,8 @@ jobs:
         run: make test
       - name: x86-64 encoder against nasm (byte for byte)
         run: make native-test-x64enc
+      - name: x86-64 encoder x64.c against nasm -f elf64 (bytes and relocations)
+        run: make native-test
       - name: Network test (simple_api_server + curl + Copihue HTTP clients)
         run: make net-test
       - name: Install instructions work
