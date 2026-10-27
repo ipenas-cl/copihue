@@ -276,7 +276,7 @@ FASE 10: ░░░░░░░░░░░░░░░░░░░░  0% ⏳ Se
 
 ---
 
-**Autor:** Claude Code + Ignacio Peña
+**Autor:** Ignacio Peña
 **Fecha:** 30 de octubre de 2025
 **Tiempo invertido:** ~2 horas
 **Próxima sesión:** Mejorar parser de expresiones + FASE 3
