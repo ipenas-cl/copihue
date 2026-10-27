@@ -365,7 +365,7 @@ FASE 3: ░░░░░░░░░░░░░░░░░░░░   0% ⏳ Co
 
 ---
 
-**Autor:** Claude Code + Ignacio Peña
+**Autor:** Ignacio Peña
 **Fecha:** 30 de octubre de 2025
 **Tiempo:** ~1.5 horas
 **Tests:** 5/5 PASS ✅
