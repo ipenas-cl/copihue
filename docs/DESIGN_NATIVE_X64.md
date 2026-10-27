@@ -1,6 +1,6 @@
 # Back end nativo: codificador `x64.c` (corte 1, segunda implementación)
 
-> Nota: otra sesión escribió en paralelo, en la misma rama, un codificador distinto (`x64enc*.c`) y su documento [DESIGN_NATIVE.md](DESIGN_NATIVE.md) (commit `4043072`). Este archivo documenta el codificador `x64.c`, que llegó a la misma tarea por separado. Ambos leen el mismo corpus (181 987 instrucciones, 78 mnemónicos) y los conteos coinciden. La diferencia de cobertura (87,64 % allá, 100 % acá) viene de que `x64.c` también codifica las instrucciones con un símbolo (relocación) y los saltos a etiqueta en forma `rel32`. Conviene dejar uno solo; ver NOTAS-SESION.txt.
+> Nota: este es el único codificador x86-64 de la rama. [DESIGN_NATIVE.md](DESIGN_NATIVE.md) tiene el levantamiento, el diseño general y el plan por pasos. Un segundo codificador, escrito en paralelo, se retiró: sus casos de borde (`edge.asm`), su instantánea del corpus (`cases.asm`) y su prueba de rechazo pasaron a `tests/x64`.
 
 Meta de largo plazo: que Copihue no dependa de C ni de `nasm`/`ld`. Este documento es el paso 1: que el compilador escriba por sí mismo el ELF x86-64 del modo hosted. Hoy el compilador emite texto NASM, y `nasm -f elf64` más `ld` hacen el resto (`main()` en `copihue.c`).
 
@@ -211,22 +211,27 @@ Archivos:
 - `compiler/native/x64.h`, `x64.c`: analizador de una instrucción en texto NASM a `XInsn`; `x64_encode` (bytes y a lo sumo una relocación); `x64_encode_branch` (`rel8`/`rel32` con desplazamiento conocido).
 - `compiler/native/x64_line.c`: clasifica una línea (etiqueta, directiva, `equ`, instrucción).
 - `tools/native/corpus.sh`, `inventory.sh`, `asminv.c`: levantamiento.
-- `tests/x64/run.sh`, `test_x64.c`, `vectors.asm`: la prueba. `make native-test`.
+- `tests/x64/run.sh`, `test_x64.c`, `vectors.asm`, `edge.asm`, `cases.asm`, `reject.asm`: la prueba. `make native-test`.
 
 La prueba reúne las instrucciones distintas (después de sustituir las constantes `equ` y de renombrar cada símbolo a `symN`), las codifica con `x64.c`, las ensambla todas juntas con `nasm -f elf64`, lee `.text` y `.rela.text` del objeto resultante y compara por instrucción los bytes y la relocación (offset, tipo, símbolo, addendo). Separa las instrucciones con un marcador de 8 bytes para no perder la sincronía si una difiere en tamaño. Falla (código de salida 1) si alguna instrucción que el codificador acepta difiere de nasm, o si nasm rechaza el lote. Una instrucción que el codificador declara no cubierta no falla; se cuenta.
 
-Resultado en esta máquina (macOS arm64, nasm de Homebrew):
+Resultado con nasm 2.16.01 (el del CI). En macOS arm64 solo hay nasm 3.02, con el que difiere únicamente `movsxd` (ver abajo); la columna «iguales» es la que se espera con 2.16.01:
 
 | Conjunto | Distintas | Ocurrencias | Cubiertas | Iguales a nasm |
 |---|---:|---:|---:|---:|
 | Corpus hosted `-O0` + `-O2` | 4 334 | 181 987 | 181 987 (100,00 %) | 181 987 (100,00 %) |
-| Vectores a mano (`vectors.asm`, bordes de REX, `rsp`/`rbp`, inmediatos, SSE) | 412 | 412 | 408 (99,03 %) | 408 |
+| Vectores a mano (`vectors.asm`, bordes de REX, `rsp`/`rbp`, inmediatos, SSE) | 412 | 412 | 411 (99,76 %) | 411 |
+| Casos de borde (`edge.asm`: `r8`–`r15`, `ah`–`bh`, `movd` con memoria, `equ`) | 343 | 344 | 344 (100,00 %) | 344 |
+| Instantánea del corpus (`cases.asm`) | 2 236 | 3 728 | 3 728 (100,00 %) | 3 728 |
+| Entrada inválida (`reject.asm`): `x64.c` la rechaza (y nasm, en 43 de las 48) | 48 | 48 | 48 rechazadas | n/a |
 | Saltos con desplazamiento conocido (21 saltos × formas, `call`) | 454 | 454 | 454 | 454 |
 
 Lectura honesta del 100 %:
 
 - Es el porcentaje de **líneas de instrucción** del corpus hosted para las que el codificador produce los mismos bytes y la misma relocación que nasm. No es el porcentaje de un programa terminado: las 8 230 directivas y 20 136 etiquetas no se emiten aún (ver pasos 3 y 4), y no hay cabecera ELF.
 - Los saltos a etiqueta se codifican en forma `rel32` con una relocación contra el símbolo, que es lo que hace nasm con un símbolo externo. Eso no es lo que hará el compilador con las etiquetas de la misma sección (ahí se resuelve y se relaja). Lo que esta prueba demuestra para esas 15 248 líneas es el opcode, el `ModRM` y el tamaño de la forma larga; la forma corta solo está comprobada con desplazamientos escritos a mano (`branches`).
-- Cuatro vectores del propio archivo quedan sin cubrir a propósito y se informan como tales: `mov` con `ah`/`ch` (3) y un `mov` con un símbolo en la dirección y otro en el inmediato (necesitaría dos relocaciones en una instrucción). Ninguno aparece en el corpus.
+- Un vector de `vectors.asm` queda sin cubrir a propósito y se informa como tal: un `mov` con un símbolo en la dirección y otro en el inmediato (necesitaría dos relocaciones en una instrucción). No aparece en el corpus.
+- `reject.asm` exige que 43 líneas las rechace `x64.c` **y** nasm, para que no sea una instrucción válida que el codificador no sabe; tras el comentario `encoder-only` van cinco líneas que nasm 3.x acepta (nasm 2.x rechaza algunas, p. ej. `mov [rax], 1` sin tamaño) y solo se exige que las rechace `x64.c`.
+- Con nasm 3.x (macOS) la prueba da una diferencia en cada archivo que contiene `movsxd rax, eax`: nasm 3.x emite `48 98` y 2.x, el del CI, `48 63 C0`, que es lo que sigue `x64.c`. Es la única diferencia.
 - El corpus son los programas de `tests/` y `examples/`. Un programa nuevo con una instrucción distinta puede caer fuera: el generador, no el codificador, decide qué se emite. Por eso `inventory.sh` y `tests/x64` se regeneran a partir de cualquier cambio del generador.
 - No se ejecutó ningún ELF: esta máquina es macOS arm64 y no corre binarios de Linux. Que los bytes coincidan con nasm no prueba que el programa final corra; eso lo comprobará CI (paso 6) cuando exista el escritor del ELF.

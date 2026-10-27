@@ -23,9 +23,6 @@ native-test:
 native-inventory: copihue
 	tools/native/inventory.sh
 
-native-test-x64enc:
-	tests/native/run.sh
-
 bench: copihue
 	bench/run.sh
 
@@ -39,4 +36,4 @@ uninstall:
 clean:
 	rm -f copihue a.out output.asm output.o
 
-.PHONY: test net-test native-test native-inventory native-test-x64enc bench install uninstall clean
+.PHONY: test net-test native-test native-inventory bench install uninstall clean
