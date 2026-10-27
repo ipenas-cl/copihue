@@ -351,7 +351,6 @@ let tokens = malloc(capacity * token_size);
 - Wrote bootstrap compiler
 - Set the vision
 
-**AI**: Claude (Anthropic)
 - Implemented structs
 - Implemented malloc/free
 - Created tests and documentation
