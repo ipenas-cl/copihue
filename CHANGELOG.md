@@ -2,6 +2,14 @@
 
 Todos los cambios importantes del proyecto.
 
+## [Unreleased]
+
+### Added
+- First piece of writing the ELF without `nasm` and `ld` (step 1 of not depending on them). The compiler does not use it: `copihue` still writes `output.asm` and calls `nasm` and `ld`, the language version stays 0.42.3, and no generated code changes. New files only: `compiler/native/x64enc.{h,c}` (line parser and operand classes), `compiler/native/x64enc_encode.c` (the x86-64 encoder), `tools/native/corpus.sh` and `tools/native/nxinv.c` (inventory), `tests/native/` (`run.sh`, `nx_test.c`, `cases.asm`, `edge.asm`), `make native-test-x64enc`, and `docs/DESIGN_NATIVE.md` (inventory and design).
+- Inventory of the hosted assembly: the 233 programs run by `tests/run_tests.sh`, compiled with `-S` at `-O0` and `-O2` (466 files, 0 compile failures). 181 987 instructions, 207 distinct operand forms, 78 mnemonics, 0 unparsed lines. Full table in `docs/DESIGN_NATIVE.md`.
+- The encoder handles registers, immediates, `[base+index*scale+disp]` memory, `equ` constants, `lock`/`rep`, and the SSE2 forms in the inventory. Coverage of the inventory by occurrence: 87.64% (159 499 of 181 987); runtime 85.88%, user code 88.13%; by distinct form 73.91% (153 of 207). The rest is 15 248 jumps and calls to a label and 7 240 operands with a data or code symbol (needs labels, relaxation and addresses; not started). 0 of 466 files could be assembled whole yet.
+- `tests/native/run.sh` compares the encoder with `nasm -f bin` (NASM 3.02): all 3 728 distinct accepted instruction lines of the corpus (`cases.asm`) and 340 hand-written edge cases (`edge.asm`: every register, `rsp`/`r12`/`rbp`/`r13` bases, immediate limits, forward `equ`) are identical byte for byte, and the lines outside the subset are refused instead of encoded wrongly. `--corpus` regenerates the cases from the current compiler. Run on macOS arm64 only; no ELF produced by it has been executed.
+
 ## [0.42.3] - 2026-10-26
 
 ### Changed
