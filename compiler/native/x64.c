@@ -278,7 +278,8 @@ typedef struct {
     int reg;            // modrm.reg (register or /digit); -1: no modrm
     const XOp* rm;      // register or memory operand
     int force_rex;
-    int nimm;           // immediate bytes (0, 1, 2, 4, 8)
+    int hi8;            // an operand is ah/ch/dh/bh: cannot be combined with a REX prefix
+    int nimm;          // immediate bytes (0, 1, 2, 4, 8)
     int64_t imm;
     int imm_rel;        // relocation type for the immediate, 0 = none
     const XOp* imm_op;  // the operand that carries the symbol
@@ -311,7 +312,7 @@ static int emit(XEnc* e, const XInsn* in, const Spec* s0) {
         }
     }
     int need = rex || s->force_rex;
-    if (need && s->rm && s->rm->kind == X_REG && s->rm->hi8) return 0;
+    if (need && (s->hi8 || (s->rm && s->rm->kind == X_REG && s->rm->hi8))) return 0;
     if (in->lock) e->b[e->n++] = 0xF0;
     if (in->rep) e->b[e->n++] = (uint8_t)in->rep;
     if (s->mand) e->b[e->n++] = (uint8_t)s->mand;
@@ -535,7 +536,7 @@ int x64_encode(const XInsn* in, XEnc* e, const char** why) {
     // -- mov
     if (!strcmp(m, "mov") && in->nops == 2) {
         if (is_xmm(a) || is_xmm(b)) FAIL("mov with xmm");
-        if (hi8any(a, b)) FAIL("ah..bh");
+        s.hi8 = hi8any(a, b);
         int sz = pair_size(a, b);
         if (is_reg(a) && is_imm(b)) sz = a->size;
         if (sz != 1 && sz != 2 && sz != 4 && sz != 8) FAIL("operand size");
@@ -845,11 +846,14 @@ int x64_encode(const XInsn* in, XEnc* e, const char** why) {
         }
         if ((!strcmp(m, "movd") || !strcmp(m, "movq")) && in->nops == 2) {
             int q = m[3] == 'q';
-            if (is_xmm(a) && is_reg(b) && b->size == (q ? 8 : 4)) {
+            // movd accepts memory (size keyword optional); movq with memory is another opcode (F3 0F 7E)
+            int bmem = !q && is_mem(b) && (b->size == 0 || b->size == 4);
+            int amem = !q && is_mem(a) && (a->size == 0 || a->size == 4);
+            if (is_xmm(a) && ((is_reg(b) && b->size == (q ? 8 : 4)) || bmem)) {
                 s.mand = 0x66; s.w = q; s.opc[0] = 0x0F; s.opc[1] = 0x6E; s.nopc = 2; s.reg = a->reg; s.rm = b;
                 return emit(e, in, &s);
             }
-            if (is_reg(a) && is_xmm(b) && a->size == (q ? 8 : 4)) {
+            if (is_xmm(b) && ((is_reg(a) && a->size == (q ? 8 : 4)) || amem)) {
                 s.mand = 0x66; s.w = q; s.opc[0] = 0x0F; s.opc[1] = 0x7E; s.nopc = 2; s.reg = b->reg; s.rm = a;
                 return emit(e, in, &s);
             }

@@ -223,9 +223,49 @@ static void hex(const uint8_t* b, size_t n, char* out) {
     if (!n) strcpy(out, "(none)");
 }
 
+// Invalid input: every instruction of FILE must be refused by the parser or the
+// encoder, and nasm must refuse it too (so the line really is invalid and the
+// encoder is not just missing a feature). After a comment containing
+// "encoder-only" the nasm check is skipped (lines whose validity depends on the
+// nasm version). Prints "rejected N" on success.
+static int run_reject(const char* work, const char* path) {
+    FILE* f = fopen(path, "r");
+    if (!f) { perror(path); return 2; }
+    char line[512], cmd[1536], asmp[512];
+    snprintf(asmp, sizeof asmp, "%s/reject_one.asm", work);
+    int n = 0, bad = 0, encoder_only = 0;
+    x64_set_consts(NULL, NULL);
+    while (fgets(line, sizeof line, f)) {
+        if (strstr(line, "; encoder-only")) encoder_only = 1;   // from here on nasm is not consulted
+        XLine xl; x64_classify(line, &xl);
+        if (xl.kind != XL_INSN) continue;
+        n++; int lbad = 0;
+        XInsn in; XEnc enc; char err[96]; const char* why = "";
+        if (x64_parse(xl.text, &in, err, sizeof err) == 0 && x64_encode(&in, &enc, &why) > 0) {
+            printf("FAIL  encoder accepts invalid input: %s\n", xl.text);
+            lbad = 1;
+        }
+        if (encoder_only) { bad += lbad; continue; }
+        FILE* o = fopen(asmp, "w");
+        if (!o) { perror(asmp); fclose(f); return 2; }
+        fprintf(o, "bits 64\n%s\n", xl.text);
+        fclose(o);
+        snprintf(cmd, sizeof cmd, "nasm -f elf64 -w-all '%s' -o '%s/reject_one.o' >/dev/null 2>&1", asmp, work);
+        if (system(cmd) == 0) {
+            printf("FAIL  nasm accepts, so the line is not invalid: %s\n", xl.text);
+            lbad = 1;
+        }
+        bad += lbad;
+    }
+    fclose(f);
+    printf("rejected %d of %d invalid instructions\n", n - bad, n);
+    return bad ? 1 : 0;
+}
+
 int main(int argc, char** argv) {
-    if (argc < 3) { fprintf(stderr, "usage: test_x64 WORKDIR corpus|vectors|branches [FILE...]\n"); return 2; }
+    if (argc < 3) { fprintf(stderr, "usage: test_x64 WORKDIR corpus|vectors|branches|reject [FILE...]\n"); return 2; }
     const char* work = argv[1]; const char* mode = argv[2];
+    if (!strcmp(mode, "reject")) return argc > 3 ? run_reject(work, argv[3]) : 2;
     if (!strcmp(mode, "corpus") || !strcmp(mode, "vectors")) {
         for (int i = 3; i < argc; i++) if (!load_asm(argv[i])) return 2;
     } else if (!strcmp(mode, "branches")) load_branches();
