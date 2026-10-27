@@ -772,16 +772,16 @@ int x64_encode(const XInsn* in, XEnc* e, const char** why) {
         return emit(e, in, &s);
     }
     if (!strcmp(m, "movsxd") && in->nops == 2 && is_reg(a) && a->size == 8 && (is_reg(b) || is_mem(b)) && b->size == 4) {
-        // NASM writes movsxd rax, eax as cdqe
-        if (is_reg(b) && a->reg == 0 && b->reg == 0) { s.w = 1; s.opc[0] = 0x98; s.nopc = 1; return emit(e, in, &s); }
+        // NASM 2.x emits 48 63 C0 here; NASM 3.x shortens it to cdqe (48 98). We follow 2.x (Ubuntu, CI).
         s.w = 1; s.opc[0] = 0x63; s.nopc = 1; s.reg = a->reg; s.rm = b;
         return emit(e, in, &s);
     }
 
     // -- xchg, xadd, cmpxchg
     if (!strcmp(m, "xchg") && in->nops == 2) {
-        // NASM puts the first operand in modrm.reg when it is a register
-        const XOp* r = is_reg(a) ? a : (is_reg(b) ? b : NULL);
+        // With two registers NASM 2.x puts the SECOND one in modrm.reg (NASM 3.x the first; we follow 2.x, as in CI).
+        // With a memory operand the register goes in modrm.reg.
+        const XOp* r = is_reg(b) ? b : (is_reg(a) ? a : NULL);
         const XOp* o = r == a ? b : a;
         if (!r || !(is_reg(o) || is_mem(o)) || hi8any(a, b)) FAIL("xchg operand shape");
         int sz = pair_size(a, b);

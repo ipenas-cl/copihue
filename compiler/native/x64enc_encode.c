@@ -481,10 +481,7 @@ int nx_encode(const NxInsn* ins, uint8_t* out, NxResolve resolve, void* ctx, con
         note_regs(&e, a, b);
         r = emit_modrm(&o, &e); goto done;
     }
-    if (!strcmp(m, "movsxd") && n == 2 && is_r(a, 64) && is_r(b, 32) && a->reg == 0 && b->reg == 0) {
-        put(&o, 0x48); put(&o, 0x98);           /* nasm lo reduce a cdqe */
-        r = o.n; goto done;
-    }
+    /* NASM 2.x codifica movsxd rax, eax como 48 63 C0; NASM 3.x lo acorta a cdqe (48 98). Seguimos 2.x (Ubuntu, CI). */
     if (!strcmp(m, "movsxd") && n == 2 && is_r(a, 64) && ((b->kind == NX_REG && is_r(b, 32)) || (is_m(b) && mem_ok(b, 32)))) {
         Enc e; enc_init(&e);
         e.w = 1; e.regf = a->reg; e.rm = b; e.opc[0] = 0x63; e.nopc = 1;

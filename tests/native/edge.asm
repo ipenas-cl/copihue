@@ -344,3 +344,7 @@ mov eax, F_V16
 cmp rax, F_V4000
 push F_V16
 push F_V200
+xchg rbx, rcx
+xchg al, bl
+xchg r8d, r9d
+xchg cx, dx

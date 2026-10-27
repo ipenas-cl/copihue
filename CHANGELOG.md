@@ -11,6 +11,9 @@ Todos los cambios importantes del proyecto.
 - The encoder handles registers, immediates, `[base+index*scale+disp]` memory, `equ` constants, `lock`/`rep`, and the SSE2 forms in the inventory. Coverage of the inventory by occurrence: 87.64% (159 499 of 181 987); runtime 85.88%, user code 88.13%; by distinct form 73.91% (153 of 207). The rest is 15 248 jumps and calls to a label and 7 240 operands with a data or code symbol (needs labels, relaxation and addresses; not started). 0 of 466 files could be assembled whole yet.
 - `tests/native/run.sh` compares the encoder with `nasm -f bin` (NASM 3.02): all 3 728 distinct accepted instruction lines of the corpus (`cases.asm`) and 340 hand-written edge cases (`edge.asm`: every register, `rsp`/`r12`/`rbp`/`r13` bases, immediate limits, forward `equ`) are identical byte for byte, and the lines outside the subset are refused instead of encoded wrongly. `--corpus` regenerates the cases from the current compiler. Run on macOS arm64 only; no ELF produced by it has been executed.
 
+### Fixed
+- Both encoders now follow NASM 2.x (the one Ubuntu and CI install, checked with 2.16.03 on Linux) where NASM 3.x encodes differently: `movsxd rax, eax` is `48 63 C0` (NASM 3 shortens it to `cdqe`, `48 98`), and `xchg` of two registers puts the second register in ModRM.reg (`xchg rbx, rcx` is `48 87 CB`). Four `xchg` register cases were added to `edge.asm`. `tests/x64/vectors.asm` is now in the repository (it was hidden by the `*.asm` rule in `.gitignore`). On Linux with NASM 2.16.03: `tests/native/run.sh` 11 ok, 0 failures (3 728 + 344 lines identical); `tests/x64/run.sh` OK (408 vectors, 454 branches and 181 987 corpus occurrences identical); `tests/run_tests.sh` 484 passed, 0 failed.
+
 ## [0.42.3] - 2026-10-26
 
 ### Changed
