@@ -217,7 +217,7 @@ FASE 10: ░░░░░░░░░░░░░░░░░░░░  0% ⏳
 
 ---
 
-**Autor:** Claude Code + Ignacio Peña
+**Autor:** Ignacio Peña
 **Fecha:** 30 de octubre de 2025
 **Horas:** ~8 horas
 **Commits:** Pendiente
