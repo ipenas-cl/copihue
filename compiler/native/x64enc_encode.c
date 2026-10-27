@@ -376,7 +376,8 @@ int nx_encode(const NxInsn* ins, uint8_t* out, NxResolve resolve, void* ctx, con
         int o8 = x ? 0x86 : (!strcmp(m, "xadd") ? 0xC0 : 0xB0);
         int o16 = x ? 0x87 : o8 + 1;
         const NxOperand* rmop = a; const NxOperand* rg = b;
-        if (x && is_m(b) && a->kind == NX_REG) { rmop = b; rg = a; }
+        /* xchg: el registro de la izquierda va en ModRM.reg (nasm 2.16.01 del CI y 3.02; 2.16.03 usa el otro, igual de valido) */
+        if (x && a->kind == NX_REG && (is_m(b) || b->kind == NX_REG)) { rmop = b; rg = a; }
         if ((is_m(rmop) || rmop->kind == NX_REG) && rg->kind == NX_REG && rg->rclass == NX_GPR && mem_ok(rmop, size) &&
             (rmop->kind == NX_MEM || rmop->size == rg->size)) {
             Enc e; enc_init(&e);

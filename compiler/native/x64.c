@@ -779,9 +779,9 @@ int x64_encode(const XInsn* in, XEnc* e, const char** why) {
 
     // -- xchg, xadd, cmpxchg
     if (!strcmp(m, "xchg") && in->nops == 2) {
-        // With two registers NASM 2.x puts the SECOND one in modrm.reg (NASM 3.x the first; we follow 2.x, as in CI).
-        // With a memory operand the register goes in modrm.reg.
-        const XOp* r = is_reg(b) ? b : (is_reg(a) ? a : NULL);
+        // NASM puts the first operand in modrm.reg when it is a register (2.16.01 in CI and 3.02;
+        // 2.16.03 puts the second one there for two registers, an equally valid encoding).
+        const XOp* r = is_reg(a) ? a : (is_reg(b) ? b : NULL);
         const XOp* o = r == a ? b : a;
         if (!r || !(is_reg(o) || is_mem(o)) || hi8any(a, b)) FAIL("xchg operand shape");
         int sz = pair_size(a, b);
