@@ -243,4 +243,4 @@ fn is_whitespace(ch: i8) -> i32
 
 **Updated**: October 29, 2024
 **Version**: v0.17
-**Author**: Ignacio Peña + Claude (AI pair programming)
+**Author**: Ignacio Peña
