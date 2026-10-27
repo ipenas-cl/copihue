@@ -2,7 +2,7 @@
 
 **Release Date:** October 29, 2025
 **Previous Version:** v0.17
-**Audit Conducted By:** Claude Code AI
+**Audit Conducted By:** internal audit
 **Status:** ✅ ALL CRITICAL ISSUES RESOLVED
 
 ---
@@ -442,7 +442,7 @@ If you've modified compiler internals:
 
 ### Security Audit
 
-- **Conducted By:** Claude Code AI
+- **Conducted By:** internal audit
 - **Date:** October 29, 2025
 - **Duration:** Comprehensive (8 hours)
 - **Findings:** 8 issues identified, 8 issues fixed
@@ -518,7 +518,7 @@ Date: October 29, 2025
 ---
 
 **For Questions or Issues:**
-- GitHub: https://github.com/anthropics/chronos/issues
+- GitHub: https://github.com/ipenas-cl/copihue/issues
 - Security: security@chronos-lang.org
 - Docs: https://docs.chronos-lang.org
 
