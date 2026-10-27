@@ -367,7 +367,7 @@ A: Arena allocator planned for v1.0, ownership for v1.1.
 A: Not recommended until v1.0+ with better memory management.
 
 **Q: How do I report memory issues?**
-A: File an issue at https://github.com/anthropics/chronos/issues
+A: File an issue at https://github.com/ipenas-cl/copihue/issues
 
 ---
 
