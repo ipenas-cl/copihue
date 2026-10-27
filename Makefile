@@ -17,6 +17,12 @@ test:
 net-test:
 	tests/net_test.sh
 
+native-test:
+	tests/x64/run.sh
+
+native-inventory: copihue
+	tools/native/inventory.sh
+
 bench: copihue
 	bench/run.sh
 
@@ -30,4 +36,4 @@ uninstall:
 clean:
 	rm -f copihue a.out output.asm output.o
 
-.PHONY: test net-test bench install uninstall clean
+.PHONY: test net-test native-test native-inventory bench install uninstall clean

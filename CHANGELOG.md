@@ -2,6 +2,16 @@
 
 Todos los cambios importantes del proyecto.
 
+## [Unreleased]
+
+### Added
+- First piece of writing the ELF without `nasm` and `ld` (step 1 of not depending on them): the x86-64 encoder `compiler/native/x64.{h,c}` with `x64_line.c` (line classifier), `tools/native/corpus.sh`, `asminv.c` and `inventory.sh` (inventory), and `tests/x64/` (`run.sh`, `test_x64.c`, `vectors.asm`, `edge.asm`, `cases.asm`, `reject.asm`), run by `make native-test`; `make native-inventory` prints the inventory. Not used by `copihue`: still no option, same output, version 0.42.3. It encodes operands with a symbol and returns the relocation (`R_X86_64_64`, `32`, `32S`, `PC32`) and `[rel sym]`. `tests/x64` assembles every distinct instruction of the corpus with `nasm -f elf64` and compares `.text` bytes and relocations (offset, type, symbol, addend). Result: 4 334 distinct instructions, 181 987 occurrences, all encoded and all identical (100.00%); 412 hand-written vectors, 411 encoded and identical, 1 refused (a symbol in both the address and the immediate); 344 edge cases (`edge.asm`: every register, `ah`..`bh`, `rsp`/`r12`/`rbp`/`r13` bases, immediate limits, forward `equ`); the 3 728 lines of a saved corpus snapshot (`cases.asm`); 454 rel8/rel32 branch forms; and 48 invalid lines (`reject.asm`) that the encoder must refuse (for 43 of them nasm must refuse them too). With NASM 3.02 (macOS arm64) the only difference is `movsxd rax, eax` (`48 98` there, `48 63 C0` in NASM 2.x and in `x64.c`); the CI uses NASM 2.16.01. The 100% counts instruction lines only: directives, labels, relaxation of jumps to labels (a jump to a label is checked in its `rel32` form with a relocation, as nasm does for an external symbol), sections and the ELF header are not written. See `docs/DESIGN_NATIVE_X64.md`. The compiler does not use it: `copihue` still writes `output.asm` and calls `nasm` and `ld`, and no generated code changes.
+- Inventory of the hosted assembly: the 233 programs run by `tests/run_tests.sh`, compiled with `-S` at `-O0` and `-O2` (466 files, 0 compile failures). 181 987 instructions, 207 distinct operand forms, 78 mnemonics, 0 unparsed lines. Full table in `docs/DESIGN_NATIVE.md`.
+- The encoder handles registers, immediates, `[base+index*scale+disp]` memory, `equ` constants, `lock`/`rep` and the SSE2 forms in the inventory. 0 of 466 files could be assembled whole yet (labels, relaxation, data and the ELF header are not written). No ELF produced by it has been executed.
+
+### Fixed
+- Both encoders now follow NASM 2.x (Ubuntu 24.04 and CI install 2.16.01) where NASM 3.x encodes differently: `movsxd rax, eax` is `48 63 C0` (NASM 3 shortens it to `cdqe`, `48 98`). `xchg` of two registers puts the first register in ModRM.reg (`xchg rbx, rcx` is `48 87 D9`), as NASM 2.16.01 (CI) and 3.02 do; NASM 2.16.03 puts the second one there (`48 87 CB`), an equally valid encoding, so the byte comparison of that form depends on the NASM version. Four `xchg` register cases were added to `edge.asm`. `tests/x64/vectors.asm` is now in the repository (it was hidden by the `*.asm` rule in `.gitignore`). On Linux the compiler regression suite still gives 484 passed, 0 failed; the encoder tests are checked by CI with NASM 2.16.01.
+
 ## [0.42.3] - 2026-10-26
 
 ### Changed
