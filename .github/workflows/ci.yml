@@ -15,6 +15,8 @@ jobs:
         run: make CFLAGS="-O2 -Wall -Werror"
       - name: Regression suite (all tests and examples at -O0 and -O2, error messages, freestanding)
         run: make test
+      - name: x86-64 encoder x64.c against nasm -f elf64 (bytes and relocations)
+        run: make native-test
       - name: Network test (simple_api_server + curl + Copihue HTTP clients)
         run: make net-test
       - name: Install instructions work
