@@ -129,6 +129,7 @@ Copihue is slower on recursive code (`fib`), on the matching engine, and on a gr
 - `docs/REFERENCE.md`: language reference; `docs/DESIGN_*.md`: one note per feature
 - `docs/STATUS.md`, `docs/KERNELS.md`: detailed limits, test inventory and kernel modes
 - `compiler/native/x64.c`: x86-64 instruction encoder, first piece of writing the ELF without `nasm` and `ld`. Not used by `copihue` yet; `make native-test` compares it with `nasm`. Inventory and design: [docs/DESIGN_NATIVE.md](docs/DESIGN_NATIVE.md)
+- `compiler/native/asm.c`: assembler for the hosted NASM text (labels, jump relaxation, `call`); `make native-test` checks its `.text` and relocations against `nasm -f elf64` on all 466 corpus programs. Not used by `copihue`: [docs/DESIGN_NATIVE.md](docs/DESIGN_NATIVE.md)
 - `compiler/native/x64.c`: a second x86-64 encoder that also returns relocations; `make native-test` compares it with `nasm -f elf64` (bytes and relocations). Not used by `copihue` either: [docs/DESIGN_NATIVE_X64.md](docs/DESIGN_NATIVE_X64.md)
 - `compiler/asm/`: an early experimental compiler in x86-64 assembly (still uses `chronos` names)
 - `archive/`, `docs/history/`, `docs/archive/`: Chronos-era material, kept unchanged
