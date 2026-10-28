@@ -2,6 +2,7 @@
 chronos_program
 *.o
 *.asm
+!tests/x64/*.asm
 output.asm
 output.o
 api_server

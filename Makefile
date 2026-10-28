@@ -2,6 +2,8 @@
 #   make                 build ./copihue
 #   make test            regression suite (tests/run_tests.sh)
 #   make net-test        HTTP server/client integration test (needs curl)
+#   make native-test     x86-64 encoder and assembler (compiler/native) against nasm
+#   make native-asm-test only the assembler part (labels, jumps, call) of native-test
 #   make bench           timed comparison in bench/ (not part of make test)
 #   make install         install to $(PREFIX)/bin (default ~/.local)
 PREFIX ?= $(HOME)/.local
@@ -20,6 +22,9 @@ net-test:
 native-test:
 	tests/x64/run.sh
 
+native-asm-test:
+	tests/x64/run_asm.sh
+
 native-inventory: copihue
 	tools/native/inventory.sh
 
@@ -36,4 +41,4 @@ uninstall:
 clean:
 	rm -f copihue a.out output.asm output.o
 
-.PHONY: test net-test native-test native-inventory bench install uninstall clean
+.PHONY: test net-test native-test native-asm-test native-inventory bench install uninstall clean
