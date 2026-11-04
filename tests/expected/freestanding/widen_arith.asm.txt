@@ -1,0 +1,136 @@
+section .data
+section .text
+to_i64:
+    push rbp
+    mov rbp, rsp
+    sub rsp, __frame_to_i64
+    mov [rbp-8], rdi
+    mov rax, 0
+    push rax
+    mov rax, [rbp-8]
+    mov rax, [rax]
+    movzx rax, al
+    mov rbx, rax
+    pop rax
+    sub rax, rbx
+    mov [rbp-16], rax
+    mov rax, [rbp-16]
+    leave
+    ret
+    xor rax, rax
+    leave
+    ret
+__frame_to_i64 equ 80
+to_u8:
+    push rbp
+    mov rbp, rsp
+    sub rsp, __frame_to_u8
+    mov [rbp-8], rdi
+    mov rax, 0
+    push rax
+    mov rax, [rbp-8]
+    mov rax, [rax]
+    mov rbx, rax
+    pop rax
+    sub rax, rbx
+    movzx rax, al
+    mov [rbp-16], rax
+    mov rax, [rbp-16]
+    leave
+    ret
+    xor rax, rax
+    leave
+    ret
+__frame_to_u8 equ 80
+to_u32:
+    push rbp
+    mov rbp, rsp
+    sub rsp, __frame_to_u32
+    mov rax, rdi
+    movzx rax, al
+    mov [rbp-8], rax
+    mov rax, rsi
+    movzx rax, al
+    mov [rbp-16], rax
+    mov rax, [rbp-8]
+    push rax
+    mov rax, [rbp-16]
+    mov rbx, rax
+    pop rax
+    sub rax, rbx
+    mov eax, eax
+    mov [rbp-24], rax
+    mov rax, [rbp-24]
+    leave
+    ret
+    xor rax, rax
+    leave
+    ret
+__frame_to_u32 equ 96
+to_u8_sum:
+    push rbp
+    mov rbp, rsp
+    sub rsp, __frame_to_u8_sum
+    mov rax, rdi
+    movzx rax, al
+    mov [rbp-8], rax
+    mov rax, rsi
+    movzx rax, al
+    mov [rbp-16], rax
+    mov rax, [rbp-8]
+    push rax
+    mov rax, [rbp-16]
+    mov rbx, rax
+    pop rax
+    add rax, rbx
+    movzx rax, al
+    mov [rbp-24], rax
+    mov rax, [rbp-24]
+    leave
+    ret
+    xor rax, rax
+    leave
+    ret
+__frame_to_u8_sum equ 96
+assign:
+    push rbp
+    mov rbp, rsp
+    sub rsp, __frame_assign
+    mov [rbp-8], rdi
+    mov [rbp-16], rsi
+    mov rax, [rbp-16]
+    mov rax, [rax]
+    movzx rax, ax
+    push rax
+    mov rax, [rbp-8]
+    mov rax, [rax]
+    movzx rax, al
+    mov rbx, rax
+    pop rax
+    sub rax, rbx
+    mov [rbp-24], rax
+    mov rax, [rbp-24]
+    leave
+    ret
+    xor rax, rax
+    leave
+    ret
+__frame_assign equ 96
+neg:
+    push rbp
+    mov rbp, rsp
+    sub rsp, __frame_neg
+    mov rax, rdi
+    movzx rax, al
+    mov [rbp-8], rax
+    mov rax, [rbp-8]
+    neg rax
+    movsxd rax, eax
+    mov [rbp-16], rax
+    mov rax, [rbp-16]
+    leave
+    ret
+    xor rax, rax
+    leave
+    ret
+__frame_neg equ 80

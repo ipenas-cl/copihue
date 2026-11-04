@@ -308,6 +308,8 @@ typedef struct AstNode {
     char** targs;         // Explicit type arguments on a call, mangled
     int ntargs;
     char* inst_disp;      // "max<i32>" on one monomorphized copy. NULL on the template
+    int widen_bits;       // 0.42.5: arithmetic node computed at this wider width (see widen_arith)
+    int widen_sg;
 } AstNode;
 
 #define AF_PACKED     1
@@ -5612,7 +5614,8 @@ static void generic_op_check(AstNode* n, VTy L, VTy R) {
 }
 
 static VTy ty_binop(Codegen* cg, AstNode* n) {
-    VTy L = (n->child_count > 0) ? expr_ty(cg, n->children[0]) : ty_unk();
+    if (n->widen_bits) return ty_named_int(n->widen_bits, n->widen_sg);
+    VTy L =(n->child_count > 0) ? expr_ty(cg, n->children[0]) : ty_unk();
     VTy R = (n->child_count > 1) ? expr_ty(cg, n->children[1]) : ty_unk();
     int plus = n->op && n->op[0] == '+' && !n->op[1];
     int minus = n->op && n->op[0] == '-' && !n->op[1];
@@ -5719,6 +5722,7 @@ static VTy expr_ty(Codegen* cg, AstNode* n) {
     if (n->type == AST_INDEX && n->child_count > 0) return ty_indexed(cg, n->children[0]);
     if (n->type == AST_FIELD_ACCESS) return ty_field(cg, n);
     if (n->type == AST_UNARY && n->child_count > 0) {
+        if (n->widen_bits) return ty_named_int(n->widen_bits, n->widen_sg);
         if (n->op && (n->op[0] == '-' || n->op[0] == '~') && !n->op[1]) {
             VTy c = expr_ty(cg, n->children[0]);
             generic_op_check(n, c, ty_unk());
@@ -6213,6 +6217,56 @@ static void trunc_rax_node(Codegen* cg, AstNode* n) {
         t = expr_ty(cg, n);
     else return;
     if (t.kind == VK_INT && !t.lit && t.bits < 64) emit_width_trunc(cg, t.bits, t.sg);
+}
+
+// 0.42.5. `let d: i64 = 0 - *(p as *u8)`: the destination is wider than the
+// operand, so the arithmetic is computed at the destination's width instead
+// of being cut to the operand's type. Every +, -, *, /, %, &, |, ^, shift and
+// unary - or ~ in the expression whose type is narrower than the destination
+// is marked (widen_bits/widen_sg), and ty_binop answers the destination type
+// for it, so the existing truncation sites mask to that width: nothing for
+// 64 bits, the destination width for a narrower one (`let w: u32 = a + b`
+// with u8 operands is a u32 sum). A non-volatile `*p` is a 64-bit load whose
+// type is the pointee, so a narrow `*p` operand is first cut to its own
+// type (`as u8`): its value is the pointee's, not the 8 bytes read.
+// Comparisons, calls, casts, indexes and fields are operands and are not entered.
+static int is_arith_node(AstNode* e) {
+    if (!e || e->child_count < 1) return 0;
+    if (e->type == AST_BINOP) return e->op != NULL && e->child_count == 2;
+    return e->type == AST_UNARY && e->op && (e->op[0] == '-' || e->op[0] == '~') && !e->op[1];
+}
+
+static void widen_arith(Codegen* cg, AstNode* e, int dbits, int dsg) {
+    if (!is_arith_node(e) || dbits <= 8) return;
+    VTy t = expr_ty(cg, e);
+    if (t.kind == VK_INT && !t.lit && t.bits < dbits) {
+        e->widen_bits = dbits;
+        e->widen_sg = dsg;
+    }
+    int shift = e->type == AST_BINOP && (!strcmp(e->op, "<<") || !strcmp(e->op, ">>"));
+    for (int i = 0; i < e->child_count && !(shift && i > 0); i++) {
+        AstNode* c = e->children[i];
+        if (is_arith_node(c)) { widen_arith(cg, c, dbits, dsg); continue; }
+        if (!c || c->type != AST_DEREF) continue;
+        VTy ct = expr_ty(cg, c);
+        if (ct.kind != VK_INT || ct.lit || ct.bits >= 64 || ct.bits >= dbits) continue;
+        AstNode* cast = ast_new(AST_CAST);
+        cast->line = c->line;
+        cast->col = c->col;
+        cast->value = strdup(ct.bits <= 8 ? (ct.sg ? "i8" : "u8") : ct.bits <= 16 ? (ct.sg ? "i16" : "u16")
+                                                                                    : (ct.sg ? "i32" : "u32"));
+        cast->children = malloc(sizeof(AstNode*));
+        cast->children[0] = c;
+        cast->child_count = 1;
+        e->children[i] = cast;
+    }
+}
+
+// Mark the right-hand side of `let x: T = e` / `x = e` when T is a wider integer.
+static void widen_to_dest(Codegen* cg, AstNode* rhs, const char* type_name) {
+    int bits = 0, sg = 0;
+    if (!rhs || !type_name || legacy_bits() || !int_name(type_name, &bits, &sg) || bits < 16) return;
+    widen_arith(cg, rhs, bits, sg);
 }
 
 static int is_numeral(AstNode* n, long long* v) {
@@ -13418,6 +13472,14 @@ void gen_expr(Codegen* cg, AstNode* n) {
                 return;
             }
         }
+        if (n->name && n->child_count > 0 && !n->qual) {
+            Symbol* ws = symtab_lookup_symbol(cg->symtab, n->name);
+            GlobalVar* wg = !ws ? global_symtab_lookup(cg->global_symtab, n->name) : NULL;
+            if (ws && !ws->is_pointer && !ws->is_array)
+                widen_to_dest(cg, n->children[0], ws->type_name ? ws->type_name : "i64");
+            else if (wg && !wg->is_pointer && !wg->is_array)
+                widen_to_dest(cg, n->children[0], wg->type_name);
+        }
         if (!assign_dest_narrow(cg, n) &&
             (assign_direct(cg, n) || assign_index(cg, n))) {
             Symbol* sym = n->name ? symtab_lookup_symbol(cg->symtab, n->name) : NULL;
@@ -17753,6 +17815,10 @@ void gen_stmt(Codegen* cg, AstNode* n) {
             return;
         }
 
+        // A scalar integer local (typed, or untyped and so i64) takes the
+        // arithmetic of its initializer at its own width.
+        if (n->child_count > 0 && !n->is_pointer && n->children[0]->type != AST_ARRAY_LITERAL)
+            widen_to_dest(cg, n->children[0], n->value ? n->value : "i64");
         int before = cg->symtab->stack_size;
         int off = symtab_add(cg->symtab, n->name, size);
         if (n->child_count > 0 && n->children[0]->type == AST_ARRAY_LITERAL)
