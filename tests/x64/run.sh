@@ -8,7 +8,8 @@
 #   3. rel8 / rel32 branch forms
 #   4. every instruction the compiler emits for tests/ and examples/ (-O0 and -O2)
 #   5. M2 + M3, tests/x64/run_asm.sh: whole programs through compiler/native/asm.c (labels, jumps, call, data sections)
-#   6. M4, tests/x64/run_elf.sh: structure of the ELF executables compiler/native/elf.c writes (not run here)
+#   6. M4 + M5, tests/x64/run_elf.sh: structure of the ELF executables compiler/native/elf.c writes, with
+#      section headers and symbols (not run here; readelf and .text against ld are run_readelf.sh and run_text.sh)
 set -u
 cd "$(dirname "$0")/../.."
 command -v nasm >/dev/null || { echo "x64: nasm not found" >&2; exit 1; }
@@ -26,7 +27,7 @@ echo "== branches"; "$W/test_x64" "$W" branches || rc=1
 echo "== corpus";   "$W/test_x64" "$W" corpus "$W"/corpus/O0/*.asm "$W"/corpus/O2/*.asm || rc=1
 echo "== M2 + M3: labels, jumps, call, data sections (asm.c, whole programs)"
 ASM_CORPUS="$W/corpus" tests/x64/run_asm.sh || rc=1
-echo "== M4: ELF executable writer (structure, entry, patched relocations)"
+echo "== M4 + M5: ELF executable writer (structure, entry, patched relocations, section headers, symbols)"
 ASM_CORPUS="$W/corpus" tests/x64/run_elf.sh || rc=1
 [ $rc = 0 ] && echo "x64: OK" || echo "x64: FAIL"
 exit $rc

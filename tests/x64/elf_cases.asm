@@ -133,3 +133,27 @@ _start:
     times 4030 db 0x90
 section .data
 d: times 3 db 9
+;---
+; símbolos: una función y un dato también `global`, subetiquetas con punto, relleno de align entre funciones, .bss con etiquetas
+section .data
+global gd
+gd: dq 1
+ld: db 2
+section .bss
+b1: resb 5
+global b2
+b2: resq 2
+section .text
+global _start
+global g
+_start:
+    mov rax, gd
+    mov rbx, b2
+    call g
+.l:  jmp .l
+f1:
+    ret
+align 16
+g:
+    mov rax, ld
+.x: ret
