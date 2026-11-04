@@ -500,7 +500,8 @@ static const MachReg* mach_reg(const char* n) {
         {"ds", 16, 1, 0}, {"es", 16, 1, 0}, {"ss", 16, 1, 0},
         {"fs", 16, 1, 0}, {"gs", 16, 1, 0},
         {"al", 8, 0, 0}, {"ah", 8, 0, 1}, {"dl", 8, 0, 0},
-        {"ax", 16, 0, 0}, {"sp", 16, 0, 0}, {"si", 16, 0, 0}, {"di", 16, 0, 0},
+        {"ax", 16, 0, 0}, {"cx", 16, 0, 0}, {"dx", 16, 0, 0},
+        {"sp", 16, 0, 0}, {"si", 16, 0, 0}, {"di", 16, 0, 0},
         // bx is the scratch of a binary operator. bp is the frame pointer of
         // a normal function. Both are naked lvalues in bits 16 and bits 32
         // only: a 64-bit naked function still evaluates through rbx.

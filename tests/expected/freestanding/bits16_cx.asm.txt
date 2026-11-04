@@ -1,0 +1,31 @@
+section .data
+section .text
+bits 16
+sectors:
+    movzx eax, ax
+    push ebx
+    push eax
+    push edx
+    mov eax, 256
+    mov ebx, eax
+    pop edx
+    pop eax
+    imul eax, ebx
+    pop ebx
+    mov cx, ax
+    mov dx, 128
+    movzx eax, cx
+    push ebx
+    push eax
+    push edx
+    movzx eax, dx
+    mov ebx, eax
+    pop edx
+    pop eax
+    add eax, ebx
+    pop ebx
+    mov cx, 4660
+    movzx eax, ax
+    mov dx, ax
+    ret
+bits 64
