@@ -2,10 +2,12 @@
 #   make                 build ./copihue
 #   make test            regression suite (tests/run_tests.sh)
 #   make net-test        HTTP server/client integration test (needs curl)
-#   make native-test     x86-64 encoder, assembler and ELF writer (compiler/native, M1-M4) against nasm
+#   make native-test     x86-64 encoder, assembler and ELF writer (compiler/native, M1-M5) against nasm
 #   make native-asm-test only the assembler part (labels, jumps, call, data sections) of native-test
 #   make native-elf-test only the ELF writer part (structure of the executables --native writes)
 #   make native-run-test the regression suite with --native (needs Linux to run the executables)
+#   make native-text-test .text of --native against nasm + ld (objcopy; needs Linux binutils, skips without them)
+#   make native-readelf-test the ELF files read by readelf and objdump (skips without binutils)
 #   make bench           timed comparison in bench/ (not part of make test)
 #   make install         install to $(PREFIX)/bin (default ~/.local)
 PREFIX ?= $(HOME)/.local
@@ -30,6 +32,12 @@ native-elf-test:
 native-run-test:
 	tests/run_tests.sh --native
 
+native-text-test:
+	tests/x64/run_text.sh
+
+native-readelf-test:
+	tests/x64/run_readelf.sh
+
 native-asm-test:
 	tests/x64/run_asm.sh
 
@@ -49,4 +57,4 @@ uninstall:
 clean:
 	rm -f copihue a.out output.asm output.o
 
-.PHONY: test net-test native-test native-asm-test native-elf-test native-run-test native-inventory bench install uninstall clean
+.PHONY: test net-test native-test native-asm-test native-elf-test native-run-test native-text-test native-readelf-test native-inventory bench install uninstall clean
