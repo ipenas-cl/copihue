@@ -1,0 +1,12 @@
+// also-o2
+// bits 16: cx and dx are named registers like ax, si and di. `cx = n * 256`
+// computes in the accumulator and moves the low 16 bits; a constant is
+// written straight to the register. Assembled, not booted.
+
+bits 16 naked fn sectors(n: i64) {
+    cx = n * 256;
+    dx = 0x80;
+    ax = cx + dx;
+    cx = 0x1234;
+    dx = ax;
+}

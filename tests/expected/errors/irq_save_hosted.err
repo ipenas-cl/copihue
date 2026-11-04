@@ -1,0 +1,7 @@
+tests/errors/irq_save_hosted.lap:2:17: error: irq_save() is only available with --freestanding, --flat, or --boot
+      2 |     let saved = irq_save();
+        |                 ^
+tests/errors/irq_save_hosted.lap:3:5: error: irq_restore() is only available with --freestanding, --flat, or --boot
+      3 |     irq_restore(saved);
+        |     ^
+2 errors, compilation failed

@@ -1,0 +1,4 @@
+tests/errors/rdrand_narrow_ok.lap:5:19: error: argument 1 of 'rdrand': expected *i64, found *u8
+      5 |     return rdrand(&ok);
+        |                   ^
+1 error, compilation failed

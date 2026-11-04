@@ -16,7 +16,7 @@
 
 // ==== NAMING (single place to change when the language is renamed) ====
 #define LANG_NAME     "Copihue"
-#define LANG_VERSION  "0.42.4"
+#define LANG_VERSION  "0.42.5"
 #define COMPILER_BIN  "copihue"
 #define SRC_EXT       ".lap"   /* Lapageria rosea, the copihue */
 #define OLD_SRC_EXT   ".cph"   /* v0.18.x extension, still accepted with a warning */
@@ -308,6 +308,8 @@ typedef struct AstNode {
     char** targs;         // Explicit type arguments on a call, mangled
     int ntargs;
     char* inst_disp;      // "max<i32>" on one monomorphized copy. NULL on the template
+    int widen_bits;       // 0.42.5: arithmetic node computed at this wider width (see widen_arith)
+    int widen_sg;
 } AstNode;
 
 #define AF_PACKED     1
@@ -500,7 +502,8 @@ static const MachReg* mach_reg(const char* n) {
         {"ds", 16, 1, 0}, {"es", 16, 1, 0}, {"ss", 16, 1, 0},
         {"fs", 16, 1, 0}, {"gs", 16, 1, 0},
         {"al", 8, 0, 0}, {"ah", 8, 0, 1}, {"dl", 8, 0, 0},
-        {"ax", 16, 0, 0}, {"sp", 16, 0, 0}, {"si", 16, 0, 0}, {"di", 16, 0, 0},
+        {"ax", 16, 0, 0}, {"cx", 16, 0, 0}, {"dx", 16, 0, 0},
+        {"sp", 16, 0, 0}, {"si", 16, 0, 0}, {"di", 16, 0, 0},
         // bx is the scratch of a binary operator. bp is the frame pointer of
         // a normal function. Both are naked lvalues in bits 16 and bits 32
         // only: a 64-bit naked function still evaluates through rbx.
@@ -5518,6 +5521,11 @@ static VTy ty_field(Codegen* cg, AstNode* n) {
 static int builtin_ret_ty(const char* f, VTy* out) {
     if (!f) return 0;
     if (!strcmp(f, "malloc")) { *out = ty_addr(); return 1; }
+    if (!strcmp(f, "read_rflags") || !strcmp(f, "irq_save") || !strcmp(f, "rdtsc") ||
+        !strcmp(f, "rdrand") || !strcmp(f, "rdseed")) {
+        *out = ty_from_spelled(NULL, "u64");
+        return 1;
+    }
     if (!strcmp(f, "bss_start") || !strcmp(f, "bss_end")) {
         *out = ty_from_spelled(NULL, "*u8");
         return 1;
@@ -5526,6 +5534,7 @@ static int builtin_ret_ty(const char* f, VTy* out) {
         !strcmp(f, "open") || !strcmp(f, "read") || !strcmp(f, "write") || !strcmp(f, "close") ||
         !strcmp(f, "inb") || !strcmp(f, "inw") || !strcmp(f, "inl") ||
         !strcmp(f, "outb") || !strcmp(f, "outw") || !strcmp(f, "outl") ||
+        !strcmp(f, "div_raw") || !strcmp(f, "rem_raw") ||
         !strcmp(f, "rdmsr") || !strcmp(f, "wrmsr") || !strcmp(f, "ltr") ||
         !strcmp(f, "read_cr0") || !strcmp(f, "read_cr2") || !strcmp(f, "read_cr3") || !strcmp(f, "read_cr4") ||
         !strcmp(f, "write_cr0") || !strcmp(f, "write_cr3") || !strcmp(f, "write_cr4") ||
@@ -5610,7 +5619,8 @@ static void generic_op_check(AstNode* n, VTy L, VTy R) {
 }
 
 static VTy ty_binop(Codegen* cg, AstNode* n) {
-    VTy L = (n->child_count > 0) ? expr_ty(cg, n->children[0]) : ty_unk();
+    if (n->widen_bits) return ty_named_int(n->widen_bits, n->widen_sg);
+    VTy L =(n->child_count > 0) ? expr_ty(cg, n->children[0]) : ty_unk();
     VTy R = (n->child_count > 1) ? expr_ty(cg, n->children[1]) : ty_unk();
     int plus = n->op && n->op[0] == '+' && !n->op[1];
     int minus = n->op && n->op[0] == '-' && !n->op[1];
@@ -5717,6 +5727,7 @@ static VTy expr_ty(Codegen* cg, AstNode* n) {
     if (n->type == AST_INDEX && n->child_count > 0) return ty_indexed(cg, n->children[0]);
     if (n->type == AST_FIELD_ACCESS) return ty_field(cg, n);
     if (n->type == AST_UNARY && n->child_count > 0) {
+        if (n->widen_bits) return ty_named_int(n->widen_bits, n->widen_sg);
         if (n->op && (n->op[0] == '-' || n->op[0] == '~') && !n->op[1]) {
             VTy c = expr_ty(cg, n->children[0]);
             generic_op_check(n, c, ty_unk());
@@ -6125,12 +6136,14 @@ static void check_builtin_args(Codegen* cg, AstNode* n) {
     if (!strcmp(f, "print_int") || !strcmp(f, "exit") || !strcmp(f, "malloc") ||
         !strcmp(f, "close") || !strcmp(f, "inb") || !strcmp(f, "inw") || !strcmp(f, "inl") ||
         !strcmp(f, "rdmsr") || !strcmp(f, "ltr") || !strcmp(f, "set_syscall_stack") ||
+        !strcmp(f, "irq_restore") ||
         !strcmp(f, "write_cr0") || !strcmp(f, "write_cr3") || !strcmp(f, "write_cr4")) {
         if ((!strcmp(f, "print_int") || !strcmp(f, "exit") || !strcmp(f, "malloc") || !strcmp(f, "close")) ? c >= 1 : c == 1)
             check_arg(cg, n->children[0], 0, f, ty_i64());
         return;
     }
-    if (!strcmp(f, "outb") || !strcmp(f, "outw") || !strcmp(f, "outl") || !strcmp(f, "wrmsr")) {
+    if (!strcmp(f, "outb") || !strcmp(f, "outw") || !strcmp(f, "outl") || !strcmp(f, "wrmsr") ||
+        !strcmp(f, "div_raw") || !strcmp(f, "rem_raw")) {
         if (c == 2) {
             check_arg(cg, n->children[0], 0, f, ty_i64());
             check_arg(cg, n->children[1], 1, f, ty_i64());
@@ -6144,6 +6157,11 @@ static void check_builtin_args(Codegen* cg, AstNode* n) {
     }
     if (!strcmp(f, "save_context") || !strcmp(f, "restore_context")) {
         if (c == 1) check_arg(cg, n->children[0], 0, f, ty_mem());
+        return;
+    }
+    // The success flag is stored as an 8-byte integer.
+    if (!strcmp(f, "rdrand") || !strcmp(f, "rdseed")) {
+        if (c == 1) check_arg(cg, n->children[0], 0, f, ty_from_spelled(cg, "*i64"));
         return;
     }
     if (is_atomic_rmw(f) || is_atomic_store(f)) {
@@ -6210,6 +6228,69 @@ static void trunc_rax_node(Codegen* cg, AstNode* n) {
         t = expr_ty(cg, n);
     else return;
     if (t.kind == VK_INT && !t.lit && t.bits < 64) emit_width_trunc(cg, t.bits, t.sg);
+}
+
+// 0.42.5. `let d: i64 = 0 - *(p as *u8)`: the destination is wider than the
+// operand, so the arithmetic is computed at the destination's width instead
+// of being cut to the operand's type. Every +, -, *, /, %, &, |, ^, shift and
+// unary - or ~ in the expression whose type is narrower than the destination
+// is marked (widen_bits/widen_sg), and ty_binop answers the destination type
+// for it, so the existing truncation sites mask to that width: nothing for
+// 64 bits, the destination width for a narrower one (`let w: u32 = a + b`
+// with u8 operands is a u32 sum). A non-volatile `*p` is a 64-bit load whose
+// type is the pointee, so a narrow `*p` operand is first cut to its own
+// type (`as u8`): its value is the pointee's, not the 8 bytes read.
+// Comparisons, calls, casts, indexes and fields are operands and are not entered.
+static int is_arith_node(AstNode* e) {
+    if (!e || e->child_count < 1) return 0;
+    if (e->type == AST_BINOP) return e->op != NULL && e->child_count == 2;
+    return e->type == AST_UNARY && e->op && (e->op[0] == '-' || e->op[0] == '~') && !e->op[1];
+}
+
+static void widen_arith(Codegen* cg, AstNode* e, int dbits, int dsg) {
+    if (!is_arith_node(e) || dbits <= 8) return;
+    VTy t = expr_ty(cg, e);
+    if (t.kind == VK_INT && !t.lit && t.bits < dbits) {
+        e->widen_bits = dbits;
+        e->widen_sg = dsg;
+    }
+    int shift = e->type == AST_BINOP && (!strcmp(e->op, "<<") || !strcmp(e->op, ">>"));
+    for (int i = 0; i < e->child_count && !(shift && i > 0); i++) {
+        AstNode* c = e->children[i];
+        if (is_arith_node(c)) { widen_arith(cg, c, dbits, dsg); continue; }
+        if (!c || c->type != AST_DEREF) continue;
+        VTy ct = expr_ty(cg, c);
+        if (ct.kind != VK_INT || ct.lit || ct.bits >= 64 || ct.bits >= dbits) continue;
+        AstNode* cast = ast_new(AST_CAST);
+        cast->line = c->line;
+        cast->col = c->col;
+        cast->value = strdup(ct.bits <= 8 ? (ct.sg ? "i8" : "u8") : ct.bits <= 16 ? (ct.sg ? "i16" : "u16")
+                                                                                    : (ct.sg ? "i32" : "u32"));
+        cast->children = malloc(sizeof(AstNode*));
+        cast->children[0] = c;
+        cast->child_count = 1;
+        e->children[i] = cast;
+    }
+}
+
+// Mark the right-hand side of `let x: T = e` / `x = e` when T is a wider integer.
+static void widen_to_dest(Codegen* cg, AstNode* rhs, const char* type_name) {
+    int bits = 0, sg = 0;
+    if (!rhs || !type_name || legacy_bits() || !int_name(type_name, &bits, &sg) || bits < 16) return;
+    widen_arith(cg, rhs, bits, sg);
+}
+
+// `x = e` for a scalar integer local or global. The statement form at -O2
+// places the right-hand side straight into the register of x (assign_direct)
+// without going through gen_expr, so the statement path calls this too.
+static void widen_assign(Codegen* cg, AstNode* n) {
+    if (!n || n->type != AST_ASSIGN || !n->name || n->child_count < 1 || n->qual) return;
+    Symbol* ws = symtab_lookup_symbol(cg->symtab, n->name);
+    GlobalVar* wg = !ws ? global_symtab_lookup(cg->global_symtab, n->name) : NULL;
+    if (ws && !ws->is_pointer && !ws->is_array)
+        widen_to_dest(cg, n->children[0], ws->type_name ? ws->type_name : "i64");
+    else if (wg && !wg->is_pointer && !wg->is_array)
+        widen_to_dest(cg, n->children[0], wg->type_name);
 }
 
 static int is_numeral(AstNode* n, long long* v) {
@@ -8427,6 +8508,33 @@ static int gen_core_builtin(Codegen* cg, AstNode* n) {
             return 1;
         }
     }
+    // div_raw(a, b) / rem_raw(a, b): the same idiv (div for a u32 operand in
+    // bits 16 / bits 32) that `/` and `%` use, without the test for b == 0.
+    // b == 0 raises #DE, so the program can provoke it on purpose.
+    if (!strcmp(f, "div_raw") || !strcmp(f, "rem_raw")) {
+        if (n->child_count != 2) { diag_error(n->line, n->col, "%s(a, b) takes 2 arguments", f); return 1; }
+        int rem = f[0] == 'r';
+        if (legacy_bits()) {
+            VTy ta = expr_ty(cg, n->children[0]), tb = expr_ty(cg, n->children[1]);
+            VTy t = ty_int_result(ta, tb, 0);
+            int u32 = t.kind == VK_INT && !t.sg && t.bits >= 32 && t.bits < 64;
+            // Same frame as a binary operator: ebx is saved, edx survives.
+            gen_expr(cg, n->children[0]);
+            emit(cg, "    push ebx\n    push eax\n    push edx\n");
+            gen_expr(cg, n->children[1]);
+            emit(cg, "    mov ebx, eax\n    pop edx\n    pop eax\n");
+            emit(cg, "    push edx\n");
+            if (u32) emit(cg, "    xor edx, edx\n    div ebx\n");
+            else emit(cg, "    cdq\n    idiv ebx\n");
+            if (rem) emit(cg, "    mov eax, edx\n");
+            emit(cg, "    pop edx\n    pop ebx\n");
+        } else {
+            gen_two_args(cg, n);                 // rdx = a, rax = b
+            emit(cg, "    mov rbx, rax\n    mov rax, rdx\n    cqo\n    idiv rbx\n");
+            if (rem) emit(cg, "    mov rax, rdx\n");
+        }
+        return 1;
+    }
     if (!strcmp(f, "outb") || !strcmp(f, "outw") || !strcmp(f, "outl")) {
         if (n->child_count != 2) { diag_error(n->line, n->col, "%s(port, value) takes 2 arguments", f); return 1; }
         gen_two_args(cg, n);
@@ -8765,6 +8873,63 @@ static int gen_core_builtin(Codegen* cg, AstNode* n) {
         // CF as 0 or 1. No instruction between the flag and setc.
         if (legacy_bits()) emit(cg, "    setc al\n    movzx eax, al\n");
         else emit(cg, "    setc al\n    movzx rax, al\n");
+        return 1;
+    }
+    // RFLAGS in 64-bit code. read_rflags() is pushfq / pop rax. irq_save()
+    // reads it the same way and then clears IF; irq_restore(flags) pushes the
+    // saved value and popfq, so a section entered with IF=0 leaves with IF=0
+    // and sections nest. cli and popfq are ring 0: freestanding only.
+    if (!strcmp(f, "read_rflags") || !strcmp(f, "irq_save") || !strcmp(f, "irq_restore")) {
+        int one = !strcmp(f, "irq_restore");
+        int ring0 = strcmp(f, "read_rflags") != 0;
+        if (one && n->child_count != 1) {
+            diag_error(n->line, n->col, "irq_restore(flags) takes 1 argument");
+            return 1;
+        }
+        if (!one && n->child_count != 0) {
+            diag_error(n->line, n->col, "%s() takes no arguments", f);
+            return 1;
+        }
+        if (legacy_bits()) {
+            diag_error(n->line, n->col, "%s() is a 64-bit operation (RFLAGS); use pushfd()/popfd() in bits %d",
+                       f, g_fn_bits);
+            return 1;
+        }
+        if (ring0 && !g_freestanding) {
+            diag_error(n->line, n->col, "%s() is only available with --freestanding, --flat, or --boot", f);
+            return 1;
+        }
+        if (one) {
+            gen_expr(cg, n->children[0]);
+            emit(cg, "    push rax\n    popfq\n");
+        } else {
+            emit(cg, "    pushfq\n    pop rax\n");
+            if (f[0] == 'i') emit(cg, "    cli\n");
+        }
+        return 1;
+    }
+    // rdtsc() is the whole 64-bit counter: rdtsc writes edx:eax (zero-extended
+    // into rdx:rax), so shl/or joins them. In bits 16 / bits 32 it is the bare
+    // instruction and the high half stays in edx, as rdmsr does there.
+    if (!strcmp(f, "rdtsc")) {
+        if (n->child_count != 0) { diag_error(n->line, n->col, "rdtsc() takes no arguments"); return 1; }
+        emit(cg, "    rdtsc\n");
+        if (!legacy_bits()) emit(cg, "    shl rdx, 32\n    or rax, rdx\n");
+        return 1;
+    }
+    // rdrand(&ok) / rdseed(&ok): the random value is the result. *ok is
+    // stored as 1 when the instruction succeeded (CF=1) and 0 when it did not;
+    // then the value is 0 too (the instruction zeroes it). ok points at an
+    // 8-byte integer, e.g. `let ok: i64 = 0; let v = rdrand(&ok);`.
+    // The caller retries on 0. Not an exception: CPUID says whether it exists.
+    if (!strcmp(f, "rdrand") || !strcmp(f, "rdseed")) {
+        if (n->child_count != 1) { diag_error(n->line, n->col, "%s(&ok) takes 1 argument", f); return 1; }
+        if (legacy_bits()) {
+            diag_error(n->line, n->col, "%s() is a 64-bit operation; not available in bits %d", f, g_fn_bits);
+            return 1;
+        }
+        gen_expr(cg, n->children[0]);
+        emit(cg, "    mov rbx, rax\n    %s rax\n    setc dl\n    movzx rdx, dl\n    mov [rbx], rdx\n", f);
         return 1;
     }
     if (!strcmp(f, "cpuid") || !strcmp(f, "cpuid_edx")) {
@@ -11889,6 +12054,7 @@ static int assign_direct(Codegen* cg, AstNode* n) {
     Symbol* sym = symtab_lookup_symbol(cg->symtab, n->name);
     const char* rr = local_reg(sym);
     if (!rr) return 0;
+    widen_assign(cg, n);
     if (n->children[0]->type == AST_CALL && n->children[0]->name &&
         (!strcmp(n->children[0]->name, "atomic_load_acquire") ||
          !strcmp(n->children[0]->name, "atomic_load_seq_cst")) &&
@@ -13388,6 +13554,7 @@ void gen_expr(Codegen* cg, AstNode* n) {
                 return;
             }
         }
+        widen_assign(cg, n);
         if (!assign_dest_narrow(cg, n) &&
             (assign_direct(cg, n) || assign_index(cg, n))) {
             Symbol* sym = n->name ? symtab_lookup_symbol(cg->symtab, n->name) : NULL;
@@ -17723,6 +17890,10 @@ void gen_stmt(Codegen* cg, AstNode* n) {
             return;
         }
 
+        // A scalar integer local (typed, or untyped and so i64) takes the
+        // arithmetic of its initializer at its own width.
+        if (n->child_count > 0 && !n->is_pointer && n->children[0]->type != AST_ARRAY_LITERAL)
+            widen_to_dest(cg, n->children[0], n->value ? n->value : "i64");
         int before = cg->symtab->stack_size;
         int off = symtab_add(cg->symtab, n->name, size);
         if (n->child_count > 0 && n->children[0]->type == AST_ARRAY_LITERAL)

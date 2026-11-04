@@ -1,0 +1,36 @@
+// also-o2
+// The destination is wider than the operand: the arithmetic is not cut to the
+// operand's type. `0 - *(p as *u8)` into an i64 is a 64-bit subtraction of the
+// zero-extended byte, with no `movzx rax, al` after the `sub`. Into a `u8` it
+// still wraps at 8 bits, into a `u32` at 32. Assembled, not run.
+
+fn to_i64(p: *u8) -> i64 {
+    let d: i64 = 0 - *(p as *u8);
+    return d;
+}
+
+fn to_u8(p: *u8) -> i64 {
+    let d: u8 = 0 - *(p as *u8);
+    return d;
+}
+
+fn to_u32(a: u8, b: u8) -> i64 {
+    let w: u32 = a - b;
+    return w;
+}
+
+fn to_u8_sum(a: u8, b: u8) -> i64 {
+    let n: u8 = a + b;
+    return n;
+}
+
+fn assign(p: *u8, q: *u16) -> i64 {
+    let e: i64;
+    e = *(q as *u16) - *(p as *u8);
+    return e;
+}
+
+fn neg(a: u8) -> i64 {
+    let c: i32 = -a;
+    return c;
+}

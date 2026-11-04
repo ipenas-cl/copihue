@@ -1,0 +1,205 @@
+section .data
+section .text
+flags:
+    push rbp
+    mov rbp, rsp
+    sub rsp, __frame_flags
+    pushfq
+    pop rax
+    leave
+    ret
+    xor rax, rax
+    leave
+    ret
+__frame_flags equ 64
+critical:
+    push rbp
+    mov rbp, rsp
+    sub rsp, __frame_critical
+    mov [rbp-8], rdi
+    pushfq
+    pop rax
+    cli
+    mov [rbp-16], rax
+    mov rax, 0
+    mov rbx, [rbp-8]
+    imul rax, 8
+    add rbx, rax
+    mov rax, [rbx]
+    push rax
+    mov rax, 1
+    mov rbx, rax
+    pop rax
+    add rax, rbx
+    push rax
+    mov rax, 0
+    imul rax, 8
+    mov rbx, [rbp-8]
+    add rbx, rax
+    pop rax
+    mov qword [rbx], rax
+    mov rax, [rbp-16]
+    push rax
+    popfq
+    mov rax, 0
+    mov rbx, [rbp-8]
+    imul rax, 8
+    add rbx, rax
+    mov rax, [rbx]
+    leave
+    ret
+    xor rax, rax
+    leave
+    ret
+__frame_critical equ 80
+nested:
+    push rbp
+    mov rbp, rsp
+    sub rsp, __frame_nested
+    mov [rbp-8], rdi
+    pushfq
+    pop rax
+    cli
+    mov [rbp-16], rax
+    pushfq
+    pop rax
+    cli
+    mov [rbp-24], rax
+    mov rax, 0
+    mov rbx, [rbp-8]
+    imul rax, 8
+    add rbx, rax
+    mov rax, [rbx]
+    push rax
+    mov rax, 1
+    mov rbx, rax
+    pop rax
+    add rax, rbx
+    push rax
+    mov rax, 0
+    imul rax, 8
+    mov rbx, [rbp-8]
+    add rbx, rax
+    pop rax
+    mov qword [rbx], rax
+    mov rax, [rbp-24]
+    push rax
+    popfq
+    mov rax, 0
+    mov rbx, [rbp-8]
+    imul rax, 8
+    add rbx, rax
+    mov rax, [rbx]
+    push rax
+    mov rax, 1
+    mov rbx, rax
+    pop rax
+    add rax, rbx
+    push rax
+    mov rax, 0
+    imul rax, 8
+    mov rbx, [rbp-8]
+    add rbx, rax
+    pop rax
+    mov qword [rbx], rax
+    mov rax, [rbp-16]
+    push rax
+    popfq
+    mov rax, 0
+    mov rbx, [rbp-8]
+    imul rax, 8
+    add rbx, rax
+    mov rax, [rbx]
+    leave
+    ret
+    xor rax, rax
+    leave
+    ret
+__frame_nested equ 96
+ticks:
+    push rbp
+    mov rbp, rsp
+    sub rsp, __frame_ticks
+    rdtsc
+    shl rdx, 32
+    or rax, rdx
+    leave
+    ret
+    xor rax, rax
+    leave
+    ret
+__frame_ticks equ 64
+elapsed:
+    push rbp
+    mov rbp, rsp
+    sub rsp, __frame_elapsed
+    mov [rbp-8], rdi
+    rdtsc
+    shl rdx, 32
+    or rax, rdx
+    push rax
+    mov rax, [rbp-8]
+    mov rbx, rax
+    pop rax
+    sub rax, rbx
+    leave
+    ret
+    xor rax, rax
+    leave
+    ret
+__frame_elapsed equ 80
+isn:
+    push rbp
+    mov rbp, rsp
+    sub rsp, __frame_isn
+    mov rax, 0
+    mov [rbp-8], rax
+    lea rax, [rbp-8]
+    mov rbx, rax
+    rdrand rax
+    setc dl
+    movzx rdx, dl
+    mov [rbx], rdx
+    mov [rbp-16], rax
+    mov rax, [rbp-8]
+    push rax
+    mov rax, 0
+    mov rbx, rax
+    pop rax
+    cmp rax, rbx
+    jne .L0
+    mov rax, 0
+    leave
+    ret
+    jmp .L1
+.L0:
+.L1:
+    mov rax, [rbp-16]
+    push rax
+    mov rax, 4294967295
+    mov rbx, rax
+    pop rax
+    and rax, rbx
+    leave
+    ret
+    xor rax, rax
+    leave
+    ret
+__frame_isn equ 80
+seed:
+    push rbp
+    mov rbp, rsp
+    sub rsp, __frame_seed
+    mov [rbp-8], rdi
+    mov rax, [rbp-8]
+    mov rbx, rax
+    rdseed rax
+    setc dl
+    movzx rdx, dl
+    mov [rbx], rdx
+    leave
+    ret
+    xor rax, rax
+    leave
+    ret
+__frame_seed equ 80

@@ -1,0 +1,19 @@
+// also-o2
+// read_rflags, irq_save / irq_restore, rdtsc and rdrand in a --flat image.
+// _start is first; the others are called from it.
+
+fn critical(counter: *i64) -> i64 {
+    let saved = irq_save();
+    counter[0] = counter[0] + 1;
+    irq_restore(saved);
+    return counter[0];
+}
+
+fn _start() -> i64 {
+    let n: i64 = 0;
+    let ok: i64 = 0;
+    let t0 = rdtsc();
+    let r = rdrand(&ok);
+    let f = read_rflags();
+    return critical(&n) + (rdtsc() - t0) + r + f + ok;
+}

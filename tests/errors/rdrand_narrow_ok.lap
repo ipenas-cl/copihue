@@ -1,0 +1,6 @@
+// rdrand stores the success flag as an 8-byte integer: a pointer to a
+// narrower integer would be overrun.
+fn pick() -> i64 {
+    let ok: u8 = 0;
+    return rdrand(&ok);
+}

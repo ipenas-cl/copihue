@@ -1,0 +1,4 @@
+tests/errors/rflags_bits32.lap:3:11: error: read_rflags() is a 64-bit operation (RFLAGS); use pushfd()/popfd() in bits 32
+      3 |     eax = read_rflags();
+        |           ^
+1 error, compilation failed

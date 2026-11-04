@@ -1,0 +1,82 @@
+// Arithmetic whose destination is wider is not cut to the narrow operand.
+// `let d: i64 = 0 - *(p as *u8)` is -1 when the byte is 1: the operands are
+// already zero-extended, and the result takes the width of the destination.
+// Arithmetic with no wider destination still wraps at the operand type.
+// -O0 and -O2 print the same lines.
+
+let g: i64;
+
+fn main() -> i32 {
+    let buf: [u8; 4];
+    buf[0] = 1;
+    buf[1] = 200;
+    buf[2] = 100;
+    let p: *u8 = buf;
+
+    let d: i64 = 0 - *(p as *u8);
+    print_int(d);
+    println("");
+
+    let e: i64;
+    e = 5 - *(p as *u8) - *(p as *u8);
+    print_int(e);
+    println("");
+
+    let a: u8 = 200;
+    let b: u8 = 100;
+    let sum: i64 = a + b;
+    print_int(sum);
+    println("");
+
+    let w: u32 = a + b;
+    print_int(w);
+    println("");
+
+    let n: u8 = a + b;
+    print_int(n);
+    println("");
+
+    let m: i64 = (a + b) * 2;
+    print_int(m);
+    println("");
+
+    let q: i64 = a - b - 200;
+    print_int(q);
+    println("");
+
+    let r: u16 = b - a;
+    print_int(r);
+    println("");
+
+    let s: i64;
+    s = b - a;
+    print_int(s);
+    println("");
+
+    print_int(a + b);
+    println("");
+
+    let c: i32 = -a;
+    print_int(c);
+    println("");
+
+    // The same widening for an assignment to a register local (-O2), a
+    // compound one, a global and an assignment inside a loop.
+    s += b - a;
+    print_int(s);
+    println("");
+
+    g = b - a;
+    print_int(g);
+    println("");
+
+    let w2: i64 = 0;
+    let i: i64 = 0;
+    while (i < 2) {
+        w2 = b - a;
+        i = i + 1;
+    }
+    print_int(w2);
+    println("");
+    return 0;
+}

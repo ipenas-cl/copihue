@@ -1,0 +1,50 @@
+// also-o2
+// RFLAGS, the time-stamp counter and the hardware random generators, in
+// 64-bit code. read_rflags() is pushfq / pop rax. irq_save() is the same
+// read followed by cli; irq_restore(flags) is push / popfq, so a section
+// entered with IF=0 leaves with IF=0 and sections nest. rdtsc() joins
+// edx:eax into rax. rdrand(&ok) / rdseed(&ok) return the value and store the
+// carry flag (1 = success) through the pointer. Assembled, not run: qemu64
+// has no rdrand, and the privileged ones fault in user mode.
+
+fn flags() -> u64 {
+    return read_rflags();
+}
+
+fn critical(counter: *i64) -> i64 {
+    let saved = irq_save();
+    counter[0] = counter[0] + 1;
+    irq_restore(saved);
+    return counter[0];
+}
+
+fn nested(counter: *i64) -> i64 {
+    let outer: u64 = irq_save();
+    let inner: u64 = irq_save();
+    counter[0] = counter[0] + 1;
+    irq_restore(inner);
+    counter[0] = counter[0] + 1;
+    irq_restore(outer);
+    return counter[0];
+}
+
+fn ticks() -> u64 {
+    return rdtsc();
+}
+
+fn elapsed(start: u64) -> u64 {
+    return rdtsc() - start;
+}
+
+fn isn() -> i64 {
+    let ok: i64 = 0;
+    let v = rdrand(&ok);
+    if (ok == 0) {
+        return 0;
+    }
+    return v & 0xFFFFFFFF;
+}
+
+fn seed(okp: *i64) -> u64 {
+    return rdseed(okp);
+}
