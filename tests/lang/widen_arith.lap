@@ -4,6 +4,8 @@
 // Arithmetic with no wider destination still wraps at the operand type.
 // -O0 and -O2 print the same lines.
 
+let g: i64;
+
 fn main() -> i32 {
     let buf: [u8; 4];
     buf[0] = 1;
@@ -56,6 +58,25 @@ fn main() -> i32 {
 
     let c: i32 = -a;
     print_int(c);
+    println("");
+
+    // The same widening for an assignment to a register local (-O2), a
+    // compound one, a global and an assignment inside a loop.
+    s += b - a;
+    print_int(s);
+    println("");
+
+    g = b - a;
+    print_int(g);
+    println("");
+
+    let w2: i64 = 0;
+    let i: i64 = 0;
+    while (i < 2) {
+        w2 = b - a;
+        i = i + 1;
+    }
+    print_int(w2);
     println("");
     return 0;
 }
