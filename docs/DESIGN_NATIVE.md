@@ -2,13 +2,13 @@
 
 Meta de largo plazo: que Copihue no dependa de C ni de `nasm`/`ld`. Este documento cubre el **paso 1**: que el compilador escriba por sí mismo el ejecutable ELF x86-64 del modo hosted (Linux). Hoy `copihue` escribe texto NASM en `output.asm` y llama a `nasm -f elf64` y `ld`.
 
-Estado de esta porción (0.42.4, nada de esto está activo por defecto):
+Estado de esta porción (0.42.5; con `--native` se activa M4, que **no** es el camino por defecto):
 
 - Hecho: el inventario de abajo, y un codificador de instrucciones (`compiler/native/x64.c`, con relocaciones; ver [DESIGN_NATIVE_X64.md](DESIGN_NATIVE_X64.md)) que coincide byte a byte con `nasm -f elf64` en el 100 % de las instrucciones del inventario (ver [Cobertura](#cobertura-de-la-primera-porción)).
-- Hecho (M2): un ensamblador de programas completos, `compiler/native/asm.c`, que resuelve etiquetas, relaja saltos como nasm y codifica `call`; produce los bytes de `.text` de los 466 archivos del corpus idénticos a `nasm -f elf64` (ver [M2](#m2-etiquetas-saltos-con-relajación-y-call-compilernativeasmhc)).
-- Hecho (M3): `asm.c` también arma `.data`, `.rodata` y `.bss` (datos, `align`, `times`, símbolos de datos en `mov`/`lea`/`[...]`/`[rel]` y en `dq`/`dd`) con los mismos bytes, tamaños y relocaciones (offset, tipo, símbolo, addendo) que `nasm -f elf64` en los 466 archivos del corpus (ver [M3](#m3-datos-compilernativeasmhc)).
-- No hecho: cabecera ELF, la opción de línea de comandos, símbolos del ejecutable. Es el resto de este documento.
-- El ejecutable producido **no se ha ejecutado** en ningún sitio: la máquina de desarrollo es macOS arm64 y no corre ELF de Linux. Lo verificado es la igualdad de bytes contra nasm, no el comportamiento de un programa.
+- Hecho (M2): un ensamblador de programas completos, `compiler/native/asm.c`, que resuelve etiquetas, relaja saltos como nasm y codifica `call`; produce los bytes de `.text` de todos los archivos del corpus idénticos a `nasm -f elf64` (ver [M2](#m2-etiquetas-saltos-con-relajación-y-call-compilernativeasmhc)).
+- Hecho (M3): `asm.c` también arma `.data`, `.rodata` y `.bss` (datos, `align`, `times`, símbolos de datos en `mov`/`lea`/`[...]`/`[rel]` y en `dq`/`dd`) con los mismos bytes, tamaños y relocaciones (offset, tipo, símbolo, addendo) que `nasm -f elf64` en todo el corpus (ver [M3](#m3-datos-compilernativeasmhc)).
+- Hecho (M4): `asm.c` entrega su tabla de símbolos; `compiler/native/elf.{h,c}` escribe el ELF64 `ET_EXEC` con relocaciones parcheadas; `copihue --native` genera el ejecutable hosted sin `nasm` ni `ld` y rechaza (sin caer al otro camino) lo que el ensamblador nativo no cubre; hay pruebas de estructura en cualquier sistema y una pasada de `tests/run_tests.sh --native` en el CI (ver [M4](#m4-escritor-elf-y-opción---native-compilernativeelfhc)).
+- No hecho: `.symtab`/`.shstrtab` (M5), que `--native` sea el camino por defecto (M6), los objetos `-c` nativos, y **ejecutar** un ejecutable producido: la máquina de desarrollo es macOS arm64 y no corre ELF de Linux. Lo verificado es la igualdad de bytes contra nasm y la estructura del ELF, no el comportamiento de un programa. La primera ejecución real será la del CI en Linux.
 
 ## 1. Levantamiento
 
@@ -118,7 +118,7 @@ Los objetos `-c` (ELF relocatable para `ld`) necesitarán la misma codificación
 
 ### 2.6 Cabecera ELF
 
-`ET_EXEC`, `EM_X86_64`, `e_entry = _start`. Dos `PT_LOAD` (reparto propuesto; el que produce `ld` hoy no se pudo inspeccionar en esta máquina macOS, y hay que compararlo en Linux antes de M4):
+`ET_EXEC`, `EM_X86_64`, `e_entry = _start`. Dos `PT_LOAD` (reparto propuesto; el que produce `ld` no se pudo inspeccionar en esta máquina macOS, y sigue sin compararse con `ld` en Linux; lo que M4 implementó está en [M4](#m4-escritor-elf-y-opción---native-compilernativeelfhc), con una diferencia respecto de esta tabla: `.rodata` va al final del segmento 1):
 
 | segmento | permisos | contenido | dirección virtual |
 |---|---|---|---|
@@ -129,7 +129,7 @@ Se mantiene `.text` en `0x401000` (supuesto a confirmar en Linux, por la direcci
 
 ### 2.7 Qué queda fuera
 
-Este inventario es solo del modo hosted. `--freestanding`, `--flat`, `--boot`, `bits 16/32`, funciones `naked`/`interrupt` y `asm("...")` de usuario pueden emitir cualquier instrucción (modos de 16 y 32 bits, registros de control, `iret`...). Hasta tenerlos inventariados, el camino nativo debe **rechazar** esos programas y caer al camino actual (nasm + ld), no intentar un subconjunto.
+Este inventario es solo del modo hosted. `--freestanding`, `--flat`, `--boot`, `bits 16/32`, funciones `naked`/`interrupt` y `asm("...")` de usuario pueden emitir cualquier instrucción (modos de 16 y 32 bits, registros de control, `iret`...). Hasta tenerlos inventariados, el camino nativo debe **rechazar** esos programas, no intentar un subconjunto. M4 decidió rechazar con un error y **no** caer en silencio al camino de nasm + ld (ver M4, «Decisiones»).
 
 ## 3. Orden de implementación
 
@@ -138,7 +138,7 @@ Este inventario es solo del modo hosted. `--freestanding`, `--flat`, `--boot`, `
 | M1 (hecho) | codificador de instrucciones sin etiquetas (registros, memoria, `equ`) | `make native-test`: cada instrucción aceptada coincide con nasm byte a byte (y relocación); la entrada inválida se rechaza |
 | M2 (hecho) | etiquetas, saltos con relajación, `call` | cada archivo del corpus: los bytes de `.text` coinciden con los de nasm (con `section .text start=...`); se mide cuántos saltos nasm deja largos |
 | M3 (hecho) | datos: `db dq dd resb`, `align`, símbolos en `mov`/`lea`/`[...]`, `[rel]` | igual, con `.data`, `.rodata` y `.bss`; la cobertura del inventario llega al 100 % de las formas hosted |
-| M4 | escritor ELF y opción `--native` (nombre por decidir); sin cabeceras de sección | en el CI (Linux): `make test` con la opción en cada nivel `-O0`/`-O2`, mismas salidas doradas |
+| M4 (hecho, sin ejecutar) | escritor ELF y opción `--native`; sin cabeceras de sección | en el CI (Linux): `make native-run-test` (`tests/run_tests.sh --native`) con la opción en cada nivel `-O0`/`-O2`, mismas salidas doradas. Lo que se pudo comprobar en macOS es la estructura (`make native-elf-test`); la ejecución espera al CI |
 | M5 | `.symtab`/`.shstrtab`, comparación de `.text` con el de `ld` vía `objcopy -O binary -j .text` | `cmp` idéntico en el banco de `bench/` |
 | M6 | la opción pasa a ser el camino por defecto, con el viejo detrás de una opción; después los objetos `-c` | un ciclo de CI verde y las mediciones del CHANGELOG sin cambios |
 
@@ -195,7 +195,58 @@ M3 sigue siendo una biblioteca y sus pruebas; `copihue` no la usa. A lo que M2 d
 
 **Cobertura del inventario hosted (medida).** `datainv` encuentra en el corpus 6 848 directivas (1 382 `equ`) y **ninguna** fuera de `section`, `global`, `equ` y las de datos; 16 formas de directivas de datos (la más frecuente `db` con lista de enteros, 2 543 líneas; `db` entero 2 190; `dq` entero 318; `resb` 186; `align N, resb` 26; `align N, db 0` 10; `dq etiqueta` 2...) y 29 formas de instrucción con un operando que nombra una etiqueta de datos (7 152 ocurrencias; `mov r64, etiqueta` 4 709, `lea r64, [etiqueta]` en `.bss` 1 231...). Los 466 archivos se ensamblan enteros y salen idénticos, así que **todas** esas líneas están cubiertas: **100 %** de las formas hosted (antes, con `x64.c` solo, 0 de 466 archivos enteros). «Cubierta» es: `asm.c` la acepta y lo que produce es igual a lo de nasm; no es que el programa corra.
 
-**Lo que no se verificó.** (1) **nasm 2.16.01** (el del CI) no está en esta máquina: las reglas medidas aquí (relleno `0x90` de `align` en datos, símbolo de sección también para `global`, `align` que sube la alineación de la sección, `R_X86_64_32` de `dd etiqueta`, advertencias de `align` en `.bss`) son de nasm 3.02. Si el CI difiere, `test_asm` nombra el programa y la relocación; la alineación de sección solo se imprime. (2) `.rodata` no sale en el corpus: su comportamiento solo se probó con los casos propios. (3) Ningún ejecutable producido con esto se ha ejecutado. (4) No hay tabla de símbolos: `asm.c` no devuelve aún qué etiquetas son `global` ni sus offsets; hace falta para M4 (`_start`). (5) Los límites (1 GiB, 16 777 216 repeticiones) son elecciones de esta biblioteca, no de nasm.
+**Lo que no se verificó.** (1) **nasm 2.16.01** (el del CI) no está en esta máquina: las reglas medidas aquí (relleno `0x90` de `align` en datos, símbolo de sección también para `global`, `align` que sube la alineación de la sección, `R_X86_64_32` de `dd etiqueta`, advertencias de `align` en `.bss`) son de nasm 3.02. Si el CI difiere, `test_asm` nombra el programa y la relocación; la alineación de sección solo se imprime. (2) `.rodata` no sale en el corpus: su comportamiento solo se probó con los casos propios. (3) Ningún ejecutable producido con esto se ha ejecutado. (4) No había tabla de símbolos: `asm.c` no devolvía qué etiquetas son `global` ni sus offsets (resuelto en M4). (5) Los límites (1 GiB, 16 777 216 repeticiones) son elecciones de esta biblioteca, no de nasm.
+
+### M4. Escritor ELF y opción `--native` (`compiler/native/elf.{h,c}`)
+
+M4 une lo anterior en un ejecutable. `copihue --native programa.lap -o salida` escribe el mismo texto NASM de siempre en `output.asm`, lo ensambla con `asm.c` (M2 + M3), escribe el ELF con `elf.c` y borra `output.asm`; no llama a `nasm` ni a `ld`. Si el ensamblador nativo no acepta el texto, el error nombra la línea y deja `output.asm` (igual que cuando falla nasm). No es el camino por defecto.
+
+**Tabla de símbolos (`asm.h`).** `AsmOut` trae ahora `sym[]` (`AsmSym`: nombre completo, sección, offset **final** —después de la relajación—, indicador `global`, línea), ordenada por sección, offset y nombre, y `asm_find_sym`. Incluye todas las etiquetas del programa, no solo las `global` (las locales son `padre.hijo`, como en el `.symtab` de nasm). Prueba: `test_asm` compara, para cada programa, cada símbolo definido del `.symtab` de nasm (sección, valor, `GLOBAL`/`LOCAL`) con el de `asm.c` y exige que `asm.c` no tenga ninguno más: 472 de 472 programas, 20 330 símbolos, 472 globales (uno por programa: `_start`).
+
+**Reparto (`elf_layout`).**
+
+| | |
+|---|---|
+| archivo | cabecera ELF (64 bytes), 1 o 2 cabeceras de programa (56 bytes cada una), relleno de ceros hasta `0x1000`, `.text`, `.rodata` si el programa la tiene (alineada a la suya), relleno hasta la alineación de `.data`, `.data` |
+| segmento 1 | `PT_LOAD`, R+X (`p_flags` 5), `p_offset` 0, `p_vaddr` `0x400000`, `filesz == memsz`, `p_align` `0x1000`: cabeceras, `.text` (`0x401000`, offset `0x1000`) y `.rodata` |
+| segmento 2 | `PT_LOAD`, R+W (6), solo si hay `.data` o `.bss`: `p_vaddr = (fin del segmento 1, subido a página) + (p_offset mod 0x1000)`, de modo que `vaddr ≡ offset (mod 0x1000)`; `.data` al inicio, `.bss` después, alineada a la suya; `p_filesz` = tamaño de `.data`, `p_memsz` llega al fin de `.bss` |
+| entrada | `e_entry` = dirección de `_start` (debe estar definida en `.text` y declarada `global`; si no, error) |
+| sin | cabeceras de sección (`e_shnum` 0, `e_shoff` 0), `PT_GNU_STACK`, `PT_NOTE`, `PT_DYNAMIC` |
+
+El archivo termina en el último byte de `.data` (o en el del segmento 1 si no hay datos); `.bss` solo existe en memoria. Las alineaciones de sección que pide el programa (`align 32` en `.text` o `.data`, hasta 4096) se cumplen porque los inicios de cada segmento son múltiplos de página y el relleno se calcula con la alineación de cada sección; mayor que 4096 se rechaza.
+
+**Relocaciones (`elf_patch`).** No se guarda ninguna: con las direcciones de las secciones ya fijas se escribe `S + A` (`R_X86_64_64`, 8 bytes; `R_X86_64_32`, 4 bytes sin signo; `R_X86_64_32S`, 4 bytes con signo) o `S + A − P` (`R_X86_64_PC32`), con `S` la dirección de la sección destino y `A` el addendo que `asm.c` ya trae (incluye el offset de la etiqueta). Un valor que no cabe en el campo es un error, no un truncamiento. `movabs` se conserva (`mov rax, etiqueta` sigue siendo de 10 bytes con el campo de 8 bytes parcheado): el tamaño del código no cambia respecto de nasm y `.text` sigue siendo idéntico, byte a byte, salvo los campos relocados.
+
+**Decisiones.**
+
+1. *Rechazar, no caer en silencio.* `--native` con `-S`, `-c`, `--freestanding`, `--flat`, `--boot` o `--elf`, y un programa con `asm("...")` o con una función `naked`, `interrupt` o `syscall` (el compilador solo permite `bits 16`/`bits 32` en funciones `naked`), termina con un error que dice qué (y la línea) y que sin `--native` se usa nasm + ld. No se escogió el respaldo automático porque quien pide `--native` está probando el camino nativo: que un programa «funcione» por haber usado nasm escondería justamente lo que se quiere saber, y en el CI una caída silenciosa daría una pasada verde que no probó nada. Se detecta en el generador (`native_note`), no en el ensamblador: el texto de `asm("...")` podría pasar por `asm.c` si usa instrucciones que cubre, y aun así no se le ha pedido a nadie que verifique ese ensamblador de usuario. Lo que el generador no marca pero `asm.c` no acepta (una directiva o instrucción fuera del inventario) también es un error, con la línea del texto NASM, nunca un subconjunto.
+2. *`.rodata` en el segmento 1.* La tabla de 2.6 solo nombra `.data` y `.bss`; el generador hosted no usa `.rodata` (0 bytes en el corpus), así que esto solo lo ejercitan los casos propios. Se la deja con los permisos de lectura y no de escritura (como hace `ld`), sin añadir un tercer `PT_LOAD`.
+3. *Sin `PT_GNU_STACK`.* El archivo no declara si quiere pila ejecutable. Un `.o` de nasm sin la nota `.note.GNU-stack` produce lo mismo en `ld` (que, según se recuerda de binutils y no se comprobó aquí, lo trata como «pide pila ejecutable»); si Linux exige otra cosa, el síntoma es un fallo al arrancar y la corrección es añadir la cabecera, ver «Lo que no se verificó».
+4. *Un solo `gcc` sigue construyendo el compilador.* `copihue.c` incluye `compiler/native/{x64,x64_line,asm,elf}.c` (con `#define` temporales para los nombres `emit`, `parse_expr` y `trim`, que el compilador y los fuentes nativos usan para cosas distintas). Los tests de M1–M3 siguen compilando esos archivos por separado y no cambian. El `Makefile` hace depender `copihue` de los fuentes nativos.
+5. *El texto sigue pasando por `output.asm`.* Es lo que da el oráculo (`-S`) y evita tocar el generador de 21 000 líneas (2.1, opción 1). Cambiarlo por un búfer en memoria es un cambio mecánico y queda para M6.
+
+**Prueba.** `tests/x64/run_elf.sh` (parte de `make native-test`; sola, `make native-elf-test`) con `tests/x64/test_elf.c`. No ejecuta nada. Con un lector ELF propio y el `.o` de nasm del mismo texto como oráculo comprueba, por programa: cada campo de la cabecera ELF y de cada cabecera de programa; que haya una cabecera de programa si y solo si hay datos o `.bss`; `vaddr ≡ offset (mod 0x1000)`, `p_align`, `filesz ≤ memsz`, segmentos en páginas distintas, tamaño exacto del archivo, relleno de ceros; `e_entry` = `0x401000 + valor de _start` en el objeto de nasm; las direcciones de `.rodata`, `.data` y `.bss`, **leídas de las cabeceras de programa y no del cálculo del escritor**, alineadas como pide el programa y sin huecos mayores que la alineación; y que los bytes de `.text`, `.rodata` y `.data` del archivo sean los de nasm con **las relocaciones de nasm** (su propia `.rela`) aplicadas a esas direcciones. Entradas: 9 programas de `tests/x64/elf_cases.asm` (código que cruza páginas; solo `.data`; solo `.bss`; `.bss` alineado a 64 tras 5 bytes de datos; `align 32` y punteros a `.text` en datos; `.rodata` con `align 64`; las cuatro secciones con `align 4096`; datos en el borde de una página), 5 rechazos (sin `_start`, `_start` no `global`, `_start` fuera de `.text`, sin código, relocación que no cabe), los 472 programas del corpus (`-O0` y `-O2`), y 8 ejecutables escritos por `copihue --native` (4 programas × 2 niveles), leídos del disco: además de la estructura deben ser **idénticos** a lo que arma la biblioteca en memoria y tener modo `0755`. `tests/run_tests.sh --native` (`make native-run-test`) compila con `--native` todos los programas de la pasada normal y los **ejecuta** con las mismas salidas doradas en `-O0` y `-O2`; solo corre en Linux (en otro sistema se niega con un mensaje). `tests/lang/cpuid_carry.lap` y `tests/lang/naked_param.lap` usan `asm()`/`naked`: `--native` los rechaza, y esa pasada los cuenta como omitidos (con su nombre) solo si el fuente contiene una de esas construcciones. La sección 9 de `tests/run_tests.sh` (en la pasada normal, sin ejecutar nada) comprueba los rechazos: `tests/native/refuse_*.lap` y las combinaciones con `-S`, `-c`, `--freestanding`, `--flat` y `--boot`, con su mensaje y sin dejar ningún archivo. El CI ejecuta `make native-run-test` y `make native-test`.
+
+**Resultado (nasm 3.02, macOS arm64).**
+
+| | |
+|---|---|
+| símbolos | 472 de 472 programas con la tabla de símbolos igual al `.symtab` de nasm (20 330 símbolos) |
+| estructura y contenido | 9 de 9 casos propios, 472 de 472 del corpus y 8 de 8 ejecutables escritos por `copihue --native`: sin diferencias |
+| tamaño | corpus: 2 626 096 bytes de ELF en total (programa típico de 4 a 7 KiB); 454 de los 472 con segmento de datos; 7 296 relocaciones parcheadas |
+| rechazos | 5 de 5 del escritor; 8 de 8 en la sección 9 |
+| `objdump` | solo como comprobación ajena: el `objdump` de macOS (LLVM) lee dos de estos archivos (`hello`, sin datos, y `test_global_string_use`, con datos) y muestra las cabeceras de programa esperadas: `LOAD off 0 vaddr 0x400000 … r-x` y, el segundo, `LOAD off 0x1130 vaddr 0x402130 … rw-` |
+
+**Lo que no se verificó.**
+
+1. **Ningún ejecutable producido se ha ejecutado.** Esta máquina es macOS: no corre ELF de Linux, y tampoco hay `ld` de ELF ni `readelf`. Todo lo anterior son comprobaciones de estructura y de bytes. Que el núcleo de Linux cargue el archivo, que `_start` arranque y que cada programa imprima lo mismo que con nasm + ld solo lo dirá `make native-run-test` en el CI.
+2. **No se comparó con lo que produce `ld`.** El reparto de segmentos es el de 2.6 (más `.rodata` en el segmento 1), no una copia del de `ld`. La comparación de `.text` con `objcopy -O binary -j .text` de un ejecutable de `ld` es M5. Direcciones de las mediciones del CHANGELOG (p. ej. `fib` en `0x4010df`): `.text` está en `0x401000` en este escritor, igual que lo supone el CHANGELOG para `ld`, pero eso tampoco se comprobó contra un ejecutable de `ld`.
+3. **Ausencia de `PT_GNU_STACK`** (decisión 3): si el núcleo o la política de seguridad del CI tratan distinto un binario sin esa cabecera, el síntoma será un fallo al arrancar o un aviso; no se pudo probar.
+4. **nasm 2.16.01** (el del CI) no está en esta máquina: las comparaciones de símbolos, relocaciones y bytes son contra nasm 3.02. El resto de M2/M3 ya lo decía.
+5. **`gcc -Wall -Werror`.** Esta máquina compila con clang (`gcc` es un alias): al incluir los fuentes nativos en `copihue.c`, el paso «warnings are errors» del CI los compila por primera vez con `-Werror` y con el gcc de Ubuntu; no hubo advertencias con clang `-Wall -Wextra`, pero gcc puede avisar de otras cosas.
+6. **`tests/run_tests.sh --native`**: su lógica de omitir los dos programas que `--native` rechaza y de fallar si rechaza otro se probó en macOS con un `uname` y un `timeout` simulados: los dos omitidos salen nombrados y el resto falla con `exit=126` porque macOS no ejecuta ELF; que todo lo demás pase es cosa del CI.
+7. **`make native-test` en esta máquina** termina con `x64: FAIL` por una diferencia que no es de M4: el modo `vectors`/`edge`/`cases`/`corpus` de M1 imprime `DIFF movsxd rax, eax` porque nasm 3.02 acorta ese `movsxd` a `cdqe` (el codificador sigue a nasm 2.x, el del CI; ya está en el CHANGELOG). Las partes de M2, M3 y M4 salen `OK`. No se comprobó contra `main` en un árbol aparte (no se pudo crear aquí); los archivos de M1 no se tocaron.
+8. Los límites de la biblioteca (1 GiB por sección, alineación de sección hasta 4096) son elecciones propias, como en M3. No se midió el tiempo ni el tamaño frente al camino de nasm + ld.
 
 ## Cobertura de la primera porción
 
