@@ -1,0 +1,166 @@
+// ELF64 executable writer. See elf.h.
+#include "elf.h"
+
+#include <stdarg.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+
+enum { EHDR_SIZE = 64, PHDR_SIZE = 56 };
+
+static int elf_fail(char* err, size_t n, const char* fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    if (err && n) vsnprintf(err, n, fmt, ap);
+    va_end(ap);
+    return -1;
+}
+
+static uint64_t elf_up(uint64_t v, uint64_t a) { return a > 1 ? (v + a - 1) / a * a : v; }
+
+static void elf_w(uint8_t* p, uint64_t v, int n) {
+    for (int i = 0; i < n; i++) p[i] = (uint8_t)(v >> (8 * i));
+}
+
+int elf_layout(const AsmOut* a, ElfLayout* L, char* err, size_t errsz) {
+    memset(L, 0, sizeof *L);
+    const AsmSection* tx = &a->sec[ASM_SEC_TEXT];
+    const AsmSection* ro = &a->sec[ASM_SEC_RODATA];
+    const AsmSection* da = &a->sec[ASM_SEC_DATA];
+    const AsmSection* bs = &a->sec[ASM_SEC_BSS];
+    for (int k = 0; k < ASM_NSEC; k++)
+        if (a->sec[k].align > ELF_PAGE) return elf_fail(err, errsz, "section alignment %d is larger than a page", a->sec[k].align);
+    if (tx->size == 0) return elf_fail(err, errsz, "the program has no code");
+
+    const AsmSym* st = asm_find_sym(a, "_start");
+    if (!st) return elf_fail(err, errsz, "the program has no _start");
+    if (st->sec != ASM_SEC_TEXT) return elf_fail(err, errsz, "_start is not in .text");
+    if (!st->global) return elf_fail(err, errsz, "_start is not declared global");
+
+    uint64_t cur = ELF_TEXT_OFF;
+    L->off[ASM_SEC_TEXT] = cur;
+    L->base[ASM_SEC_TEXT] = ELF_BASE + cur;
+    cur += tx->size;
+    if (ro->size) {
+        cur = elf_up(cur, (uint64_t)ro->align);
+        L->off[ASM_SEC_RODATA] = cur;
+        L->base[ASM_SEC_RODATA] = ELF_BASE + cur;
+        cur += ro->size;
+    }
+    L->s1_filesz = cur;
+    L->file_size = cur;
+    L->nphdr = 1;
+    if (da->size || bs->size) {
+        // The data segment starts on the next page of memory but at the next
+        // byte of the file: vaddr = offset (mod page).
+        uint64_t off = da->size ? elf_up(cur, (uint64_t)da->align) : cur;
+        uint64_t va = elf_up(ELF_BASE + cur, ELF_PAGE) + off % ELF_PAGE;
+        uint64_t end = va;
+        L->nphdr = 2;
+        L->s2_off = off; L->s2_va = va;
+        if (da->size) {
+            L->off[ASM_SEC_DATA] = off;
+            L->base[ASM_SEC_DATA] = va;
+            end = va + da->size;
+            L->s2_filesz = da->size;
+            L->file_size = off + da->size;
+        }
+        if (bs->size) {
+            end = elf_up(end, (uint64_t)bs->align);
+            L->base[ASM_SEC_BSS] = end;
+            end += bs->size;
+        }
+        L->s2_memsz = end - va;
+    }
+    L->entry = L->base[ASM_SEC_TEXT] + (uint64_t)st->off;
+    return 0;
+}
+
+// Patch one relocation with the final addresses (no relocation is kept).
+static int elf_patch(const AsmOut* a, const ElfLayout* L, const AsmReloc* r, uint8_t* field, uint64_t place, char* err, size_t errsz) {
+    int64_t s = (int64_t)L->base[r->sec] + r->addend;
+    switch (r->type) {
+    case XR_64: elf_w(field, (uint64_t)s, 8); return 0;
+    case XR_32:
+        if (s < 0 || s > 0xFFFFFFFFLL) break;
+        elf_w(field, (uint64_t)s, 4); return 0;
+    case XR_32S:
+        if (s < INT32_MIN || s > INT32_MAX) break;
+        elf_w(field, (uint64_t)s, 4); return 0;
+    case XR_PC32: {
+        int64_t v = s - (int64_t)place;
+        if (v < INT32_MIN || v > INT32_MAX) break;
+        elf_w(field, (uint64_t)v, 4); return 0;
+    }
+    default:
+        return elf_fail(err, errsz, "relocation type %d in %s at offset %d is not supported", r->type, r->in == ASM_SEC_TEXT ? ".text" : ".data", r->off);
+    }
+    (void)a;
+    return elf_fail(err, errsz, "relocation to %s (type %d) at offset %d does not fit its field", r->sym, r->type, r->off);
+}
+
+int elf_build(const AsmOut* a, uint8_t** img, size_t* n, ElfLayout* L, char* err, size_t errsz) {
+    ElfLayout loc;
+    if (!L) L = &loc;
+    if (elf_layout(a, L, err, errsz)) return -1;
+    uint8_t* f = calloc((size_t)L->file_size, 1);
+    if (!f) return elf_fail(err, errsz, "out of memory");
+
+    // ELF header.
+    memcpy(f, "\x7f" "ELF\2\1\1", 7);              // 64-bit, little endian, version 1, System V ABI
+    elf_w(f + 16, 2, 2);                           // ET_EXEC
+    elf_w(f + 18, 62, 2);                          // EM_X86_64
+    elf_w(f + 20, 1, 4);
+    elf_w(f + 24, L->entry, 8);
+    elf_w(f + 32, EHDR_SIZE, 8);                   // e_phoff
+    elf_w(f + 52, EHDR_SIZE, 2);                   // e_ehsize
+    elf_w(f + 54, PHDR_SIZE, 2);
+    elf_w(f + 56, (uint64_t)L->nphdr, 2);
+    elf_w(f + 58, 64, 2);                          // e_shentsize (no section headers: e_shnum 0)
+
+    // Program headers: PT_LOAD R+X, then PT_LOAD R+W.
+    uint8_t* p = f + EHDR_SIZE;
+    elf_w(p, 1, 4); elf_w(p + 4, 5, 4);
+    elf_w(p + 8, 0, 8); elf_w(p + 16, ELF_BASE, 8); elf_w(p + 24, ELF_BASE, 8);
+    elf_w(p + 32, L->s1_filesz, 8); elf_w(p + 40, L->s1_filesz, 8); elf_w(p + 48, ELF_PAGE, 8);
+    if (L->nphdr == 2) {
+        p += PHDR_SIZE;
+        elf_w(p, 1, 4); elf_w(p + 4, 6, 4);
+        elf_w(p + 8, L->s2_off, 8); elf_w(p + 16, L->s2_va, 8); elf_w(p + 24, L->s2_va, 8);
+        elf_w(p + 32, L->s2_filesz, 8); elf_w(p + 40, L->s2_memsz, 8); elf_w(p + 48, ELF_PAGE, 8);
+    }
+
+    // Section contents, then the relocations patched in place.
+    for (int k = 0; k < ASM_NSEC; k++) {
+        const AsmSection* s = &a->sec[k];
+        if (k == ASM_SEC_BSS || !s->size) continue;
+        memcpy(f + L->off[k], s->bytes, s->size);
+    }
+    for (int k = 0; k < ASM_NSEC; k++) {
+        const AsmSection* s = &a->sec[k];
+        if (k == ASM_SEC_BSS) continue;
+        for (size_t i = 0; i < s->nrel; i++) {
+            const AsmReloc* r = &s->rel[i];
+            if ((size_t)r->off + (r->type == XR_64 ? 8 : 4) > s->size) { free(f); return elf_fail(err, errsz, "relocation outside its section"); }
+            if (elf_patch(a, L, r, f + L->off[k] + r->off, L->base[k] + (uint64_t)r->off, err, errsz)) { free(f); return -1; }
+        }
+    }
+    *img = f;
+    *n = (size_t)L->file_size;
+    return 0;
+}
+
+int elf_write_exec(const AsmOut* a, const char* path, char* err, size_t errsz) {
+    uint8_t* img;
+    size_t n;
+    if (elf_build(a, &img, &n, NULL, err, errsz)) return -1;
+    FILE* fp = fopen(path, "wb");
+    if (!fp) { free(img); return elf_fail(err, errsz, "cannot write '%s'", path); }
+    int ok = fwrite(img, 1, n, fp) == n;
+    ok = fclose(fp) == 0 && ok;
+    free(img);
+    if (!ok) return elf_fail(err, errsz, "error writing '%s'", path);
+    if (chmod(path, 0755) != 0) return elf_fail(err, errsz, "cannot set the mode of '%s'", path);
+    return 0;
+}

@@ -1,0 +1,8 @@
+// --native refuses naked functions (they may hold any instruction, 16/32 bits).
+naked fn probe() {
+    return;
+}
+
+fn main() -> i32 {
+    return 0;
+}

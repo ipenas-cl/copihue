@@ -573,6 +573,13 @@ static void reloc_push(Ctx* c, AsmOut* o, size_t* caps, int in, long off, int ty
     r->addend = addend + (s->sec == ASM_SEC_TEXT ? sym_addr(c, s) : s->off);
 }
 
+static int sym_cmp(const void* a, const void* b) {
+    const AsmSym* x = a; const AsmSym* y = b;
+    if (x->sec != y->sec) return x->sec < y->sec ? -1 : 1;
+    if (x->off != y->off) return x->off < y->off ? -1 : 1;
+    return strcmp(x->name, y->name);
+}
+
 static int assemble(Ctx* c, AsmOut* out) {
     // Every `global` must be defined; every branch target must be a .text label.
     for (int i = 0; i < c->nglob; i++) {
@@ -653,7 +660,23 @@ static int assemble(Ctx* c, AsmOut* out) {
         if (!s) return fail(c, r->line, "undefined symbol '%s'", r->sym);
         reloc_push(c, out, relcap, r->in, (long)r->off, r->type, s, r->addend);
     }
+    // Symbol table.
+    size_t ns = 0;
+    for (size_t h = 0; h < c->ntab; h++) for (Sym* s = c->tab[h]; s; s = s->next) ns++;
+    out->sym = calloc(ns ? ns : 1, sizeof *out->sym);
+    for (size_t h = 0; h < c->ntab; h++)
+        for (Sym* s = c->tab[h]; s; s = s->next) {
+            AsmSym* y = &out->sym[out->nsym++];
+            y->name = dup(s->name); y->sec = s->sec; y->global = s->global; y->line = s->line;
+            y->off = s->sec == ASM_SEC_TEXT ? sym_addr(c, s) : s->off;
+        }
+    qsort(out->sym, out->nsym, sizeof *out->sym, sym_cmp);
     return 0;
+}
+
+const AsmSym* asm_find_sym(const AsmOut* o, const char* name) {
+    for (size_t i = 0; i < o->nsym; i++) if (!strcmp(o->sym[i].name, name)) return &o->sym[i];
+    return NULL;
 }
 
 int asm_assemble(const char* src, AsmOut* out, char* err, size_t errsz) {
@@ -689,5 +712,7 @@ int asm_assemble(const char* src, AsmOut* out, char* err, size_t errsz) {
 void asm_free(AsmOut* o) {
     for (int k = 0; k < ASM_NSEC; k++) { free(o->sec[k].bytes); free(o->sec[k].rel); }
     free(o->br);
+    for (size_t i = 0; i < o->nsym; i++) free(o->sym[i].name);
+    free(o->sym);
     memset(o, 0, sizeof *o);
 }

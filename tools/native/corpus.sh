@@ -16,7 +16,7 @@ mkdir -p "$OUT/O0" "$OUT/O2"
 ok=0; bad=0
 for src in $(ls tests/*.lap tests/*/*.lap examples/*.lap examples/*/*.lap examples/*/*/*.lap 2>/dev/null \
     | grep -v -e '^tests/errors/' -e '^tests/freestanding/' -e '^tests/flat/' \
-              -e '^tests/boot/' -e '^tests/usermode/' -e '^tests/ctx/'); do
+              -e '^tests/boot/' -e '^tests/usermode/' -e '^tests/ctx/' -e '^tests/native/'); do
   name=$(echo "${src%.lap}" | tr '/' '_')
   for o in 0 2; do
     if "$CC" -O$o -S -o "$OUT/O$o/$name.asm" "$src" >/dev/null 2>&1; then

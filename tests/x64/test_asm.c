@@ -15,51 +15,8 @@
 #include <string.h>
 
 #include "../../compiler/native/asm.h"
+#include "nasmfix.h"
 #include "nobj.h"
-
-static int nasm_major;
-
-static void detect_nasm(void) {
-    FILE* p = popen("nasm -v 2>&1", "r");
-    char l[256] = "";
-    if (p) { if (!fgets(l, sizeof l, p)) l[0] = 0; pclose(p); }
-    const char* v = strstr(l, "version ");
-    nasm_major = v ? atoi(v + 8) : 0;
-    printf("nasm: %s", l[0] ? l : "(not found)\n");
-}
-
-// NASM 3 shortens `movsxd rax, eax` to cdqe; the encoder follows NASM 2.x (the CI's).
-// For nasm >= 3 each register-register movsxd is handed to nasm as its 2.x bytes.
-static void for_nasm(const char* text, char* out, size_t outsz) {
-    size_t o = 0;
-    const char* p = text;
-    while (*p && o + 80 < outsz) {
-        const char* nl = strchr(p, '\n');
-        size_t len = nl ? (size_t)(nl - p) : strlen(p);
-        static char line[65536];
-        snprintf(line, sizeof line, "%.*s", (int)(len < sizeof line - 1 ? len : sizeof line - 1), p);
-        int done = 0;
-        if (nasm_major >= 3) {
-            XLine x; static char tmp[65536];
-            snprintf(tmp, sizeof tmp, "%s", line);
-            x64_classify(tmp, &x);
-            if (x.kind == XL_INSN && !x.has_label && !strncmp(x.text, "movsxd ", 7)) {
-                XInsn in; XEnc enc; char err[64]; const char* why;
-                x64_set_consts(NULL, NULL);
-                if (!x64_parse(x.text, &in, err, sizeof err) && in.op[1].kind == X_REG && x64_encode(&in, &enc, &why) > 0) {
-                    o += (size_t)snprintf(out + o, outsz - o, "db");
-                    for (int i = 0; i < enc.n; i++) o += (size_t)snprintf(out + o, outsz - o, "%s 0x%02X", i ? "," : "", enc.b[i]);
-                    o += (size_t)snprintf(out + o, outsz - o, "\n");
-                    done = 1;
-                }
-            }
-        }
-        if (!done) o += (size_t)snprintf(out + o, outsz - o, "%s\n", line);
-        if (!nl) break;
-        p = nl + 1;
-    }
-    out[o] = 0;
-}
 
 static long tot_js, tot_jl, tot_cs, tot_cl, tot_calls, tot_fits, max_rounds;
 static long files_ok, files_bad, files_long;
@@ -100,6 +57,32 @@ static int cmp_relocs(const char* name, int k, const AsmSection* a, const NSec* 
             return 1;
         }
     }
+    return 0;
+}
+
+static long tot_syms, tot_globals;
+
+// The symbol table (M4): every label nasm defines (section symbols and the
+// file symbol aside) is in asm.c's table with the same section, offset and
+// global flag, and asm.c has no label nasm lacks. Returns 1 and prints when not.
+static int cmp_symbols(const char* name, const AsmOut* a, const NObj* n) {
+    size_t seen = 0;
+    for (size_t i = 0; i < n->nsym; i++) {
+        const NSym* y = &n->sym[i];
+        if (y->type == 3 || y->type == 4 || y->shndx <= 0 || y->shndx >= 64) continue;   // section, file, undefined, absolute
+        int k = n->sec_of_index[y->shndx];
+        const AsmSym* s = k < 0 ? NULL : asm_find_sym(a, y->name);
+        if (!s) { printf("FAIL %s: nasm defines symbol '%s' that asm.c does not know\n", name, y->name); return 1; }
+        if (s->sec != k || (uint64_t)s->off != y->value || s->global != (y->bind == 1)) {
+            printf("FAIL %s: symbol '%s': asm.c %d:%ld%s, nasm %d:%llu%s\n", name, y->name, s->sec, s->off, s->global ? " global" : "",
+                   k, (unsigned long long)y->value, y->bind == 1 ? " global" : "");
+            return 1;
+        }
+        seen++;
+        if (s->global) tot_globals++;
+    }
+    if (seen != a->nsym) { printf("FAIL %s: asm.c has %zu labels, nasm %zu\n", name, a->nsym, seen); return 1; }
+    tot_syms += (long)seen;
     return 0;
 }
 
@@ -164,6 +147,7 @@ static int compare(const char* work, const char* name, const char* text) {
     }
     for (int k = 1; k < ASM_NSEC && !bad; k++) bad = cmp_section(name, k, &a.sec[k], &n.s[k]);
     for (int k = 0; k < ASM_NSEC && !bad; k++) bad = cmp_relocs(name, k, &a.sec[k], &n.s[k]);
+    if (!bad) bad = cmp_symbols(name, &a, &n);
     if (!bad) {
         for (int k = 0; k < ASM_NSEC; k++) {
             const NSec* q = &n.s[k];
@@ -251,7 +235,8 @@ int main(int argc, char** argv) {
             if (compare(work, argv[i], t)) { bad++; files_bad++; } else files_ok++;
             free(t);
         }
-        printf("programs: %ld identical to nasm (.text, .data, .rodata bytes, .bss size, relocations), %ld different\n", files_ok, files_bad);
+        printf("programs: %ld identical to nasm (.text, .data, .rodata bytes, .bss size, relocations, symbols), %ld different\n", files_ok, files_bad);
+        printf("symbols (label, section, offset, global flag): %ld in the identical programs, %ld of them global\n", tot_syms, tot_globals);
         printf("branches to a label (only counted for identical programs):\n");
         printf("  jmp:  %ld short, %ld long\n  jcc:  %ld short, %ld long\n  call: %ld (always rel32)\n", tot_js, tot_jl, tot_cs, tot_cl, tot_calls);
         long tj = tot_js + tot_jl + tot_cs + tot_cl;

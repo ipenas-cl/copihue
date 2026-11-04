@@ -15,7 +15,9 @@ jobs:
         run: make CFLAGS="-O2 -Wall -Werror"
       - name: Regression suite (all tests and examples at -O0 and -O2, error messages, freestanding)
         run: make test
-      - name: x86-64 encoder x64.c and assembler asm.c (labels, jumps, call, .data/.rodata/.bss) against nasm -f elf64
+      - name: Regression suite with --native (the compiler writes the ELF itself, no nasm, no ld; -O0 and -O2, same golden files)
+        run: make native-run-test
+      - name: x86-64 encoder x64.c, assembler asm.c and ELF writer elf.c (labels, jumps, call, sections, executable structure) against nasm -f elf64
         run: make native-test
       - name: Network test (simple_api_server + curl + Copihue HTTP clients)
         run: make net-test

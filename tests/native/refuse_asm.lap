@@ -1,0 +1,6 @@
+// --native refuses user assembly: the text of asm("...") is not something the
+// built-in assembler is asked to check. Without --native it builds and runs.
+fn main() -> i32 {
+    asm("nop");
+    return 0;
+}

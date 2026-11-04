@@ -142,7 +142,7 @@ static int parse_expr(const char* text, Expr* x) {
                 else {
                     if (x->has_sym) return 0;
                     x->has_sym = 1; x->sym_neg = sign < 0;
-                    snprintf(x->sym, sizeof x->sym, "%s", term);
+                    snprintf(x->sym, sizeof x->sym, "%.95s", term);
                 }
             } else return 0;
         }

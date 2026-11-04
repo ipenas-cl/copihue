@@ -4,7 +4,9 @@
 // M3). It reads a whole program, resolves labels and relaxes jumps (rel8 when
 // it fits, rel32 when not, as nasm does), lays out .data, .rodata and .bss, and
 // returns the bytes of every section plus the relocations that remain, with the
-// same symbols and addends as `nasm -f elf64`. Not used by copihue yet.
+// same symbols and addends as `nasm -f elf64`. Also returns the symbol table
+// (which labels exist, which are `global`, their final offsets); elf.c (M4)
+// uses it to find `_start` and to patch relocations with final addresses.
 #ifndef COPIHUE_ASM_H
 #define COPIHUE_ASM_H
 
@@ -47,8 +49,21 @@ typedef struct {
     size_t nrel;
 } AsmSection;
 
+// A label of the program (every label, `global` or not; local labels are
+// `parent.child`). `off` is the final offset in its section, after jump
+// relaxation. Sorted by section, then offset, then name.
+typedef struct {
+    char* name;
+    int sec;            // ASM_SEC_*
+    long off;
+    int global;         // named by a `global` line
+    int line;           // source line of the definition
+} AsmSym;
+
 typedef struct {
     AsmSection sec[ASM_NSEC];
+    AsmSym* sym;
+    size_t nsym;
     AsmBranch* br;
     size_t nbr;
     // Branches to a label, after relaxation.
@@ -61,5 +76,8 @@ typedef struct {
 // and writes "line N: reason" into err; out holds nothing to free.
 int asm_assemble(const char* src, AsmOut* out, char* err, size_t errsz);
 void asm_free(AsmOut* out);
+
+// The label `name` (a `global` or not), or NULL.
+const AsmSym* asm_find_sym(const AsmOut* out, const char* name);
 
 #endif

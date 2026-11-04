@@ -1,0 +1,1 @@
+copihue: error: --native writes the hosted 64-bit executable only and cannot be combined with --freestanding
