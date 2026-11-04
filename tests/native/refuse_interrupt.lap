@@ -1,0 +1,8 @@
+// --native refuses interrupt functions (iretq, the CPU frame).
+interrupt fn timer() {
+    return;
+}
+
+fn main() -> i32 {
+    return 0;
+}

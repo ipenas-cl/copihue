@@ -22,11 +22,27 @@
 # 7. Context switch: tests/ctx, and QEMU must print COPIHUE.
 # 8. Relocatable objects: tests/link/parts, two -c files linked with ld.
 #    A second pair shares `module mem` across two objects (`mem__add`).
+# 9. --native refusals: tests/native/*.lap and the option combinations --native
+#    cannot take must fail with the message in tests/expected/native/<name>.err.
+#
+#   tests/run_tests.sh --native   only 1, with --native (the compiler writes the ELF itself, no nasm,
+#                                 no ld): same programs, -O0 and -O2, same golden files. Linux only.
 set -u
 cd "$(dirname "$0")/.."
 ROOT=$PWD
 CC=$ROOT/compiler/bootstrap-c/copihue
-UPDATE=0; [ "${1:-}" = "--update" ] && UPDATE=1
+UPDATE=0; NATIVE=0; NATFLAG=
+for a in "$@"; do
+  case $a in
+    --update) UPDATE=1 ;;
+    --native) NATIVE=1; NATFLAG=--native ;;
+    *) echo "usage: tests/run_tests.sh [--update | --native]" >&2; exit 2 ;;
+  esac
+done
+if [ $NATIVE = 1 ]; then
+  [ $UPDATE = 0 ] || { echo "--native does not regenerate golden files; run --update without it" >&2; exit 2; }
+  [ "$(uname -s)" = Linux ] || { echo "run_tests.sh --native runs the ELF executables the compiler writes, so it needs Linux (this is $(uname -s)); tests/x64/run_elf.sh checks their structure anywhere" >&2; exit 2; }
+fi
 gcc -O2 -Wall -o "$CC" compiler/bootstrap-c/copihue.c || exit 1
 
 # Programs that are not batch tests (servers / need a peer) or need input.
@@ -34,14 +50,17 @@ gcc -O2 -Wall -o "$CC" compiler/bootstrap-c/copihue.c || exit 1
 SKIP=" examples/simple_api_server.lap examples/realtime_api_monitor.lap tests/test_http_simple.lap tests/http/test_http_client.lap tests/http/test_http_post.lap tests/http/test_suite_http.lap "
 
 WORK=$(mktemp -d); trap 'rm -rf "$WORK"' EXIT
-pass=0; fail=0; failed=()
+pass=0; fail=0; failed=(); skipped=()
 
 mask() { sed -E 's/[0-9]{9,}/ADDR/g'; }
 
 run_program() {  # $1 = source, $2 = opt level -> prints masked stdout + rc
   local src=$1 opt=$2
-  ( cd "$WORK" && rm -f prog data.txt && "$CC" "$opt" -o prog "$ROOT/$src" >/dev/null 2>compile.err ) \
-    || { echo "COMPILE ERROR"; sed "s|$ROOT/||g" "$WORK/compile.err"; return; }
+  ( cd "$WORK" && rm -f prog data.txt && "$CC" "$opt" $NATFLAG -o prog "$ROOT/$src" >/dev/null 2>compile.err ) \
+    || {
+      if [ -n "$NATFLAG" ] && grep -q -e '--native does not take this program' "$WORK/compile.err"; then echo "NATIVE REFUSED"; return; fi
+      echo "COMPILE ERROR"; sed "s|$ROOT/||g" "$WORK/compile.err"; return
+    }
   ( cd "$WORK" && timeout 5 ./prog </dev/null 2>&1; echo "exit=$?" ) | mask
 }
 
@@ -51,17 +70,57 @@ check() {  # $1 = name, $2 = golden file, $3 = actual file
   else fail=$((fail+1)); failed+=("$1"); echo "FAIL $1"; [ -f "$2" ] && diff "$2" "$3" | head -10; fi
 }
 
-for src in $(ls tests/*.lap tests/*/*.lap examples/*.lap examples/*/*.lap examples/*/*/*.lap | grep -v -e '^tests/errors/' -e '^tests/freestanding/' -e "^tests/flat/" -e "^tests/boot/" -e '^tests/usermode/' -e '^tests/ctx/'); do
+for src in $(ls tests/*.lap tests/*/*.lap examples/*.lap examples/*/*.lap examples/*/*/*.lap | grep -v -e '^tests/errors/' -e '^tests/freestanding/' -e "^tests/flat/" -e "^tests/boot/" -e '^tests/usermode/' -e '^tests/ctx/' -e '^tests/native/'); do
   case "$SKIP" in *" $src "*) continue ;; esac
   golden=tests/expected/${src%.lap}.out
   run_program "$src" -O0 > "$WORK/o0"
   run_program "$src" -O2 > "$WORK/o2"
+  # --native refuses user assembly, naked/interrupt/syscall functions (a clear error, no fallback).
+  # Skipping is only fine for a program that has one of them; anything else is a failure.
+  if grep -q '^NATIVE REFUSED' "$WORK/o0" "$WORK/o2"; then
+    if grep -qE 'asm\(|naked|interrupt fn|syscall fn' "$src"; then
+      skipped+=("$src"); echo "skip $src: --native refuses it (user assembly or naked/interrupt/syscall function)"
+    else
+      fail=$((fail+1)); failed+=("$src (--native refused it)"); echo "FAIL $src: --native refused a program with none of those"
+    fi
+    continue
+  fi
   if ! cmp -s "$WORK/o0" "$WORK/o2"; then
     fail=$((fail+1)); failed+=("$src (-O0 vs -O2)"); echo "FAIL $src: -O0 and -O2 differ"; diff "$WORK/o0" "$WORK/o2" | head -10; continue
   fi
   grep -q "^COMPILE ERROR" "$WORK/o0" && { fail=$((fail+1)); failed+=("$src"); echo "FAIL $src:"; cat "$WORK/o0"; continue; }
   grep -qE "^exit=(12[4-9]|13[0-9]|14[0-9])$" "$WORK/o0" && { fail=$((fail+1)); failed+=("$src"); echo "FAIL $src: crashed or timed out ($(tail -1 "$WORK/o0"))"; continue; }
   check "$src" "$golden" "$WORK/o0"
+done
+
+if [ $NATIVE = 1 ]; then
+  rm -f "$CC"
+  echo
+  echo "passed: $pass  failed: $fail  skipped: ${#skipped[@]}  (programs only, built with --native)"
+  [ $fail = 0 ] || { printf '  %s\n' "${failed[@]}"; exit 1; }
+  exit 0
+fi
+
+# 9. --native refuses what the built-in assembler does not take, with a clear message,
+# and writes no file. Nothing is run, so this works on any system.
+for src in tests/native/*.lap; do
+  name=$(basename "$src" .lap)
+  rm -f "$WORK/nat.out" "$WORK/output.asm"
+  if ( cd "$WORK" && "$CC" --native -o nat.out "$ROOT/$src" >/dev/null 2>err.txt ); then
+    fail=$((fail+1)); failed+=("$src"); echo "FAIL $src: --native should have refused it"; continue
+  fi
+  if [ -e "$WORK/nat.out" ] || [ -e "$WORK/output.asm" ]; then
+    fail=$((fail+1)); failed+=("$src"); echo "FAIL $src: --native left a file behind"; continue
+  fi
+  sed "s|$ROOT/||g" "$WORK/err.txt" > "$WORK/err.norm"
+  check "$src (--native)" "tests/expected/native/$name.err" "$WORK/err.norm"
+done
+for combo in "-S" "-c" "--freestanding" "--flat 0x10000" "--boot"; do
+  tag=$(echo "$combo" | tr -d ' -' | tr -c 'A-Za-z0-9\n' _)
+  if ( cd "$WORK" && "$CC" --native $combo -o nat.out "$ROOT/tests/hello.lap" >/dev/null 2>err.txt ); then
+    fail=$((fail+1)); failed+=("--native $combo"); echo "FAIL --native $combo: should have been refused"; continue
+  fi
+  check "--native $combo" "tests/expected/native/combo_$tag.err" "$WORK/err.txt"
 done
 
 for src in tests/errors/*.lap; do

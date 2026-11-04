@@ -1,0 +1,2 @@
+copihue: error: --native does not take this program (line 2: a naked function);
+  build it without --native to use nasm and ld
