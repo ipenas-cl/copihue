@@ -61,8 +61,8 @@ void x64_classify(char* line, XLine* out) {
         if (!strcmp(w, "section") || !strcmp(w, "segment")) {
             char* sc = strchr(r, ';');
             if (sc) *sc = 0;
-            snprintf(out->dir, sizeof out->dir, "section %s", trim(r));
-        } else snprintf(out->dir, sizeof out->dir, "%s", w);
+            snprintf(out->dir, sizeof out->dir, "section %.23s", trim(r));
+        } else snprintf(out->dir, sizeof out->dir, "%.31s", w);
         return;
     }
     char* sc = strchr(p, ';');
