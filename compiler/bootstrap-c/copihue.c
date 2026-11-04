@@ -39,6 +39,12 @@ const char* g_flat_org = NULL;       // --flat ADDR: freestanding flat binary lo
 int g_flat_elf = 0;                  // --elf with --flat: ELF64 ET_EXEC of that image, named sections kept
 int g_boot = 0;                      // --boot: flat sector at 0x7C00, padded to 512, signature 0xAA55
 int g_reloc = 0;                     // -c: one ELF64 relocatable object (nasm -f elf64), no ld
+int g_native = 0;                    // --native: hosted ELF written by compiler/native, no nasm, no ld
+static char g_native_why[200];       // first construct --native cannot take (empty if none)
+static void native_note(int line, const char* what) {
+    if (g_native_why[0]) return;
+    snprintf(g_native_why, sizeof g_native_why, "line %d: %s", line, what);
+}
 
 static void print_source_line(int line, int col) {
     if (!g_src_text || line <= 0) return;
@@ -8955,6 +8961,7 @@ static int gen_core_builtin(Codegen* cg, AstNode* n) {
             return 1;
         }
         const char* src = n->children[0]->value;
+        native_note(n->line, "asm(\"...\") (user assembly)");
         emit(cg, "    ; inline asm\n    ");
         for (const char* c = src; *c; c++) {
             if (*c == ';') emit(cg, "\n    ");
@@ -19545,6 +19552,10 @@ void gen_func(Codegen* cg, AstNode* n) {
     int is_sys = (n->flags & AF_SYSCALL) != 0;
     int naked = (n->flags & AF_NAKED) != 0;
     int bits = n->bits;
+    if (naked) native_note(n->line, "a naked function");
+    if (is_int) native_note(n->line, "an interrupt function");
+    if (is_sys) native_note(n->line, "a syscall function");
+    if (bits == 16 || bits == 32) native_note(n->line, "a function with bits 16 or bits 32");
     // A pointer parameter is the CPU frame, not the integer error code.
     // error_code as the first field selects the #PF/#GP layout.
     int frame_ptr = 0;
@@ -20880,6 +20891,10 @@ static void usage(FILE* o) {
         "  -S                  only generate NASM assembly, do not assemble or link\n"
         "  -c                  one ELF64 relocatable object (nasm -f elf64), no ld;\n"
         "                      global definitions, extern declarations, no vstart\n"
+        "  --native            hosted program: write the ELF64 executable with the built-in\n"
+        "                      assembler, no nasm and no ld; refuses (it does not fall back)\n"
+        "                      freestanding, flat, boot, -c, -S, bits 16/32, naked, interrupt,\n"
+        "                      syscall functions and asm(\"...\")\n"
         "  --freestanding      no OS: no _start, no syscalls, no hosted builtins;\n"
         "                      emits assembly to be included by your own entry code (implies -S)\n"
         "  --checked           bounds-check []T and local arrays in --freestanding, --flat, and --boot\n"
@@ -21409,6 +21424,70 @@ static void check_traits(AstNode* prog, TypeTable* tt) {
     }
 }
 
+// --native. The encoder, the assembler and the ELF writer in compiler/native
+// are plain C files; they are included here so that one `gcc copihue.c` still
+// builds the compiler.
+// Their file-local helpers share some names with this file's and with each
+// other (emit, parse_expr, trim); rename those while each one is included.
+#define emit nat_emit
+#define parse_expr nat_parse_expr
+#define trim x64_trim
+#include "../native/x64.c"
+#undef trim
+#define trim line_trim
+#include "../native/x64_line.c"
+#undef trim
+#define trim asm_trim
+#include "../native/asm.c"
+#undef trim
+#include "../native/elf.c"
+#undef emit
+#undef parse_expr
+
+// Reads the whole file `path` into a NUL-terminated buffer.
+static char* read_whole_file(const char* path) {
+    FILE* f = fopen(path, "rb");
+    if (!f) return NULL;
+    fseek(f, 0, SEEK_END);
+    long n = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    char* buf = malloc((size_t)n + 1);
+    if (!buf) { fclose(f); return NULL; }
+    size_t got = fread(buf, 1, (size_t)n, f);
+    fclose(f);
+    buf[got] = 0;
+    return buf;
+}
+
+// The generated assembly in `asm_path` goes through compiler/native/asm.c and
+// elf.c into the executable `exe`. Returns 0 on success; on failure it has
+// printed why and nothing is left behind at `exe`.
+static int native_build(const char* asm_path, const char* exe, int verbose) {
+    char err[256];
+    char* text = read_whole_file(asm_path);
+    if (!text) { fprintf(stderr, COMPILER_BIN ": error: cannot read %s\n", asm_path); return 1; }
+    AsmOut ao;
+    if (asm_assemble(text, &ao, err, sizeof err) != 0) {
+        free(text);
+        fprintf(stderr, COMPILER_BIN ": error: --native cannot assemble this program (%s in %s);\n"
+                        "  build it without --native to use nasm and ld\n", err, asm_path);
+        return 1;
+    }
+    free(text);
+    remove(exe);
+    if (elf_write_exec(&ao, exe, err, sizeof err) != 0) {
+        fprintf(stderr, COMPILER_BIN ": error: --native cannot write the executable: %s\n", err);
+        remove(exe);
+        asm_free(&ao);
+        return 1;
+    }
+    if (verbose)
+        fprintf(stderr, "  wrote %s (native elf64: .text %zu, .data %zu, .rodata %zu, .bss %zu bytes)\n", exe,
+                ao.sec[ASM_SEC_TEXT].size, ao.sec[ASM_SEC_DATA].size, ao.sec[ASM_SEC_RODATA].size, ao.sec[ASM_SEC_BSS].size);
+    asm_free(&ao);
+    return 0;
+}
+
 int main(int argc, char** argv) {
     const char* inputs[MAX_LOADED];
     int ninputs = 0;
@@ -21422,6 +21501,7 @@ int main(int argc, char** argv) {
         else if (!strcmp(a, "-O2")) optimization_level = 2;
         else if (!strcmp(a, "-S")) want_asm = 1;
         else if (!strcmp(a, "-c")) g_reloc = 1;
+        else if (!strcmp(a, "--native")) g_native = 1;
         else if (!strcmp(a, "--freestanding")) g_freestanding = 1;
         else if (!strcmp(a, "--checked")) g_checked = 1;
         else if (!strcmp(a, "--elf")) g_flat_elf = 1;
@@ -21458,6 +21538,14 @@ int main(int argc, char** argv) {
     if (g_reloc && g_flat_org) {
         fprintf(stderr, COMPILER_BIN ": error: -c cannot be combined with --flat or --boot\n");
         return 2;
+    }
+    if (g_native) {
+        const char* bad = want_asm ? "-S" : g_reloc ? "-c" : g_boot ? "--boot" : g_flat_org ? "--flat"
+                        : g_flat_elf ? "--elf" : g_freestanding ? "--freestanding" : NULL;
+        if (bad) {
+            fprintf(stderr, COMPILER_BIN ": error: --native writes the hosted 64-bit executable only and cannot be combined with %s\n", bad);
+            return 2;
+        }
     }
     // --freestanding alone still stops at assembly. -c assembles an object
     // unless the user also passed -S. --flat and --boot assemble a raw image.
@@ -21534,6 +21622,18 @@ int main(int argc, char** argv) {
         }
         remove(asm_out);
         if (verbose) fprintf(stderr, "  wrote %s (elf64 relocatable)\n", exe_out);
+        return 0;
+    }
+
+    if (g_native) {
+        if (g_native_why[0]) {
+            fprintf(stderr, COMPILER_BIN ": error: --native does not take this program (%s);\n"
+                            "  build it without --native to use nasm and ld\n", g_native_why);
+            remove(asm_out);
+            return 1;
+        }
+        if (native_build(asm_out, exe_out, verbose) != 0) return 1;
+        remove(asm_out);
         return 0;
     }
 
