@@ -6280,6 +6280,19 @@ static void widen_to_dest(Codegen* cg, AstNode* rhs, const char* type_name) {
     widen_arith(cg, rhs, bits, sg);
 }
 
+// `x = e` for a scalar integer local or global. The statement form at -O2
+// places the right-hand side straight into the register of x (assign_direct)
+// without going through gen_expr, so the statement path calls this too.
+static void widen_assign(Codegen* cg, AstNode* n) {
+    if (!n || n->type != AST_ASSIGN || !n->name || n->child_count < 1 || n->qual) return;
+    Symbol* ws = symtab_lookup_symbol(cg->symtab, n->name);
+    GlobalVar* wg = !ws ? global_symtab_lookup(cg->global_symtab, n->name) : NULL;
+    if (ws && !ws->is_pointer && !ws->is_array)
+        widen_to_dest(cg, n->children[0], ws->type_name ? ws->type_name : "i64");
+    else if (wg && !wg->is_pointer && !wg->is_array)
+        widen_to_dest(cg, n->children[0], wg->type_name);
+}
+
 static int is_numeral(AstNode* n, long long* v) {
     if (!n) return 0;
     if (n->type == AST_NUMBER && n->value) { *v = atoll(n->value); return 1; }
@@ -12041,6 +12054,7 @@ static int assign_direct(Codegen* cg, AstNode* n) {
     Symbol* sym = symtab_lookup_symbol(cg->symtab, n->name);
     const char* rr = local_reg(sym);
     if (!rr) return 0;
+    widen_assign(cg, n);
     if (n->children[0]->type == AST_CALL && n->children[0]->name &&
         (!strcmp(n->children[0]->name, "atomic_load_acquire") ||
          !strcmp(n->children[0]->name, "atomic_load_seq_cst")) &&
@@ -13540,14 +13554,7 @@ void gen_expr(Codegen* cg, AstNode* n) {
                 return;
             }
         }
-        if (n->name && n->child_count > 0 && !n->qual) {
-            Symbol* ws = symtab_lookup_symbol(cg->symtab, n->name);
-            GlobalVar* wg = !ws ? global_symtab_lookup(cg->global_symtab, n->name) : NULL;
-            if (ws && !ws->is_pointer && !ws->is_array)
-                widen_to_dest(cg, n->children[0], ws->type_name ? ws->type_name : "i64");
-            else if (wg && !wg->is_pointer && !wg->is_array)
-                widen_to_dest(cg, n->children[0], wg->type_name);
-        }
+        widen_assign(cg, n);
         if (!assign_dest_narrow(cg, n) &&
             (assign_direct(cg, n) || assign_index(cg, n))) {
             Symbol* sym = n->name ? symtab_lookup_symbol(cg->symtab, n->name) : NULL;
