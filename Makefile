@@ -2,8 +2,8 @@
 #   make                 build ./copihue
 #   make test            regression suite (tests/run_tests.sh)
 #   make net-test        HTTP server/client integration test (needs curl)
-#   make native-test     x86-64 encoder and assembler (compiler/native) against nasm
-#   make native-asm-test only the assembler part (labels, jumps, call) of native-test
+#   make native-test     x86-64 encoder and assembler (compiler/native, M1-M3) against nasm
+#   make native-asm-test only the assembler part (labels, jumps, call, data sections) of native-test
 #   make bench           timed comparison in bench/ (not part of make test)
 #   make install         install to $(PREFIX)/bin (default ~/.local)
 PREFIX ?= $(HOME)/.local
