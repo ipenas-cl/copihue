@@ -5521,6 +5521,11 @@ static VTy ty_field(Codegen* cg, AstNode* n) {
 static int builtin_ret_ty(const char* f, VTy* out) {
     if (!f) return 0;
     if (!strcmp(f, "malloc")) { *out = ty_addr(); return 1; }
+    if (!strcmp(f, "read_rflags") || !strcmp(f, "irq_save") || !strcmp(f, "rdtsc") ||
+        !strcmp(f, "rdrand") || !strcmp(f, "rdseed")) {
+        *out = ty_from_spelled(NULL, "u64");
+        return 1;
+    }
     if (!strcmp(f, "bss_start") || !strcmp(f, "bss_end")) {
         *out = ty_from_spelled(NULL, "*u8");
         return 1;
@@ -6131,6 +6136,7 @@ static void check_builtin_args(Codegen* cg, AstNode* n) {
     if (!strcmp(f, "print_int") || !strcmp(f, "exit") || !strcmp(f, "malloc") ||
         !strcmp(f, "close") || !strcmp(f, "inb") || !strcmp(f, "inw") || !strcmp(f, "inl") ||
         !strcmp(f, "rdmsr") || !strcmp(f, "ltr") || !strcmp(f, "set_syscall_stack") ||
+        !strcmp(f, "irq_restore") ||
         !strcmp(f, "write_cr0") || !strcmp(f, "write_cr3") || !strcmp(f, "write_cr4")) {
         if ((!strcmp(f, "print_int") || !strcmp(f, "exit") || !strcmp(f, "malloc") || !strcmp(f, "close")) ? c >= 1 : c == 1)
             check_arg(cg, n->children[0], 0, f, ty_i64());
@@ -6151,6 +6157,11 @@ static void check_builtin_args(Codegen* cg, AstNode* n) {
     }
     if (!strcmp(f, "save_context") || !strcmp(f, "restore_context")) {
         if (c == 1) check_arg(cg, n->children[0], 0, f, ty_mem());
+        return;
+    }
+    // The success flag is stored as an 8-byte integer.
+    if (!strcmp(f, "rdrand") || !strcmp(f, "rdseed")) {
+        if (c == 1) check_arg(cg, n->children[0], 0, f, ty_from_spelled(cg, "*i64"));
         return;
     }
     if (is_atomic_rmw(f) || is_atomic_store(f)) {
@@ -8849,6 +8860,63 @@ static int gen_core_builtin(Codegen* cg, AstNode* n) {
         // CF as 0 or 1. No instruction between the flag and setc.
         if (legacy_bits()) emit(cg, "    setc al\n    movzx eax, al\n");
         else emit(cg, "    setc al\n    movzx rax, al\n");
+        return 1;
+    }
+    // RFLAGS in 64-bit code. read_rflags() is pushfq / pop rax. irq_save()
+    // reads it the same way and then clears IF; irq_restore(flags) pushes the
+    // saved value and popfq, so a section entered with IF=0 leaves with IF=0
+    // and sections nest. cli and popfq are ring 0: freestanding only.
+    if (!strcmp(f, "read_rflags") || !strcmp(f, "irq_save") || !strcmp(f, "irq_restore")) {
+        int one = !strcmp(f, "irq_restore");
+        int ring0 = strcmp(f, "read_rflags") != 0;
+        if (one && n->child_count != 1) {
+            diag_error(n->line, n->col, "irq_restore(flags) takes 1 argument");
+            return 1;
+        }
+        if (!one && n->child_count != 0) {
+            diag_error(n->line, n->col, "%s() takes no arguments", f);
+            return 1;
+        }
+        if (legacy_bits()) {
+            diag_error(n->line, n->col, "%s() is a 64-bit operation (RFLAGS); use pushfd()/popfd() in bits %d",
+                       f, g_fn_bits);
+            return 1;
+        }
+        if (ring0 && !g_freestanding) {
+            diag_error(n->line, n->col, "%s() is only available with --freestanding, --flat, or --boot", f);
+            return 1;
+        }
+        if (one) {
+            gen_expr(cg, n->children[0]);
+            emit(cg, "    push rax\n    popfq\n");
+        } else {
+            emit(cg, "    pushfq\n    pop rax\n");
+            if (f[0] == 'i') emit(cg, "    cli\n");
+        }
+        return 1;
+    }
+    // rdtsc() is the whole 64-bit counter: rdtsc writes edx:eax (zero-extended
+    // into rdx:rax), so shl/or joins them. In bits 16 / bits 32 it is the bare
+    // instruction and the high half stays in edx, as rdmsr does there.
+    if (!strcmp(f, "rdtsc")) {
+        if (n->child_count != 0) { diag_error(n->line, n->col, "rdtsc() takes no arguments"); return 1; }
+        emit(cg, "    rdtsc\n");
+        if (!legacy_bits()) emit(cg, "    shl rdx, 32\n    or rax, rdx\n");
+        return 1;
+    }
+    // rdrand(&ok) / rdseed(&ok): the random value is the result. *ok is
+    // stored as 1 when the instruction succeeded (CF=1) and 0 when it did not;
+    // then the value is 0 too (the instruction zeroes it). ok points at an
+    // 8-byte integer, e.g. `let ok: i64 = 0; let v = rdrand(&ok);`.
+    // The caller retries on 0. Not an exception: CPUID says whether it exists.
+    if (!strcmp(f, "rdrand") || !strcmp(f, "rdseed")) {
+        if (n->child_count != 1) { diag_error(n->line, n->col, "%s(&ok) takes 1 argument", f); return 1; }
+        if (legacy_bits()) {
+            diag_error(n->line, n->col, "%s() is a 64-bit operation; not available in bits %d", f, g_fn_bits);
+            return 1;
+        }
+        gen_expr(cg, n->children[0]);
+        emit(cg, "    mov rbx, rax\n    %s rax\n    setc dl\n    movzx rdx, dl\n    mov [rbx], rdx\n", f);
         return 1;
     }
     if (!strcmp(f, "cpuid") || !strcmp(f, "cpuid_edx")) {

@@ -1,0 +1,19 @@
+// rdtsc() is the full 64-bit time-stamp counter (edx:eax joined), so two
+// reads in a row increase and the difference is small. read_rflags() is
+// pushfq / pop: bit 1 of RFLAGS always reads as 1. Both are unprivileged.
+// -O0 and -O2 print the same lines.
+
+fn main() -> i32 {
+    let t1 = rdtsc();
+    let t2 = rdtsc();
+    let t3 = rdtsc();
+    if (t2 > t1) { println("up"); }
+    if (t3 > t2) { println("up"); }
+    if (t3 - t1 < 100000000) { println("near"); }
+    let hi = t1 >> 32;
+    if (hi > 0) { println("high half"); }
+    let f = read_rflags();
+    print_int(f & 2);
+    println("");
+    return 0;
+}

@@ -1,0 +1,4 @@
+// flags: --freestanding
+bits 32 naked fn k() {
+    eax = read_rflags();
+}

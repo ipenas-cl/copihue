@@ -1,0 +1,5 @@
+fn critical() -> i64 {
+    let saved = irq_save();
+    irq_restore(saved);
+    return 0;
+}
