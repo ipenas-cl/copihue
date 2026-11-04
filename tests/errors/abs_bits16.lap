@@ -1,0 +1,4 @@
+// flags: --freestanding
+bits 16 naked fn k() {
+    let a: u8 = *(0xB8000 as *u8);
+}

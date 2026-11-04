@@ -1,0 +1,4 @@
+tests/errors/abs_bits32.lap:3:7: error: address 0xFFFF800000002000 does not fit in bits 32; use a lower address
+      3 |     *(0xFFFF800000002000 as *u8) = 7;
+        |       ^
+1 error, compilation failed

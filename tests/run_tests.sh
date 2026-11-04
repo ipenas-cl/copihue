@@ -15,6 +15,8 @@
 #    the output must assemble with nasm, and contain no _start. A `syscall`
 #    instruction is allowed only when the source calls syscall().
 # 4. Flat binaries: tests/flat/*.lap at --flat 0x10000.
+# 4b. Absolute constant addresses outside disp32 (tests/*/abs64.lap): the asm
+#    holds the full address in a register and nasm gives no "exceeds bounds".
 # 5. Boot sectors: tests/boot/*.lap, and QEMU must print COPIHUE.
 # 6. User mode: tests/usermode, and QEMU must print USER.
 # 7. Context switch: tests/ctx, and QEMU must print COPIHUE.
@@ -108,6 +110,9 @@ done
 #    image; _start must be at offset 0 and the bytes must match the golden hexdump.
 for src in tests/flat/*.lap; do
   name=$(basename "$src" .lap)
+  # abs64 is checked on its assembly by section 4b: the bytes of a flat image
+  # depend on the NASM version, and there is no golden hexdump for it.
+  [ "$name" = abs64 ] && continue
   if ! ( cd "$WORK" && "$CC" --flat 0x10000 -o flat.bin "$ROOT/$src" 2>err.txt && "$CC" --flat 0x10000 -S -o flat.asm "$ROOT/$src" 2>>err.txt ); then
     fail=$((fail+1)); failed+=("$src"); echo "FAIL $src:"; cat "$WORK/err.txt"; continue
   fi
@@ -131,6 +136,38 @@ done
 # 6. tests/usermode: boot sector plus a flat kernel. QEMU must print USER.
 #    (org 0x7C00, signature 0xAA55). -O0 and -O2 must match. When QEMU is
 #    installed, the image is booted from the floppy and COM1 must show COPIHUE.
+# 4b. Absolute constant addresses that do not fit in a signed disp32 (0.42.4),
+#     in --freestanding and --flat, at -O0 and -O2. The asm must hold the full
+#     address in a register for 1, 2, 4 and 8 byte loads and stores, keep the
+#     disp32 form for 0xFFFFFFFF80010000, and nasm must not warn that a value
+#     exceeds bounds (that warning is the silent truncation).
+for mode in freestanding flat; do
+  if [ $mode = freestanding ]; then src=tests/freestanding/abs64.lap; flags="--freestanding"; fmt=elf64
+  else src=tests/flat/abs64.lap; flags="--flat 0x10000"; fmt=bin; fi
+  for opt in -O0 -O2; do
+    label="$src $opt (absolute addresses)"
+    if ! ( cd "$WORK" && "$CC" $opt $flags -S -o abs.asm "$ROOT/$src" 2>err.txt ); then
+      fail=$((fail+1)); failed+=("$label"); echo "FAIL $label:"; cat "$WORK/err.txt"; continue
+    fi
+    bad=""
+    for want in 'mov rax, 0xFFFF800000001000' 'mov rbx, 0xFFFF800000002000' 'mov rbx, 0xFFFF800000003000' \
+                'movzx rax, byte [rax]' 'movzx rax, word [rax]' 'mov eax, [rax]' 'mov rax, [rax]' \
+                'mov byte [rbx], 7' 'mov word [rbx], 7' 'mov dword [rbx], 7' 'mov qword [rbx], 7' \
+                'mov byte [rbx], al' 'mov word [rbx], ax' 'mov dword [rbx], eax' 'mov [rbx], rax' \
+                'movzx rax, byte [-2147418112]'; do
+      grep -qF -- "$want" "$WORK/abs.asm" || bad="$bad missing '$want';"
+    done
+    # No raw 64-bit constant may be left as a memory operand.
+    if grep -oE '\[-?[0-9]+\]' "$WORK/abs.asm" | tr -d '[]' \
+         | awk '$1 < -2147483648 || $1 > 2147483647 { f = 1 } END { exit !f }'; then
+      bad="$bad truncated address left as [N];"
+    fi
+    warn=$(nasm -f $fmt -o "$WORK/abs.out" "$WORK/abs.asm" 2>&1 | grep -E 'exceeds bounds')
+    [ -n "$warn" ] && bad="$bad nasm: $warn;"
+    if [ -n "$bad" ]; then fail=$((fail+1)); failed+=("$label"); echo "FAIL $label:$bad"; else pass=$((pass+1)); fi
+  done
+done
+
 for src in tests/boot/*.lap; do
   name=$(basename "$src" .lap)
   if ! ( cd "$WORK" && "$CC" --boot -o boot.bin "$ROOT/$src" 2>err.txt && "$CC" -O2 --boot -o boot2.bin "$ROOT/$src" 2>>err.txt ); then

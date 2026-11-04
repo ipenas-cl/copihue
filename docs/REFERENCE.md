@@ -1,4 +1,4 @@
-# Copihue Language Reference (v0.42.3)
+# Copihue Language Reference (v0.42.4)
 
 This document describes the language that `copihue` accepts today. Anything not listed here is not supported.
 Planned features are in the README roadmap.
@@ -373,6 +373,18 @@ Every read and every write of a volatile global is a memory operand. The compile
 `volatile` is part of the pointer type. `*volatile mut T` and `*mut volatile T` are both `*volatile T`. `mut` is not part of the type, so `*mut u8` and `*u8` still match. Assigning `*volatile T` to a non-volatile pointer is `expected *u8, found *volatile u8`. The other direction is allowed: `*u8` may initialize `*volatile u8`, and so may an array of `u8`. `*volatile i8` and `*volatile u8` are the same byte pointer. An integer literal still converts to any pointer, including `*volatile u32`. `as` is the explicit drop (`p as *u8`) and emits no instruction.
 
 What is guaranteed: each source-level read or write of a volatile global, a `*volatile` pointee, or a volatile field emits a memory instruction of that width, and the compiler does not reorder those accesses with each other. `-O2` does not delete one, fold one, or lift one out of a loop. What is not guaranteed: `volatile` alone is not a C memory model. Use the atomic builtins below for a protocol. A non-volatile access next to a volatile one can still be simplified. `let volatile` on a local scalar keeps that local in its stack slot when hosted `-O2` puts other scalars in registers. At `-O0`, and with `--freestanding`, `--flat`, or `--boot`, every local is already on the stack. The address of a volatile scalar or a volatile field is `*volatile T`, so `fetch_add(&cell, 1)` type-checks when `cell` is `let volatile cell: u64`.
+
+### Absolute addresses
+
+`*(0x1000 as *u8)` and `*(0x1000 as *u8) = v` read and write a constant address (`u8`/`u16`/`u32`/`u64` by the cast; a bare `*(0x1000)` is 8 bytes). The rule depends on the value of the constant, as the compiler reads it (a literal above `i64::MAX` wraps, so `0xFFFFFFFF80010000` is `-2146369536`):
+
+- In 64-bit code, a constant from `-0x80000000` to `0x7FFFFFFF` is the memory operand itself: `mov byte [-2146369536], 7`. That is the sign-extended disp32 form, and it is emitted exactly as before. `0xFFFFFFFF80010000` (the kernel's top 2 GiB) is that case.
+- Any other constant does not fit in a signed disp32. `0xFFFF800000001000`, `0x80000000`, and `0xFFFFFFFF` are that case. The full address goes in a register and the access is through it. A load is `mov rax, 0xFFFF800000001000` and then `movzx rax, byte [rax]` (or `movzx rax, word [rax]`, `mov eax, [rax]`, `mov rax, [rax]`). A store is `mov rbx, 0xFFFF800000002000` and then `mov byte [rbx], 7`; a stored value is computed into `rax` first, so `rbx` is set after it and the value cannot clobber it. `rbx` is the register the general store already uses, so a naked function must not expect it preserved.
+- In `bits 16` and `bits 32` there is no such form. A constant address above `0xFFFF` (`bits 16`) or `0xFFFFFFFF` (`bits 32`), or below `-0x8000` / `-0x80000000`, is a compile error with its line: `address 0xB8000 does not fit in bits 16; use a lower address`. In the same modes any other constant above 32 bits is `constant 0x100000000 does not fit in 32 bits (bits 32)`.
+
+The same check covers a displacement: `*((rbx + 0x100000000) as *u8)` is `displacement +0x100000000 does not fit in a signed 32-bit displacement` (and 16 or 32 bits in `bits 16` / `bits 32`). A named register assigned a constant that does not fit its width (`eax = 0x100000000`, `ax = 70000`) is `constant 0x11170 does not fit in ax (16 bits)`. A value that fits as signed or as unsigned is accepted (`al = 255` and `al = -1` both are).
+
+A pointer held in a variable (`let p: *u8 = 0xFFFF800000001000 as *u8`) was never affected: the constant is `mov rax, imm64` and the access goes through the pointer. The compiler never emits `[abs ...]`. Text inside `asm("...")` is passed to NASM as written and is not checked.
 
 ### Atomics
 

@@ -16,7 +16,7 @@
 
 // ==== NAMING (single place to change when the language is renamed) ====
 #define LANG_NAME     "Copihue"
-#define LANG_VERSION  "0.42.3"
+#define LANG_VERSION  "0.42.4"
 #define COMPILER_BIN  "copihue"
 #define SRC_EXT       ".lap"   /* Lapageria rosea, the copihue */
 #define OLD_SRC_EXT   ".cph"   /* v0.18.x extension, still accepted with a warning */
@@ -11994,6 +11994,13 @@ static void emit_reg_write(Codegen* cg, const char* name, int bits, int seg, Ast
         return;
     }
     if (rhs && rhs->type == AST_NUMBER && rhs->value) {
+        long long v;
+        // `mov ax, 70000` / `mov eax, 1<<32` keep the low bits in nasm with
+        // only a warning. The register is `bits` wide: signed or unsigned fits.
+        if (bits > 0 && bits < 64 && parse_i64(rhs->value, &v) &&
+            (v < -(1LL << (bits - 1)) || v > (1LL << bits) - 1))
+            diag_error(rhs->line, rhs->col, "constant 0x%llX does not fit in %s (%d bits)",
+                       (unsigned long long)v, name, bits);
         emit(cg, "    mov %s, %s\n", name, rhs->value);
         return;
     }
@@ -12022,6 +12029,33 @@ static int cast_pointee_size(AstNode* e, int* sz) {
     return 1;
 }
 
+// Range of a nasm absolute address or displacement that is not truncated:
+// disp32 with sign in 64-bit code, 16 or 32 bits in bits 16 / bits 32.
+static int addr_const_fits(long long v) {
+    if (!legacy_bits()) return fits_imm32_val(v);
+    if (g_fn_bits == 16) return v >= -32768LL && v <= 65535LL;
+    return v >= -2147483648LL && v <= 4294967295LL;
+}
+
+// A constant address that does not fit. In 64-bit code a register holds it
+// (`mov r64, imm64`) and the access goes through that register: returns 1.
+// bits 16 / bits 32 have no such form: a compile error with the line,
+// and -1 so the caller emits nothing. 0 is an address that fits.
+static int abs_addr_wide(AstNode* addr, long long* v) {
+    AstNode* e = addr;
+    long long x;
+    if (e && e->type == AST_CAST && e->child_count > 0) e = e->children[0];
+    if (!e || e->type != AST_NUMBER || !e->value || !parse_i64(e->value, &x)) return 0;
+    if (addr_const_fits(x)) return 0;
+    if (v) *v = x;
+    if (legacy_bits()) {
+        diag_error(e->line, e->col, "address 0x%llX does not fit in bits %d; use a lower address",
+                   (unsigned long long)x, g_fn_bits);
+        return -1;
+    }
+    return 1;
+}
+
 // A nasm memory operand that does not need the accumulator: a number,
 // a naked register, or `reg+disp` / `reg-disp`.
 static int mem_operand(AstNode* addr, char* buf, int n) {
@@ -12042,6 +12076,11 @@ static int mem_operand(AstNode* addr, char* buf, int n) {
         AstNode* b = e->children[1];
         if (a && a->type == AST_IDENT && a->name && mach_ok(mach_reg(a->name)) &&
             b && b->type == AST_NUMBER && b->value) {
+            long long d;
+            if (parse_i64(b->value, &d) && !addr_const_fits(e->op[0] == '-' ? -d : d))
+                diag_error(b->line, b->col, "displacement %s0x%llX does not fit in %s",
+                           e->op, (unsigned long long)d, legacy_bits() ? (g_fn_bits == 16 ? "16 bits" : "32 bits")
+                                                          : "a signed 32-bit displacement");
             snprintf(buf, n, "%s%s%s", a->name, e->op, b->value);
             return 1;
         }
@@ -12050,6 +12089,7 @@ static int mem_operand(AstNode* addr, char* buf, int n) {
 }
 
 static int emit_imm_store(Codegen* cg, AstNode* value, const char* mem, int el);
+static int imm_store_enc(int elem, long long v, long long* enc);
 
 static void emit_acc_store(Codegen* cg, const char* mem, int size, int line, int col) {
     if (size >= 8 && legacy_bits()) {
@@ -12092,6 +12132,25 @@ static void gen_mem_store(Codegen* cg, AstNode* n) {
         if (val) check_types(val, "", dst, expr_ty(cg, val));
     }
     char mem[80];
+    long long wide_v = 0;
+    int wide = addr ? abs_addr_wide(addr, &wide_v) : 0;
+    if (wide < 0) return;
+    if (wide) {
+        // The address does not fit in disp32: the full constant goes in rbx
+        // (the register the general store below also uses) and the access is
+        // [rbx]. A value is computed first, so it cannot clobber rbx.
+        long long iv, enc;
+        if (!val || val->type != AST_NUMBER || !parse_i64(val->value, &iv) ||
+            !imm_store_enc(sz, iv, &enc)) {
+            if (val) gen_expr(cg, peel_store_cast(val, sz * 8));
+            emit(cg, "    mov rbx, 0x%llX\n", (unsigned long long)wide_v);
+            emit_acc_store(cg, "rbx", sz, n->line, n->col);
+        } else {
+            emit(cg, "    mov rbx, 0x%llX\n", (unsigned long long)wide_v);
+            emit_imm_store(cg, val, "rbx", sz);
+        }
+        return;
+    }
     if (addr && mem_operand(addr, mem, sizeof mem)) {
         // `*(addr) = 0` must not `mov rax, 0`. The syscall result lives in rax
         // until the next expression that needs the accumulator.
@@ -13101,8 +13160,13 @@ void gen_expr(Codegen* cg, AstNode* n) {
     if (n->type != AST_INDEX && n->type != AST_ARRAY_ASSIGN) g_fwd_ok = 0;
     if (n->file) focus_file(n->file);
     if (n->type == AST_NUMBER) {
-        if (legacy_bits()) emit(cg, "    mov eax, %s\n", n->value);
-        else emit(cg, "    mov rax, %s\n", n->value);
+        long long nv;
+        if (legacy_bits()) {
+            if (n->value && parse_i64(n->value, &nv) && (nv < -2147483648LL || nv > 4294967295LL))
+                diag_error(n->line, n->col, "constant 0x%llX does not fit in 32 bits (bits %d)",
+                           (unsigned long long)nv, g_fn_bits);
+            emit(cg, "    mov eax, %s\n", n->value);
+        } else emit(cg, "    mov rax, %s\n", n->value);
     } else if (n->type == AST_STRING) {
         int slen = n->array_size;
         char* label = strtab_add(cg->strtab, n->value, slen);
@@ -13213,7 +13277,18 @@ void gen_expr(Codegen* cg, AstNode* n) {
         int vsz = 8, vsg = 0;
         int vpo = n->child_count > 0 && volatile_pointee_info(cg, n->children[0], &vsz, &vsg);
         char mem[80];
-        if (!vpo && n->child_count > 0 && mem_operand(n->children[0], mem, sizeof mem)) {
+        long long wide_v = 0;
+        int wide = (!vpo && n->child_count > 0) ? abs_addr_wide(n->children[0], &wide_v) : 0;
+        if (wide < 0) {
+            emit(cg, "    xor rax, rax\n");
+        } else if (wide) {
+            // The address does not fit in disp32: the full constant goes in rax
+            // and the load reads [rax] at the width of the cast.
+            int sz = 8;
+            cast_pointee_size(n->children[0], &sz);
+            emit(cg, "    mov rax, 0x%llX\n", (unsigned long long)wide_v);
+            emit_acc_load(cg, "rax", sz, n->line, n->col);
+        } else if (!vpo && n->child_count > 0 && mem_operand(n->children[0], mem, sizeof mem)) {
             int sz = legacy_bits() ? 4 : 8;
             cast_pointee_size(n->children[0], &sz);
             emit_acc_load(cg, mem, sz, n->line, n->col);

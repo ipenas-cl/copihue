@@ -1,0 +1,4 @@
+tests/errors/abs_reg16.lap:3:10: error: constant 0x11170 does not fit in ax (16 bits)
+      3 |     ax = 70000;
+        |          ^
+1 error, compilation failed

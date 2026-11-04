@@ -1,0 +1,4 @@
+tests/errors/abs_bits16.lap:3:19: error: address 0xB8000 does not fit in bits 16; use a lower address
+      3 |     let a: u8 = *(0xB8000 as *u8);
+        |                   ^
+1 error, compilation failed

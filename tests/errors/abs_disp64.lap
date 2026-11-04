@@ -1,0 +1,4 @@
+// flags: --freestanding
+naked fn k() {
+    *((rbx + 0x100000000) as *u8) = 7;
+}
