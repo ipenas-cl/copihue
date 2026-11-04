@@ -1,0 +1,4 @@
+tests/errors/abs_const32.lap:3:12: error: constant 0x100000000 does not fit in 32 bits (bits 32)
+      3 |     return 0x100000000;
+        |            ^
+1 error, compilation failed

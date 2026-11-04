@@ -1,0 +1,21 @@
+// Absolute constant addresses outside a signed disp32 in a --flat image
+// (0.42.4). Same rule as tests/freestanding/abs64.lap: the address goes in a
+// register and the access is through it. 0xFFFFFFFF80010000 still fits.
+
+fn _start() {
+    let a: u8 = *(0xFFFF800000001000 as *u8);
+    let b: u16 = *(0xFFFF800000001000 as *u16);
+    let c: u32 = *(0xFFFF800000001000 as *u32);
+    let d: u64 = *(0xFFFF800000001000 as *u64);
+    *(0xFFFF800000002000 as *u8) = 7;
+    *(0xFFFF800000002000 as *u16) = 7;
+    *(0xFFFF800000002000 as *u32) = 7;
+    *(0xFFFF800000002000 as *u64) = 7;
+    *(0xFFFF800000003000 as *u8) = a;
+    *(0xFFFF800000003000 as *u16) = b;
+    *(0xFFFF800000003000 as *u32) = c;
+    *(0xFFFF800000003000 as *u64) = d;
+    let n: u8 = *(0xFFFFFFFF80010000 as *u8);
+    *(0xFFFFFFFF80010000 as *u32) = 2;
+    while (1) { }
+}

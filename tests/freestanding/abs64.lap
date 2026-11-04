@@ -1,0 +1,47 @@
+// Absolute constant addresses that do not fit in a signed disp32 (0.42.4).
+// The full address goes in a register (`mov rax, imm64` for a load, `mov rbx,
+// imm64` for a store) and the access is [rax] / [rbx]. Loads and stores of
+// 1, 2, 4 and 8 bytes, a constant and a value as the stored thing. 0x80000000
+// and 0xFFFFFFFF are above INT32_MAX, so they take the register form too.
+// 0xFFFFFFFF80010000 is -2146369536: it fits and stays `[-2146369536]`.
+// tests/run_tests.sh greps this text and assembles it without warnings.
+
+fn loads() -> i64 {
+    let a: u8 = *(0xFFFF800000001000 as *u8);
+    let b: u16 = *(0xFFFF800000001000 as *u16);
+    let c: u32 = *(0xFFFF800000001000 as *u32);
+    let d: u64 = *(0xFFFF800000001000 as *u64);
+    return a as i64 + b as i64 + c as i64 + d as i64;
+}
+
+fn stores_const() {
+    *(0xFFFF800000002000 as *u8) = 7;
+    *(0xFFFF800000002000 as *u16) = 7;
+    *(0xFFFF800000002000 as *u32) = 7;
+    *(0xFFFF800000002000 as *u64) = 7;
+}
+
+fn stores_value(v: u64) {
+    *(0xFFFF800000003000 as *u8) = v as u8;
+    *(0xFFFF800000003000 as *u16) = v as u16;
+    *(0xFFFF800000003000 as *u32) = v as u32;
+    *(0xFFFF800000003000 as *u64) = v;
+}
+
+fn edges() -> i64 {
+    let a: u8 = *(0x80000000 as *u8);
+    *(0xFFFFFFFF as *u8) = 1;
+    return a as i64;
+}
+
+fn fits32() -> i64 {
+    let x: u8 = *(0xFFFFFFFF80010000 as *u8);
+    *(0xFFFFFFFF80010000 as *u32) = 2;
+    return x as i64;
+}
+
+fn main() -> i64 {
+    stores_const();
+    stores_value(3);
+    return loads() + edges() + fits32();
+}

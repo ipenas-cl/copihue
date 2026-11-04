@@ -1,0 +1,138 @@
+section .data
+section .text
+loads:
+    push rbp
+    mov rbp, rsp
+    sub rsp, __frame_loads
+    mov rax, 0xFFFF800000001000
+    movzx rax, byte [rax]
+    movzx rax, al
+    mov [rbp-8], rax
+    mov rax, 0xFFFF800000001000
+    movzx rax, word [rax]
+    movzx rax, ax
+    mov [rbp-16], rax
+    mov rax, 0xFFFF800000001000
+    mov eax, [rax]
+    mov eax, eax
+    mov [rbp-24], rax
+    mov rax, 0xFFFF800000001000
+    mov rax, [rax]
+    mov [rbp-32], rax
+    mov rax, [rbp-8]
+    push rax
+    mov rax, [rbp-16]
+    mov rbx, rax
+    pop rax
+    add rax, rbx
+    push rax
+    mov rax, [rbp-24]
+    mov rbx, rax
+    pop rax
+    add rax, rbx
+    push rax
+    mov rax, [rbp-32]
+    mov rbx, rax
+    pop rax
+    add rax, rbx
+    leave
+    ret
+    xor rax, rax
+    leave
+    ret
+__frame_loads equ 96
+stores_const:
+    push rbp
+    mov rbp, rsp
+    sub rsp, __frame_stores_const
+    mov rbx, 0xFFFF800000002000
+    mov byte [rbx], 7
+    mov rbx, 0xFFFF800000002000
+    mov word [rbx], 7
+    mov rbx, 0xFFFF800000002000
+    mov dword [rbx], 7
+    mov rbx, 0xFFFF800000002000
+    mov qword [rbx], 7
+    xor rax, rax
+    leave
+    ret
+__frame_stores_const equ 64
+stores_value:
+    push rbp
+    mov rbp, rsp
+    sub rsp, __frame_stores_value
+    mov [rbp-8], rdi
+    mov rax, [rbp-8]
+    mov rbx, 0xFFFF800000003000
+    mov byte [rbx], al
+    mov rax, [rbp-8]
+    mov rbx, 0xFFFF800000003000
+    mov word [rbx], ax
+    mov rax, [rbp-8]
+    mov rbx, 0xFFFF800000003000
+    mov dword [rbx], eax
+    mov rax, [rbp-8]
+    mov rbx, 0xFFFF800000003000
+    mov [rbx], rax
+    xor rax, rax
+    leave
+    ret
+__frame_stores_value equ 80
+edges:
+    push rbp
+    mov rbp, rsp
+    sub rsp, __frame_edges
+    mov rax, 0x80000000
+    movzx rax, byte [rax]
+    movzx rax, al
+    mov [rbp-8], rax
+    mov rbx, 0xFFFFFFFF
+    mov byte [rbx], 1
+    mov rax, [rbp-8]
+    leave
+    ret
+    xor rax, rax
+    leave
+    ret
+__frame_edges equ 80
+fits32:
+    push rbp
+    mov rbp, rsp
+    sub rsp, __frame_fits32
+    movzx rax, byte [-2147418112]
+    movzx rax, al
+    mov [rbp-8], rax
+    mov dword [-2147418112], 2
+    mov rax, [rbp-8]
+    leave
+    ret
+    xor rax, rax
+    leave
+    ret
+__frame_fits32 equ 80
+main:
+    push rbp
+    mov rbp, rsp
+    sub rsp, __frame_main
+    call stores_const
+    mov rax, 3
+    push rax
+    pop rdi
+    call stores_value
+    call loads
+    push rax
+    call edges
+    mov rbx, rax
+    pop rax
+    add rax, rbx
+    push rax
+    call fits32
+    mov rbx, rax
+    pop rax
+    add rax, rbx
+    leave
+    ret
+    xor rax, rax
+    leave
+    ret
+__frame_main equ 64
