@@ -4,82 +4,20 @@
 //   test_asm WORKDIR cases FILE.asm       blocks separated by a line `;---`, each one a program
 //   test_asm WORKDIR reject FILE.asm      blocks separated by `;---`; asm.c must refuse every one
 //
-// For each program nasm assembles the same text and the .text bytes and the
-// relocations of its object are compared with what asm.c returns. Relocations
-// to .data/.bss are compared by offset, type and section only: their addend
-// depends on the layout of the data, which is M3.
+// For each program nasm assembles the same text and what asm.c returns must
+// equal what its object holds: the bytes of .text, .data and .rodata, the size
+// of .bss, and the relocations of .text, .data and .rodata (offset, type,
+// symbol, addend). The alignment nasm gives each section is compared too, but
+// a difference there only counts and is printed (not checked against nasm 2.16).
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "../../compiler/native/asm.h"
+#include "nobj.h"
 
 static int nasm_major;
-
-static uint64_t rd(const uint8_t* p, int n) {
-    uint64_t v = 0;
-    for (int i = n - 1; i >= 0; i--) v = v << 8 | p[i];
-    return v;
-}
-
-typedef struct { int off, type; char sym[128]; int secsym; int64_t addend; } NRel;
-typedef struct {
-    uint8_t* raw; size_t rawn;
-    const uint8_t* text; size_t textn;
-    NRel* rel; size_t nrel;
-} NObj;
-
-static int read_file(const char* path, uint8_t** buf, size_t* n) {
-    FILE* f = fopen(path, "rb");
-    if (!f) return 0;
-    fseek(f, 0, SEEK_END); long l = ftell(f); fseek(f, 0, SEEK_SET);
-    *buf = malloc((size_t)l + 1);
-    *n = fread(*buf, 1, (size_t)l, f);
-    fclose(f);
-    return 1;
-}
-
-// Minimal ELF64 relocatable reader: .text bytes and .rela.text.
-static int load_obj(const char* path, NObj* o) {
-    memset(o, 0, sizeof *o);
-    if (!read_file(path, &o->raw, &o->rawn) || o->rawn < 64) return 0;
-    const uint8_t* e = o->raw;
-    uint64_t shoff = rd(e + 0x28, 8);
-    int shnum = (int)rd(e + 0x3C, 2), shstr = (int)rd(e + 0x3E, 2);
-#define SH(i, off, n) rd(e + shoff + (size_t)(i) * 64 + (off), n)
-    const char* names = (const char*)e + SH(shstr, 0x18, 8);
-    int itext = -1, irela = -1, isym = -1;
-    for (int i = 0; i < shnum; i++) {
-        const char* nm = names + SH(i, 0, 4);
-        if (!strcmp(nm, ".text")) itext = i;
-        else if (!strcmp(nm, ".rela.text")) irela = i;
-        else if (!strcmp(nm, ".symtab")) isym = i;
-    }
-    if (itext < 0) return 0;
-    o->text = e + SH(itext, 0x18, 8); o->textn = (size_t)SH(itext, 0x20, 8);
-    if (irela >= 0 && isym >= 0) {
-        const uint8_t* rp = e + SH(irela, 0x18, 8);
-        size_t rn = (size_t)SH(irela, 0x20, 8) / 24;
-        const uint8_t* sp = e + SH(isym, 0x18, 8);
-        const char* strt = (const char*)e + SH((int)SH(isym, 0x28, 4), 0x18, 8);
-        o->rel = calloc(rn ? rn : 1, sizeof *o->rel); o->nrel = rn;
-        for (size_t i = 0; i < rn; i++) {
-            NRel* r = &o->rel[i];
-            r->off = (int)rd(rp + i * 24, 8);
-            uint64_t info = rd(rp + i * 24 + 8, 8);
-            r->type = (int)(info & 0xFFFFFFFF);
-            r->addend = (int64_t)rd(rp + i * 24 + 16, 8);
-            const uint8_t* s = sp + (size_t)(info >> 32) * 24;
-            if ((rd(s + 4, 1) & 15) == 3) {            // STT_SECTION: name of the section
-                r->secsym = 1;
-                snprintf(r->sym, sizeof r->sym, "%s", names + SH((int)rd(s + 6, 2), 0, 4));
-            } else snprintf(r->sym, sizeof r->sym, "%s", strt + rd(s, 4));
-        }
-    }
-    return 1;
-#undef SH
-}
 
 static void detect_nasm(void) {
     FILE* p = popen("nasm -v 2>&1", "r");
@@ -98,11 +36,11 @@ static void for_nasm(const char* text, char* out, size_t outsz) {
     while (*p && o + 80 < outsz) {
         const char* nl = strchr(p, '\n');
         size_t len = nl ? (size_t)(nl - p) : strlen(p);
-        char line[512];
-        snprintf(line, sizeof line, "%.*s", (int)(len < 511 ? len : 511), p);
+        static char line[65536];
+        snprintf(line, sizeof line, "%.*s", (int)(len < sizeof line - 1 ? len : sizeof line - 1), p);
         int done = 0;
         if (nasm_major >= 3) {
-            XLine x; char tmp[512];
+            XLine x; static char tmp[65536];
             snprintf(tmp, sizeof tmp, "%s", line);
             x64_classify(tmp, &x);
             if (x.kind == XL_INSN && !x.has_label && !strncmp(x.text, "movsxd ", 7)) {
@@ -123,10 +61,47 @@ static void for_nasm(const char* text, char* out, size_t outsz) {
     out[o] = 0;
 }
 
-static long tot_js, tot_jl, tot_cs, tot_cl, tot_calls, tot_fits, max_rounds, tot_rel;
+static long tot_js, tot_jl, tot_cs, tot_cl, tot_calls, tot_fits, max_rounds;
 static long files_ok, files_bad, files_long;
+// Totals over the programs that are identical, per section: bytes and relocations.
+static long tot_bytes[ASM_NSEC], tot_rel[ASM_NSEC], tot_progs_with[ASM_NSEC], align_diff;
 
-static const char* secname(int s) { return s == ASM_SEC_TEXT ? ".text" : s == ASM_SEC_DATA ? ".data" : ".bss"; }
+static const char* const SEC_NAME[ASM_NSEC] = {".text", ".data", ".bss", ".rodata"};
+
+// Compare one section; returns 1 and prints when they differ.
+static int cmp_section(const char* name, int k, const AsmSection* a, const NSec* n) {
+    size_t an = a->size, nn = n->present ? n->n : 0;
+    if (k == ASM_SEC_BSS) {
+        if (an != nn) { printf("FAIL %s: .bss is %zu bytes (nasm %zu)\n", name, an, nn); return 1; }
+        return 0;
+    }
+    size_t m = an < nn ? an : nn, d = 0;
+    while (d < m && a->bytes[d] == n->b[d]) d++;
+    if (an != nn || d < m) {
+        printf("FAIL %s: %s is %zu bytes (nasm %zu); first difference at offset %zu\n", name, SEC_NAME[k], an, nn, d);
+        return 1;
+    }
+    return 0;
+}
+
+static int cmp_relocs(const char* name, int k, const AsmSection* a, const NSec* n) {
+    size_t nn = n->present ? n->nrel : 0;
+    if (a->nrel != nn) { printf("FAIL %s: %zu relocations in %s, nasm %zu\n", name, a->nrel, SEC_NAME[k], nn); return 1; }
+    for (size_t i = 0; i < a->nrel; i++) {
+        const AsmReloc* r = &a->rel[i]; const NRel* q = &n->rel[i];
+        const char* why = NULL;
+        if (r->off != q->off) why = "offset";
+        else if (r->type != q->type) why = "type";
+        else if (!q->secsym || strcmp(q->sym, r->sym)) why = "symbol";
+        else if (r->addend != q->addend) why = "addend";
+        if (why) {
+            printf("FAIL %s: relocation %zu of %s differs in %s (asm.c +%d type %d %s%+lld, nasm +%d type %d %s%+lld)\n", name, i, SEC_NAME[k], why,
+                   r->off, r->type, r->sym, (long long)r->addend, q->off, q->type, q->sym, (long long)q->addend);
+            return 1;
+        }
+    }
+    return 0;
+}
 
 // Returns 0 when asm.c and nasm agree on `text`.
 static int compare(const char* work, const char* name, const char* text) {
@@ -139,23 +114,31 @@ static int compare(const char* work, const char* name, const char* text) {
     for_nasm(text, nt, sz);
     fputs(nt, f); fclose(f); free(nt);
     snprintf(cmd, sizeof cmd, "nasm -f elf64 -w-all '%s/prog.asm' -o '%s/prog.o' 2>'%s/prog.err'", work, work, work);
-    if (system(cmd) != 0) { printf("FAIL %s: nasm refuses the program (see %s/prog.err)\n", name, work); return 1; }
+    if (system(cmd) != 0) {
+        char first[300] = "";
+        snprintf(p, sizeof p, "%s/prog.err", work);
+        FILE* ef = fopen(p, "r");
+        if (ef) { if (!fgets(first, sizeof first, ef)) first[0] = 0; fclose(ef); }
+        printf("FAIL %s: nasm refuses the program (see %s/prog.err): %s", name, work, first);
+        if (!strchr(first, '\n')) printf("\n");
+        return 1;
+    }
     snprintf(p, sizeof p, "%s/prog.o", work);
     NObj n;
-    if (!load_obj(p, &n)) { printf("FAIL %s: cannot read nasm object\n", name); return 1; }
+    if (!nobj_load(p, &n)) { printf("FAIL %s: cannot read nasm object\n", name); return 1; }
     AsmOut a; char err[256];
-    if (asm_assemble(text, &a, err, sizeof err)) { printf("FAIL %s: asm.c refuses: %s\n", name, err); return 1; }
+    if (asm_assemble(text, &a, err, sizeof err)) { printf("FAIL %s: asm.c refuses: %s\n", name, err); nobj_free(&n); return 1; }
     int bad = 0;
-    size_t m = a.ntext < n.textn ? a.ntext : n.textn, d = 0;
-    while (d < m && a.text[d] == n.text[d]) d++;
-    if (a.ntext != n.textn || d < m) {
-        printf("FAIL %s: .text is %zu bytes (nasm %zu); first difference at offset %zu\n", name, a.ntext, n.textn, d);
+    const AsmSection* at = &a.sec[ASM_SEC_TEXT];
+    if (cmp_section(name, ASM_SEC_TEXT, at, &n.s[ASM_SEC_TEXT])) {
+        size_t m = at->size < n.s[0].n ? at->size : n.s[0].n, d = 0;
+        while (d < m && at->bytes[d] == n.s[0].b[d]) d++;
+        bad = 1;
         for (size_t i = a.nbr; i-- > 0;)
             if (a.br[i].addr <= (long)d) {
                 printf("  last branch before it: line %d at %ld, asm.c %s\n", a.br[i].line, a.br[i].addr, a.br[i].islong ? "long" : "short");
                 break;
             }
-        bad = 1;
         // Which jumps does nasm lay out differently? Read its listing.
         snprintf(cmd, sizeof cmd, "nasm -f elf64 -w-all -l '%s/prog.lst' '%s/prog.asm' -o '%s/prog2.o' >/dev/null 2>&1", work, work, work);
         snprintf(p, sizeof p, "%s/prog.lst", work);
@@ -179,32 +162,28 @@ static int compare(const char* work, const char* name, const char* text) {
             if (lf) fclose(lf);
         }
     }
+    for (int k = 1; k < ASM_NSEC && !bad; k++) bad = cmp_section(name, k, &a.sec[k], &n.s[k]);
+    for (int k = 0; k < ASM_NSEC && !bad; k++) bad = cmp_relocs(name, k, &a.sec[k], &n.s[k]);
     if (!bad) {
-        if (a.nrel != n.nrel) { printf("FAIL %s: %zu relocations, nasm %zu\n", name, a.nrel, n.nrel); bad = 1; }
-        else for (size_t i = 0; i < a.nrel && !bad; i++) {
-            const AsmReloc* r = &a.rel[i]; const NRel* q = &n.rel[i];
-            const char* why = NULL;
-            if (r->off != q->off) why = "offset";
-            else if (r->type != q->type) why = "type";
-            else if (r->sec != ASM_SEC_TEXT) {                      // data: section only
-                if (!q->secsym || strcmp(q->sym, secname(r->sec))) why = "section";
-            } else if (!q->secsym || strcmp(q->sym, ".text") || r->addend != q->addend) why = "text target";
-            if (why) { printf("FAIL %s: relocation %zu differs in %s (asm.c %s%+lld, nasm %s%+lld)\n", name, i, why, r->sym, (long long)r->addend, q->sym, (long long)q->addend); bad = 1; }
+        for (int k = 0; k < ASM_NSEC; k++) {
+            const NSec* q = &n.s[k];
+            // sh_addralign of a section nasm wrote (it writes .data/.bss even when empty)
+            if (q->present && a.sec[k].present && (uint64_t)a.sec[k].align != q->align) { align_diff++; printf("  note %s: %s alignment %d (nasm %llu)\n", name, SEC_NAME[k], a.sec[k].align, (unsigned long long)q->align); }
+            tot_bytes[k] += (long)a.sec[k].size; tot_rel[k] += (long)a.sec[k].nrel;
+            if (a.sec[k].size) tot_progs_with[k]++;
         }
-    }
-    if (!bad) {
         tot_js += a.jmp_short; tot_jl += a.jmp_long; tot_cs += a.jcc_short; tot_cl += a.jcc_long;
-        tot_calls += a.calls; tot_fits += a.long_fits; tot_rel += (long)a.nrel;
+        tot_calls += a.calls; tot_fits += a.long_fits;
         if (a.relax_rounds > max_rounds) max_rounds = a.relax_rounds;
         if (a.jmp_long + a.jcc_long) files_long++;
     }
-    asm_free(&a); free(n.raw); free(n.rel);
+    asm_free(&a); nobj_free(&n);
     return bad;
 }
 
 static char* slurp(const char* path) {
     uint8_t* b; size_t n;
-    if (!read_file(path, &b, &n)) return NULL;
+    if (!nobj_read_file(path, &b, &n)) return NULL;
     b[n] = 0;
     return (char*)b;
 }
@@ -272,13 +251,17 @@ int main(int argc, char** argv) {
             if (compare(work, argv[i], t)) { bad++; files_bad++; } else files_ok++;
             free(t);
         }
-        printf("programs: %ld identical to nasm, %ld different\n", files_ok, files_bad);
+        printf("programs: %ld identical to nasm (.text, .data, .rodata bytes, .bss size, relocations), %ld different\n", files_ok, files_bad);
         printf("branches to a label (only counted for identical programs):\n");
         printf("  jmp:  %ld short, %ld long\n  jcc:  %ld short, %ld long\n  call: %ld (always rel32)\n", tot_js, tot_jl, tot_cs, tot_cl, tot_calls);
         long tj = tot_js + tot_jl + tot_cs + tot_cl;
         if (tj) printf("  jmp+jcc: %ld, nasm leaves %ld long (%.2f%%) and %ld short (%.2f%%)\n", tj, tot_jl + tot_cl, 100.0 * (double)(tot_jl + tot_cl) / (double)tj, tot_js + tot_cs, 100.0 * (double)(tot_js + tot_cs) / (double)tj);
         printf("  programs with at least one long jmp/jcc: %ld; long ones whose final displacement fits rel8: %ld\n", files_long, tot_fits);
-        printf("  most layout passes in one program: %ld; relocations left in .text (all programs): %ld\n", max_rounds, tot_rel);
+        printf("  most layout passes in one program: %ld\n", max_rounds);
+        printf("sections, summed over the identical programs:\n");
+        for (int k = 0; k < ASM_NSEC; k++)
+            printf("  %-7s %9ld bytes%s, %6ld relocations, in %ld programs\n", SEC_NAME[k], tot_bytes[k], k == ASM_SEC_BSS ? " (size)" : "", tot_rel[k], tot_progs_with[k]);
+        printf("  section alignment different from nasm: %ld (informative, see test_asm.c)\n", align_diff);
     } else {
         char* t = slurp(argv[3]);
         if (!t) { perror(argv[3]); return 2; }
