@@ -68,3 +68,4 @@ bench/src/*.s
 compiler/bootstrap-c/copihue
 data.txt
 data_copy.txt
+/cop-dev
