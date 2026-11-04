@@ -1,0 +1,29 @@
+// div_raw(a, b) and rem_raw(a, b) divide without the zero test: same
+// quotient and remainder as `/` and `%` (truncating toward zero) for a
+// non-zero divisor. `/` and `%` by zero are still 0. A zero divisor in
+// div_raw would raise #DE (SIGFPE here), so it is only built, not run.
+// -O0 and -O2 print the same lines.
+
+fn quot(a: i64, b: i64) -> i64 { return div_raw(a, b); }
+fn rest(a: i64, b: i64) -> i64 { return rem_raw(a, b); }
+
+fn main() -> i32 {
+    let z: i64 = 0;
+    print_int(div_raw(17, 5));
+    println("");
+    print_int(rem_raw(17, 5));
+    println("");
+    print_int(div_raw(0 - 17, 5));
+    println("");
+    print_int(rem_raw(0 - 17, 5));
+    println("");
+    print_int(quot(100, 7) + rest(100, 7));
+    println("");
+    print_int(17 / 5 - div_raw(17, 5));
+    println("");
+    print_int(17 / z);
+    println("");
+    print_int(17 % z);
+    println("");
+    return 0;
+}

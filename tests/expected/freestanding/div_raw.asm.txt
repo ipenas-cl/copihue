@@ -1,0 +1,209 @@
+section .data
+section .text
+guarded:
+    push rbp
+    mov rbp, rsp
+    sub rsp, __frame_guarded
+    mov [rbp-8], rdi
+    mov [rbp-16], rsi
+    mov rax, [rbp-8]
+    push rax
+    mov rax, [rbp-16]
+    mov rbx, rax
+    pop rax
+    test rbx, rbx
+    jnz .L0
+    xor rax, rax
+    jmp .L0_end
+.L0:
+    cqo
+    idiv rbx
+.L0_end:
+    leave
+    ret
+    xor rax, rax
+    leave
+    ret
+__frame_guarded equ 80
+guarded_rem:
+    push rbp
+    mov rbp, rsp
+    sub rsp, __frame_guarded_rem
+    mov [rbp-8], rdi
+    mov [rbp-16], rsi
+    mov rax, [rbp-8]
+    push rax
+    mov rax, [rbp-16]
+    mov rbx, rax
+    pop rax
+    test rbx, rbx
+    jnz .L1
+    xor rax, rax
+    jmp .L1_end
+.L1:
+    cqo
+    idiv rbx
+    mov rax, rdx  ; Move remainder to rax
+.L1_end:
+    leave
+    ret
+    xor rax, rax
+    leave
+    ret
+__frame_guarded_rem equ 80
+raw:
+    push rbp
+    mov rbp, rsp
+    sub rsp, __frame_raw
+    mov [rbp-8], rdi
+    mov [rbp-16], rsi
+    mov rax, [rbp-8]
+    push rax
+    mov rax, [rbp-16]
+    pop rdx
+    mov rbx, rax
+    mov rax, rdx
+    cqo
+    idiv rbx
+    leave
+    ret
+    xor rax, rax
+    leave
+    ret
+__frame_raw equ 80
+raw_rem:
+    push rbp
+    mov rbp, rsp
+    sub rsp, __frame_raw_rem
+    mov [rbp-8], rdi
+    mov [rbp-16], rsi
+    mov rax, [rbp-8]
+    push rax
+    mov rax, [rbp-16]
+    pop rdx
+    mov rbx, rax
+    mov rax, rdx
+    cqo
+    idiv rbx
+    mov rax, rdx
+    leave
+    ret
+    xor rax, rax
+    leave
+    ret
+__frame_raw_rem equ 80
+raw_nested:
+    push rbp
+    mov rbp, rsp
+    sub rsp, __frame_raw_nested
+    mov [rbp-8], rdi
+    mov [rbp-16], rsi
+    mov rax, [rbp-8]
+    push rax
+    mov rax, 1
+    mov rbx, rax
+    pop rax
+    add rax, rbx
+    push rax
+    mov rax, [rbp-16]
+    push rax
+    mov rax, 7
+    pop rdx
+    mov rbx, rax
+    mov rax, rdx
+    cqo
+    idiv rbx
+    mov rax, rdx
+    pop rdx
+    mov rbx, rax
+    mov rax, rdx
+    cqo
+    idiv rbx
+    push rax
+    mov rax, 1
+    mov rbx, rax
+    pop rax
+    add rax, rbx
+    leave
+    ret
+    xor rax, rax
+    leave
+    ret
+__frame_raw_nested equ 80
+bits 32
+raw32:
+    push ebx
+    push eax
+    push edx
+    mov eax, ecx
+    mov ebx, eax
+    pop edx
+    pop eax
+    push edx
+    cdq
+    idiv ebx
+    pop edx
+    pop ebx
+    push ebx
+    push eax
+    push edx
+    mov eax, ecx
+    mov ebx, eax
+    pop edx
+    pop eax
+    push edx
+    cdq
+    idiv ebx
+    mov eax, edx
+    pop edx
+    pop ebx
+    mov edx, eax
+    ret
+bits 64
+bits 32
+raw32u:
+    push ebx
+    push eax
+    push edx
+    mov eax, ecx
+    mov ebx, eax
+    pop edx
+    pop eax
+    push edx
+    xor edx, edx
+    div ebx
+    pop edx
+    pop ebx
+    push ebx
+    push eax
+    push edx
+    mov eax, ecx
+    mov ebx, eax
+    pop edx
+    pop eax
+    push edx
+    xor edx, edx
+    div ebx
+    mov eax, edx
+    pop edx
+    pop ebx
+    mov edx, eax
+    ret
+bits 64
+bits 16
+raw16:
+    movzx eax, ax
+    push ebx
+    push eax
+    push edx
+    movzx eax, cx
+    mov ebx, eax
+    pop edx
+    pop eax
+    push edx
+    cdq
+    idiv ebx
+    pop edx
+    pop ebx
+    ret
+bits 64

@@ -5527,6 +5527,7 @@ static int builtin_ret_ty(const char* f, VTy* out) {
         !strcmp(f, "open") || !strcmp(f, "read") || !strcmp(f, "write") || !strcmp(f, "close") ||
         !strcmp(f, "inb") || !strcmp(f, "inw") || !strcmp(f, "inl") ||
         !strcmp(f, "outb") || !strcmp(f, "outw") || !strcmp(f, "outl") ||
+        !strcmp(f, "div_raw") || !strcmp(f, "rem_raw") ||
         !strcmp(f, "rdmsr") || !strcmp(f, "wrmsr") || !strcmp(f, "ltr") ||
         !strcmp(f, "read_cr0") || !strcmp(f, "read_cr2") || !strcmp(f, "read_cr3") || !strcmp(f, "read_cr4") ||
         !strcmp(f, "write_cr0") || !strcmp(f, "write_cr3") || !strcmp(f, "write_cr4") ||
@@ -6131,7 +6132,8 @@ static void check_builtin_args(Codegen* cg, AstNode* n) {
             check_arg(cg, n->children[0], 0, f, ty_i64());
         return;
     }
-    if (!strcmp(f, "outb") || !strcmp(f, "outw") || !strcmp(f, "outl") || !strcmp(f, "wrmsr")) {
+    if (!strcmp(f, "outb") || !strcmp(f, "outw") || !strcmp(f, "outl") || !strcmp(f, "wrmsr") ||
+        !strcmp(f, "div_raw") || !strcmp(f, "rem_raw")) {
         if (c == 2) {
             check_arg(cg, n->children[0], 0, f, ty_i64());
             check_arg(cg, n->children[1], 1, f, ty_i64());
@@ -8427,6 +8429,33 @@ static int gen_core_builtin(Codegen* cg, AstNode* n) {
             else emit(cg, "    mov rax, %d\n", off);
             return 1;
         }
+    }
+    // div_raw(a, b) / rem_raw(a, b): the same idiv (div for a u32 operand in
+    // bits 16 / bits 32) that `/` and `%` use, without the test for b == 0.
+    // b == 0 raises #DE, so the program can provoke it on purpose.
+    if (!strcmp(f, "div_raw") || !strcmp(f, "rem_raw")) {
+        if (n->child_count != 2) { diag_error(n->line, n->col, "%s(a, b) takes 2 arguments", f); return 1; }
+        int rem = f[0] == 'r';
+        if (legacy_bits()) {
+            VTy ta = expr_ty(cg, n->children[0]), tb = expr_ty(cg, n->children[1]);
+            VTy t = ty_int_result(ta, tb, 0);
+            int u32 = t.kind == VK_INT && !t.sg && t.bits >= 32 && t.bits < 64;
+            // Same frame as a binary operator: ebx is saved, edx survives.
+            gen_expr(cg, n->children[0]);
+            emit(cg, "    push ebx\n    push eax\n    push edx\n");
+            gen_expr(cg, n->children[1]);
+            emit(cg, "    mov ebx, eax\n    pop edx\n    pop eax\n");
+            emit(cg, "    push edx\n");
+            if (u32) emit(cg, "    xor edx, edx\n    div ebx\n");
+            else emit(cg, "    cdq\n    idiv ebx\n");
+            if (rem) emit(cg, "    mov eax, edx\n");
+            emit(cg, "    pop edx\n    pop ebx\n");
+        } else {
+            gen_two_args(cg, n);                 // rdx = a, rax = b
+            emit(cg, "    mov rbx, rax\n    mov rax, rdx\n    cqo\n    idiv rbx\n");
+            if (rem) emit(cg, "    mov rax, rdx\n");
+        }
+        return 1;
     }
     if (!strcmp(f, "outb") || !strcmp(f, "outw") || !strcmp(f, "outl")) {
         if (n->child_count != 2) { diag_error(n->line, n->col, "%s(port, value) takes 2 arguments", f); return 1; }

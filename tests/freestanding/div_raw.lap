@@ -1,0 +1,39 @@
+// also-o2
+// div_raw(a, b) and rem_raw(a, b) are the idiv (or div, for a u32 operand
+// in bits 16 / bits 32) of `/` and `%` with no test for b == 0, so b == 0
+// raises #DE. The golden assembly shows the guard on `/` and none on div_raw.
+// Assembled, not run.
+
+fn guarded(a: i64, b: i64) -> i64 {
+    return a / b;
+}
+
+fn guarded_rem(a: i64, b: i64) -> i64 {
+    return a % b;
+}
+
+fn raw(a: i64, b: i64) -> i64 {
+    return div_raw(a, b);
+}
+
+fn raw_rem(a: i64, b: i64) -> i64 {
+    return rem_raw(a, b);
+}
+
+fn raw_nested(a: i64, b: i64) -> i64 {
+    return div_raw(a + 1, rem_raw(b, 7)) + 1;
+}
+
+bits 32 naked fn raw32(a: i32, b: i32) {
+    eax = div_raw(a, b);
+    edx = rem_raw(a, b);
+}
+
+bits 32 naked fn raw32u(a: u32, b: u32) {
+    eax = div_raw(a, b);
+    edx = rem_raw(a, b);
+}
+
+bits 16 naked fn raw16(a: i32, b: i32) {
+    ax = div_raw(a, b);
+}
