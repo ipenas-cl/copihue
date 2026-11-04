@@ -1,4 +1,4 @@
-// Assembler for the hosted NASM text: labels, jump relaxation, call. See asm.h.
+// Assembler for the hosted NASM text: labels, jump relaxation, call, data sections. See asm.h.
 #include "asm.h"
 
 #include <ctype.h>
@@ -30,16 +30,24 @@ typedef struct Sym {
     char* name;
     int sec;
     long item;          // .text: index of the item that follows the label
+    long off;           // other sections: offset of the label
     int global, line;
     struct Sym* next;
 } Sym;
 
 typedef struct { char* name; int64_t v; int line; } Equ;
 
+// A relocation whose field is in .data or .rodata; the target is resolved after .text is laid out.
+typedef struct { int in; size_t off; int type; char* sym; int64_t addend; int line; } DReloc;
+
 typedef struct {
     char* err; size_t errsz;
     Item* it; long nit, cap;
     uint8_t* pool; size_t npool, cappool;
+    uint8_t* dbuf[ASM_NSEC]; size_t dcap[ASM_NSEC];   // .data and .rodata contents
+    size_t dpos[ASM_NSEC];                             // bytes so far in .data, .rodata, .bss
+    int salign[ASM_NSEC], present[ASM_NSEC];
+    DReloc* dr; size_t ndr, capdr;
     Sym** tab; size_t ntab;
     Equ* equ; int nequ, capequ;
     char** glob; int nglob, capglob;
@@ -141,11 +149,38 @@ static char* dir_args(char* line, const XLine* x) {
     return trim(p);
 }
 
-static int parse_int(const char* s, int64_t* v) {
-    char* e;
+// A decimal or 0x hexadecimal integer with an optional leading '-' (nasm reads
+// a leading 0 as decimal, so no octal). *big is set when the value is above
+// INT64_MAX (only a 64-bit datum takes it); *v then holds its two's complement.
+static int parse_num(const char* s, int64_t* v, int* big) {
+    int neg = 0, hex = 0;
+    if (*s == '-') { neg = 1; s++; }
+    if (s[0] == '0' && s[1] == 'x') { hex = 1; s += 2; }
     if (!*s) return 0;
-    *v = strtoll(s, &e, 0);
-    return *e == 0;
+    uint64_t u = 0;
+    for (; *s; s++) {
+        int d;
+        if (*s >= '0' && *s <= '9') d = *s - '0';
+        else if (hex && ((*s | 32) >= 'a' && (*s | 32) <= 'f')) d = (*s | 32) - 'a' + 10;
+        else return 0;
+        uint64_t base = hex ? 16 : 10;
+        if (u > (UINT64_MAX - (uint64_t)d) / base) return 0;
+        u = u * base + (uint64_t)d;
+    }
+    *big = 0;
+    if (neg) {
+        if (u > (uint64_t)INT64_MAX + 1) return 0;
+        *v = (int64_t)(0 - u);
+    } else {
+        *big = u > (uint64_t)INT64_MAX;
+        *v = (int64_t)u;
+    }
+    return 1;
+}
+
+static int parse_int(const char* s, int64_t* v) {
+    int big;
+    return parse_num(s, v, &big) && !big;
 }
 
 // Full name of a label reference: `.x` belongs to the last non-local label.
@@ -163,6 +198,7 @@ static int define_label(Ctx* c, int line, const char* full, int sec) {
     if (equ_find(c, full, &v)) return fail(c, line, "'%s' is both a label and an equ", full);
     Sym* s = calloc(1, sizeof *s);
     s->name = dup(full); s->sec = sec; s->item = c->nit; s->line = line;
+    s->off = sec == ASM_SEC_TEXT ? 0 : (long)c->dpos[sec];
     unsigned h = hash(full) % c->ntab;
     s->next = c->tab[h]; c->tab[h] = s;
     return 0;
@@ -210,6 +246,177 @@ static int collect_equs(Ctx* c, const char* src) {
     return 0;
 }
 
+// ---- data directives (M3) ----------------------------------------------------
+
+typedef struct { int64_t v; char sym[256]; int has_sym; } DVal;
+
+static int ident_start(int ch) { return isalpha(ch) || ch == '_' || ch == '.'; }
+static int ident_part(int ch) { return isalnum(ch) || ch == '_' || ch == '.' || ch == '$' || ch == '@' || ch == '#' || ch == '~'; }
+
+// One value of db/dw/dd/dq: an integer, an `equ` constant, or a label with an
+// optional +/- integer (dd and dq only). `s` is trimmed.
+static int parse_dval(Ctx* c, int line, const char* parent, const char* dir, int w, char* s, DVal* out) {
+    memset(out, 0, sizeof *out);
+    int64_t v;
+    if (ident_start((unsigned char)*s)) {
+        char* e = s;
+        while (ident_part((unsigned char)*e)) e++;
+        char save = *e;
+        *e = 0;
+        char name[256];
+        snprintf(name, sizeof name, "%s", s);
+        *e = save;
+        char* rest = trim(e);
+        int64_t off = 0;
+        if (*rest) {
+            int sign = *rest == '-' ? -1 : *rest == '+' ? 1 : 0;
+            if (!sign || !parse_int(trim(rest + 1), &off)) return fail(c, line, "%s takes a label with at most one +/- integer: '%s'", dir, s);
+            off *= sign;
+        }
+        int64_t cv;
+        if (equ_find(c, name, &cv)) v = cv + off;
+        else {
+            if (w != 4 && w != 8) return fail(c, line, "%s cannot hold the address of a label (only dd and dq)", dir);
+            if (qualify(c, line, parent, name, out->sym, sizeof out->sym)) return -1;
+            out->has_sym = 1;
+            out->v = off;
+            return 0;
+        }
+    } else {
+        int big;
+        if (!parse_num(s, &v, &big)) return fail(c, line, "%s takes integers (decimal or 0x), labels and constants, not '%s'", dir, s);
+        if (big && w != 8) return fail(c, line, "%s value '%s' out of range", dir, s);
+    }
+    int64_t lo = w == 1 ? -128 : w == 2 ? -32768 : w == 4 ? INT32_MIN : INT64_MIN;
+    int64_t hi = w == 1 ? 255 : w == 2 ? 65535 : w == 4 ? 4294967295LL : INT64_MAX;
+    if (w < 8 && (v < lo || v > hi)) return fail(c, line, "%s value '%s' out of range", dir, s);
+    out->v = v;
+    return 0;
+}
+
+#define DATA_LIMIT ((size_t)1 << 30)
+
+static void dput(Ctx* c, int sec, const uint8_t* b, size_t n, int fill) {
+    if (c->dpos[sec] + n > c->dcap[sec]) {
+        c->dcap[sec] = (c->dpos[sec] + n) * 2 + 4096;
+        c->dbuf[sec] = realloc(c->dbuf[sec], c->dcap[sec]);
+        if (!c->dbuf[sec]) { fprintf(stderr, "asm: out of memory\n"); exit(1); }
+    }
+    if (b) memcpy(c->dbuf[sec] + c->dpos[sec], b, n);
+    else memset(c->dbuf[sec] + c->dpos[sec], fill, n);
+    c->dpos[sec] += n;
+}
+
+static int data_room(Ctx* c, int line, int sec, size_t n) {
+    if (n > DATA_LIMIT || c->dpos[sec] + n > DATA_LIMIT) return fail(c, line, "section is larger than 1 GiB");
+    return 0;
+}
+
+static void note_align(Ctx* c, int sec, int64_t n) {
+    if (n > c->salign[sec]) c->salign[sec] = (int)n;
+}
+
+// db dw dd dq resb resw resd resq align times, in any section. `args` is the text after the directive.
+static int data_directive(Ctx* c, int sec, int line, const char* dir, char* args, const char* parent) {
+    int64_t reps = 1;
+    if (!strcmp(dir, "times")) {
+        char* p = args;
+        while (*p && !isspace((unsigned char)*p)) p++;
+        if (*p) *p++ = 0;
+        if (!parse_int(args, &reps) || reps < 0 || reps > (1 << 24)) return fail(c, line, "times needs a count from 0 to 16777216");
+        args = trim(p);
+        p = args;
+        while (*p && !isspace((unsigned char)*p)) p++;
+        if (*p) *p++ = 0;
+        dir = args;
+        args = trim(p);
+        if (!is_data_dir(dir) || !strcmp(dir, "align")) return fail(c, line, "times takes only db dw dd dq resb resw resd resq (not '%s')", dir);
+    }
+    if (!strcmp(dir, "align")) {
+        int64_t n, fill = 0x90, resk = 0;
+        int has_fill = 0;
+        char* comma = strchr(args, ',');
+        if (comma) *comma = 0;
+        if (!parse_int(trim(args), &n) || n < 1 || n > 4096 || (n & (n - 1))) return fail(c, line, "align needs a power of two up to 4096");
+        if (comma) {
+            char* f = trim(comma + 1);
+            has_fill = 1;
+            if (!strncmp(f, "db", 2) && isspace((unsigned char)f[2]) && parse_int(trim(f + 2), &fill) && fill >= -128 && fill <= 255) resk = 0;
+            else if (!strncmp(f, "resb", 4) && isspace((unsigned char)f[4]) && parse_int(trim(f + 4), &resk) && resk == 1) resk = 1;
+            else return fail(c, line, "align takes only `align N`, `align N, db B` or `align N, resb 1`");
+        }
+        note_align(c, sec, n);
+        if (sec == ASM_SEC_TEXT) {
+            if (resk) return fail(c, line, "align with resb in .text");
+            Item* it = add_item(c, IT_ALIGN, line);
+            it->align = (int)n; it->fill = (int)(fill & 0xFF);
+            return 0;
+        }
+        size_t pad = (size_t)((0 - c->dpos[sec]) & (size_t)(n - 1));
+        if (sec == ASM_SEC_BSS) {
+            if (has_fill && !resk) return fail(c, line, "align with db in .bss (use `align N, resb 1`)");
+            c->dpos[sec] += pad;
+            return 0;
+        }
+        if (resk) return fail(c, line, "align with resb outside .bss");
+        dput(c, sec, NULL, pad, (int)(fill & 0xFF));
+        return 0;
+    }
+    if (dir[0] == 'r') {                       // resb resw resd resq
+        int w = dir[3] == 'b' ? 1 : dir[3] == 'w' ? 2 : dir[3] == 'd' ? 4 : 8;
+        int64_t n;
+        if (sec != ASM_SEC_BSS) return fail(c, line, "%s only in .bss", dir);
+        if (!parse_int(args, &n) || n < 0 || n > (int64_t)DATA_LIMIT) return fail(c, line, "%s needs a plain integer count", dir);
+        size_t total = (size_t)n * (size_t)w * (size_t)reps;
+        if ((size_t)reps && total / (size_t)reps != (size_t)n * (size_t)w) return fail(c, line, "section is larger than 1 GiB");
+        if (data_room(c, line, sec, total)) return -1;
+        c->dpos[sec] += total;
+        return 0;
+    }
+    int w = dir[1] == 'b' ? 1 : dir[1] == 'w' ? 2 : dir[1] == 'd' ? 4 : 8;
+    if (sec == ASM_SEC_BSS) return fail(c, line, "%s with contents in .bss (use resb/resw/resd/resq)", dir);
+    if (!*args) return fail(c, line, "%s with no values", dir);
+    DVal* vals = NULL;
+    size_t nv = 0, capv = 0;
+    int rc = 0;
+    for (char* a = args; rc == 0; ) {
+        char* comma = strchr(a, ',');
+        if (comma) *comma = 0;
+        char* t = trim(a);
+        if (!*t) { rc = fail(c, line, "%s with an empty value", dir); break; }
+        if (nv == capv) { capv = capv ? capv * 2 : 64; vals = realloc(vals, capv * sizeof *vals); }
+        rc = parse_dval(c, line, parent, dir, w, t, &vals[nv++]);
+        if (!comma) break;
+        a = comma + 1;
+    }
+    if (rc == 0 && (size_t)reps * nv * (size_t)w > DATA_LIMIT) rc = fail(c, line, "section is larger than 1 GiB");
+    if (rc == 0 && sec == ASM_SEC_TEXT && (size_t)reps * nv > (1u << 20)) rc = fail(c, line, "too many values in .text");
+    for (int64_t r = 0; r < reps && rc == 0; r++) {
+        for (size_t i = 0; i < nv; i++) {
+            const DVal* d = &vals[i];
+            uint8_t buf[8];
+            for (int k = 0; k < w; k++) buf[k] = d->has_sym ? 0 : (uint8_t)((uint64_t)d->v >> (8 * k));
+            int type = w == 8 ? XR_64 : XR_32;
+            if (sec == ASM_SEC_TEXT) {
+                Item* it = add_item(c, IT_BYTES, line);
+                pool_put(c, it, buf, w);
+                if (d->has_sym) {
+                    it->rel = (XReloc){0, type, "", d->v};
+                    it->rsym = dup(d->sym);
+                }
+            } else {
+                if (d->has_sym) {
+                    if (c->ndr == c->capdr) { c->capdr = c->capdr ? c->capdr * 2 : 64; c->dr = realloc(c->dr, c->capdr * sizeof *c->dr); }
+                    c->dr[c->ndr++] = (DReloc){sec, c->dpos[sec], type, dup(d->sym), d->v, line};
+                }
+                dput(c, sec, buf, (size_t)w, 0);
+            }
+        }
+    }
+    free(vals);
+    return rc;
+}
+
 static int read_lines(Ctx* c, const char* src) {
     char* copy = dup(src);
     char parent[128] = "";
@@ -238,7 +445,9 @@ static int read_lines(Ctx* c, const char* src) {
                 if (!strcmp(s, ".text")) sec = ASM_SEC_TEXT;
                 else if (!strcmp(s, ".data")) sec = ASM_SEC_DATA;
                 else if (!strcmp(s, ".bss")) sec = ASM_SEC_BSS;
-                else rc = fail(c, line, "section '%s' not supported (only .text, .data, .bss, no attributes)", s);
+                else if (!strcmp(s, ".rodata")) sec = ASM_SEC_RODATA;
+                else { rc = fail(c, line, "section '%s' not supported (only .text, .data, .rodata, .bss, no attributes)", s); goto next; }
+                c->present[sec] = 1;
                 goto next;
             }
             char* args = dir_args(raw, &x);
@@ -248,48 +457,8 @@ static int read_lines(Ctx* c, const char* src) {
                 c->glob[c->nglob++] = dup(args);
                 goto next;
             }
-            if (sec != ASM_SEC_TEXT) {
-                if (!is_data_dir(x.dir)) rc = fail(c, line, "directive '%s' not supported", x.dir);
-                goto next;               // contents of .data/.bss are not encoded (M3)
-            }
-            if (!strcmp(x.dir, "db") || !strcmp(x.dir, "dw") || !strcmp(x.dir, "dd") || !strcmp(x.dir, "dq")) {
-                int w = x.dir[1] == 'b' ? 1 : x.dir[1] == 'w' ? 2 : x.dir[1] == 'd' ? 4 : 8;
-                int64_t lo = w == 1 ? -128 : w == 2 ? -32768 : w == 4 ? INT32_MIN : INT64_MIN;
-                int64_t hi = w == 1 ? 255 : w == 2 ? 65535 : w == 4 ? 4294967295LL : INT64_MAX;
-                uint8_t buf[512]; int n = 0;
-                char* a = args;
-                if (!*a) { rc = fail(c, line, "%s with no values", x.dir); goto next; }
-                while (*a) {
-                    char* comma = strchr(a, ',');
-                    if (comma) *comma = 0;
-                    int64_t v;
-                    if (!parse_int(trim(a), &v) || v < lo || v > hi) { rc = fail(c, line, "%s in .text takes plain integers in %lld..%lld", x.dir, (long long)lo, (long long)hi); goto next; }
-                    if (n + w > (int)sizeof buf) { rc = fail(c, line, "%s too long", x.dir); goto next; }
-                    for (int k = 0; k < w; k++) buf[n++] = (uint8_t)((uint64_t)v >> (8 * k));
-                    if (!comma) break;
-                    a = comma + 1;
-                    if (!*trim(a)) { rc = fail(c, line, "%s with a trailing comma", x.dir); goto next; }
-                }
-                Item* it = add_item(c, IT_BYTES, line);
-                pool_put(c, it, buf, n);
-                goto next;
-            }
-            if (!strcmp(x.dir, "align")) {
-                int64_t n, fill = 0x90;
-                char* comma = strchr(args, ',');
-                if (comma) *comma = 0;
-                if (!parse_int(trim(args), &n) || n < 1 || n > 4096 || (n & (n - 1))) { rc = fail(c, line, "align needs a power of two up to 4096"); goto next; }
-                if (comma) {
-                    char* f = trim(comma + 1);
-                    if (strncmp(f, "db", 2) || !isspace((unsigned char)f[2]) || !parse_int(trim(f + 2), &fill) || fill < -128 || fill > 255) {
-                        rc = fail(c, line, "align in .text takes only `align N` or `align N, db B`"); goto next;
-                    }
-                }
-                Item* it = add_item(c, IT_ALIGN, line);
-                it->align = (int)n; it->fill = (int)(fill & 0xFF);
-                goto next;
-            }
-            rc = fail(c, line, "directive '%s' not supported in .text", x.dir);
+            if (!is_data_dir(x.dir) && strcmp(x.dir, "times")) { rc = fail(c, line, "directive '%s' not supported", x.dir); goto next; }
+            rc = data_directive(c, sec, line, x.dir, args, parent);
             goto next;
         }
         // XL_INSN
@@ -390,9 +559,18 @@ static int relax(Ctx* c) {
 
 static long sym_addr(Ctx* c, const Sym* s) { return c->addr[s->item]; }
 
-static void reloc_push(AsmOut* o, size_t* cap, const AsmReloc* r) {
-    if (o->nrel == *cap) { *cap = *cap ? *cap * 2 : 64; o->rel = realloc(o->rel, *cap * sizeof *o->rel); }
-    o->rel[o->nrel++] = *r;
+static const char* const SEC_NAME[ASM_NSEC] = {".text", ".data", ".bss", ".rodata"};
+
+// A relocation like nasm's: against the section symbol of the target, with the
+// target's offset in that section added to the addend.
+static void reloc_push(Ctx* c, AsmOut* o, size_t* caps, int in, long off, int type, const Sym* s, int64_t addend) {
+    AsmSection* sc = &o->sec[in];
+    if (sc->nrel == caps[in]) { caps[in] = caps[in] ? caps[in] * 2 : 64; sc->rel = realloc(sc->rel, caps[in] * sizeof *sc->rel); }
+    AsmReloc* r = &sc->rel[sc->nrel++];
+    memset(r, 0, sizeof *r);
+    r->in = in; r->off = (int)off; r->type = type; r->sec = s->sec;
+    snprintf(r->sym, sizeof r->sym, "%s", SEC_NAME[s->sec]);
+    r->addend = addend + (s->sec == ASM_SEC_TEXT ? sym_addr(c, s) : s->off);
 }
 
 static int assemble(Ctx* c, AsmOut* out) {
@@ -419,12 +597,13 @@ static int assemble(Ctx* c, AsmOut* out) {
         long rel = c->addr[it->tidx] - (c->addr[i] + 2);
         if (rel < -128 || rel > 127) return fail(c, it->line, "short jump to '%s' out of range", it->target);
     }
-    out->ntext = (size_t)c->addr[c->nit];
-    out->text = calloc(out->ntext ? out->ntext : 1, 1);
-    size_t relcap = 0;
+    AsmSection* tx = &out->sec[ASM_SEC_TEXT];
+    tx->size = (size_t)c->addr[c->nit];
+    tx->bytes = calloc(tx->size ? tx->size : 1, 1);
+    size_t relcap[ASM_NSEC] = {0};
     for (long i = 0; i < c->nit; i++) {
         Item* it = &c->it[i];
-        uint8_t* d = out->text + c->addr[i];
+        uint8_t* d = tx->bytes + c->addr[i];
         if (it->kind == IT_ALIGN) { memset(d, it->fill, (size_t)it->n); continue; }
         if (it->kind == IT_BRANCH) {
             long size = branch_size(it);
@@ -452,20 +631,27 @@ static int assemble(Ctx* c, AsmOut* out) {
         if (s->sec == ASM_SEC_TEXT && r->type == XR_PC32) {
             int64_t v = sym_addr(c, s) + r->addend - field;
             if (v < INT32_MIN || v > INT32_MAX) return fail(c, it->line, "displacement to '%s' out of range", it->rsym);
-            for (int k = 0; k < 4; k++) out->text[field + k] = (uint8_t)((uint64_t)v >> (8 * k));
+            for (int k = 0; k < 4; k++) tx->bytes[field + k] = (uint8_t)((uint64_t)v >> (8 * k));
             continue;
         }
-        AsmReloc ar;
-        memset(&ar, 0, sizeof ar);
-        ar.off = (int)field; ar.type = r->type; ar.sec = s->sec;
-        if (s->sec == ASM_SEC_TEXT) {
-            snprintf(ar.sym, sizeof ar.sym, ".text");
-            ar.addend = r->addend + sym_addr(c, s);
-        } else {
-            snprintf(ar.sym, sizeof ar.sym, "%s", s->name);
-            ar.addend = r->addend;
-        }
-        reloc_push(out, &relcap, &ar);
+        reloc_push(c, out, relcap, ASM_SEC_TEXT, field, r->type, s, r->addend);
+    }
+    // .data and .rodata: contents were laid out while reading; only the labels they name are left.
+    for (int k = 0; k < ASM_NSEC; k++) {
+        AsmSection* sc = &out->sec[k];
+        sc->present = c->present[k];
+        sc->align = c->salign[k];
+        if (k == ASM_SEC_TEXT) continue;
+        sc->size = c->dpos[k];
+        if (k == ASM_SEC_BSS) continue;
+        sc->bytes = calloc(sc->size ? sc->size : 1, 1);
+        if (sc->size) memcpy(sc->bytes, c->dbuf[k], sc->size);
+    }
+    for (size_t i = 0; i < c->ndr; i++) {
+        const DReloc* r = &c->dr[i];
+        Sym* s = sym_find(c, r->sym);
+        if (!s) return fail(c, r->line, "undefined symbol '%s'", r->sym);
+        reloc_push(c, out, relcap, r->in, (long)r->off, r->type, s, r->addend);
     }
     return 0;
 }
@@ -478,6 +664,8 @@ int asm_assemble(const char* src, AsmOut* out, char* err, size_t errsz) {
     c.ntab = 4099;
     c.tab = calloc(c.ntab, sizeof *c.tab);
     G = &c;
+    c.salign[ASM_SEC_TEXT] = 16; c.salign[ASM_SEC_DATA] = 4; c.salign[ASM_SEC_BSS] = 4; c.salign[ASM_SEC_RODATA] = 4;
+    c.present[ASM_SEC_TEXT] = 1;
     int rc = collect_equs(&c, src);
     if (rc == 0) rc = read_lines(&c, src);
     if (rc == 0) rc = assemble(&c, out);
@@ -487,6 +675,9 @@ int asm_assemble(const char* src, AsmOut* out, char* err, size_t errsz) {
     free(c.tab);
     for (long i = 0; i < c.nit; i++) { free(c.it[i].rsym); free(c.it[i].target); }
     free(c.it); free(c.pool); free(c.addr);
+    for (int k = 0; k < ASM_NSEC; k++) free(c.dbuf[k]);
+    for (size_t i = 0; i < c.ndr; i++) free(c.dr[i].sym);
+    free(c.dr);
     for (int i = 0; i < c.nequ; i++) free(c.equ[i].name);
     free(c.equ);
     for (int i = 0; i < c.nglob; i++) free(c.glob[i]);
@@ -496,6 +687,7 @@ int asm_assemble(const char* src, AsmOut* out, char* err, size_t errsz) {
 }
 
 void asm_free(AsmOut* o) {
-    free(o->text); free(o->rel); free(o->br);
+    for (int k = 0; k < ASM_NSEC; k++) { free(o->sec[k].bytes); free(o->sec[k].rel); }
+    free(o->br);
     memset(o, 0, sizeof *o);
 }

@@ -27,3 +27,7 @@ for lvl in O0 O2; do
 done
 echo "## O0 + O2"; echo
 build/native/asminv "${ARGS[@]+"${ARGS[@]}"}" "$DIR"/O0/*.asm "$DIR"/O2/*.asm
+echo
+echo "## Data (M3)"; echo
+"${CC:-cc}" -O2 -Wall -o build/native/datainv tools/native/datainv.c compiler/native/x64.c compiler/native/x64_line.c || exit 1
+build/native/datainv "$DIR"/O0/*.asm "$DIR"/O2/*.asm

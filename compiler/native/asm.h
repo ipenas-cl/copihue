@@ -1,10 +1,10 @@
 // One-and-a-half-pass assembler for the NASM text copihue emits in hosted mode.
 //
-// Second piece of the native back end (docs/DESIGN_NATIVE.md, M2). It reads a
-// whole program, resolves labels and relaxes jumps (rel8 when it fits, rel32
-// when not, as nasm does), and returns the bytes of .text plus the relocations
-// that remain. .data and .bss are only recognised (labels, section names), not
-// encoded: that is M3. Not used by copihue yet.
+// Second and third pieces of the native back end (docs/DESIGN_NATIVE.md, M2 and
+// M3). It reads a whole program, resolves labels and relaxes jumps (rel8 when
+// it fits, rel32 when not, as nasm does), lays out .data, .rodata and .bss, and
+// returns the bytes of every section plus the relocations that remain, with the
+// same symbols and addends as `nasm -f elf64`. Not used by copihue yet.
 #ifndef COPIHUE_ASM_H
 #define COPIHUE_ASM_H
 
@@ -13,15 +13,15 @@
 
 #include "x64.h"
 
-enum { ASM_SEC_TEXT, ASM_SEC_DATA, ASM_SEC_BSS };
+enum { ASM_SEC_TEXT, ASM_SEC_DATA, ASM_SEC_BSS, ASM_SEC_RODATA, ASM_NSEC };
 
-// A relocation left in .text. When the target is a label of .text, sym is
-// ".text" and addend includes the label's offset (nasm does the same, `global`
-// or not). When the target is in .data or .bss, sym is the label, sec says
-// which section, and addend does not include the label's offset (not known
-// before M3).
+// A relocation left in a section (the field lives in `in`). The target is a
+// section symbol (".text", ".data", ".rodata", ".bss", as nasm does for every
+// label defined in the file, `global` or not) and addend includes the label's
+// offset in that section; `sec` says which. `sym` is the section name.
 typedef struct {
-    int off;            // byte offset in .text of the field
+    int in;             // ASM_SEC_* holding the field
+    int off;            // byte offset in that section of the field
     int type;           // XR_*
     char sym[128];
     int64_t addend;
@@ -36,11 +36,19 @@ typedef struct {
     int is_call;
 } AsmBranch;
 
+// One section of the output. bytes is NULL for .bss (size only); a
+// section the program never names has size 0 and present = 0.
 typedef struct {
-    uint8_t* text;
-    size_t ntext;
+    uint8_t* bytes;
+    size_t size;
+    int present;        // the program has a `section` line for it (or it is .text)
+    int align;          // section alignment: nasm's default (.text 16, others 4) raised by the largest `align N`
     AsmReloc* rel;
     size_t nrel;
+} AsmSection;
+
+typedef struct {
+    AsmSection sec[ASM_NSEC];
     AsmBranch* br;
     size_t nbr;
     // Branches to a label, after relaxation.
