@@ -1,0 +1,5 @@
+// flags: --pe-efi
+// An EFI application needs its entry point.
+ms64 fn efi_main(image: i64, st: *u64) -> i64 {
+    return 0;
+}

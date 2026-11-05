@@ -1,0 +1,4 @@
+tests/errors/pe_entry_params.lap:3:9: error: --pe-efi _start takes at most two parameters (the image handle and the system table); it has 3
+      3 | ms64 fn _start(image: i64, st: *u64, extra: i64) -> i64 {
+        |         ^
+1 error, compilation failed

@@ -1,0 +1,4 @@
+tests/errors/pe_no_entry.lap:1:1: error: --pe-efi needs a function named _start (the entry point): ms64 fn _start(image: i64, st: *u64) -> i64
+      1 | // flags: --pe-efi
+        | ^
+1 error, compilation failed

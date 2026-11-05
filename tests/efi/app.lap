@@ -1,0 +1,69 @@
+// A UEFI application built with --pe-efi (0.44.8) and run by QEMU with OVMF (tests/efi/run.sh).
+// The firmware calls _start(ImageHandle, SystemTable) with the Microsoft x64 convention. The program
+// checks the system table, writes to the console through ConOut->OutputString (UTF-16 text in a
+// data block), reads and writes a .data global, a .bss global and a string, and reports on COM1:
+// EFI-OK when every check holds, EFI-FAIL and the number of the first check that does not otherwise.
+// It ends with RuntimeServices->ResetSystem(EfiResetShutdown), which makes QEMU exit.
+
+let counter: i64 = 41;
+let table: [i64; 3] = [10, 20, 30];
+let zero: i64;
+let scratch: [u8; 16];
+let bad: i64 = 0;
+
+data banner {
+    dw 0x45, 0x46, 0x49, 0x2D, 0x43, 0x4F, 0x4E, 0x4F, 0x55, 0x54, 13, 10, 0;
+}
+
+fn serial_putc(c: i64) -> i64 {
+    let tries = 0;
+    while ((inb(0x3FD) & 0x20) == 0 && tries < 1000) { tries = tries + 1; }
+    outb(0x3F8, c);
+    return 0;
+}
+
+fn puts(s: *u8) -> i64 {
+    let i = 0;
+    while (s[i] != 0) {
+        serial_putc(s[i]);
+        i = i + 1;
+    }
+    return i;
+}
+
+fn check(n: i64, ok: i64) -> i64 {
+    if (ok == 0 && bad == 0) { bad = n; }
+    return 0;
+}
+
+ms64 fn _start(image: i64, st: *u64) -> i64 {
+    // the table header: "IBI SYST"
+    check(1, image != 0);
+    check(2, st[0] == 0x5453595320494249);
+
+    // .data and .bss, a string, a data block
+    check(3, counter == 41);
+    counter = counter + 1;
+    check(4, counter == 42 && zero == 0);
+    table[1] = table[0] + table[2];
+    check(5, table[1] == 40);
+    let s: *u8 = "text";
+    scratch[0] = s[0];
+    scratch[1] = s[3];
+    check(6, scratch[0] == 116 && scratch[1] == 116 && scratch[2] == 0);
+    let w: *u16 = &banner;
+    check(7, w[0] == 69 && w[11] == 10 && w[12] == 0);
+
+    // ConOut->OutputString(ConOut, banner), through an `ms64 fn` variable
+    let con: *u64 = st[8] as *u64;
+    let out: ms64 fn = con[1];
+    out(con as i64, &banner as i64);
+
+    if (bad == 0) { puts("EFI-OK\n"); } else { puts("EFI-FAIL "); serial_putc(48 + bad); puts("\n"); }
+
+    // RuntimeServices->ResetSystem(EfiResetShutdown, 0, 0, 0)
+    let rt: *u64 = st[11] as *u64;
+    let reset: ms64 fn = rt[13];
+    reset(2, 0, 0, 0);
+    return 0;
+}

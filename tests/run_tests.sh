@@ -31,6 +31,9 @@
 # 4j. --pic (0.44.7): tests/errors/pic_*.lap are refused under --flat --pic; the assembly of tests/pic/kernel.lap
 #    has no absolute address of a label; the image is the same at two --flat bases; QEMU runs it at two
 #    load addresses and must fail without --pic. All of it in tests/pic/run.sh.
+# 4k. --pe-efi (0.44.8): tests/errors/pe_*.lap are refused under --pe-efi; tests/efi/app.lap becomes a PE32+ file
+#    that a C checker reads (and fails when a header field is broken) and that QEMU with OVMF runs as an EFI
+#    application. All of it in tests/efi/run.sh.
 # 5. Boot sectors: tests/boot/*.lap, and QEMU must print COPIHUE.
 # 6. User mode: tests/usermode, and QEMU must print USER.
 # 7. Context switch: tests/ctx, and QEMU must print COPIHUE.
@@ -112,7 +115,7 @@ check() {  # $1 = name, $2 = golden file, $3 = actual file
   else fail=$((fail+1)); failed+=("$1"); echo "FAIL $1"; [ -f "$2" ] && diff "$2" "$3" | head -10; fi
 }
 
-for src in $(ls tests/*.lap tests/*/*.lap examples/*.lap examples/*/*.lap examples/*/*/*.lap | grep -v -e '^tests/errors/' -e '^tests/freestanding/' -e "^tests/flat/" -e "^tests/boot/" -e '^tests/usermode/' -e '^tests/ctx/' -e '^tests/native/' -e '^tests/align/' -e '^tests/assign/' -e '^tests/axe1/' -e '^tests/ginit/' -e '^tests/ms64/' -e '^tests/pic/' -e '^tests/axe2/' -e '^tests/tools/'); do
+for src in $(ls tests/*.lap tests/*/*.lap examples/*.lap examples/*/*.lap examples/*/*/*.lap | grep -v -e '^tests/errors/' -e '^tests/freestanding/' -e "^tests/flat/" -e "^tests/boot/" -e '^tests/usermode/' -e '^tests/ctx/' -e '^tests/native/' -e '^tests/align/' -e '^tests/assign/' -e '^tests/axe1/' -e '^tests/ginit/' -e '^tests/ms64/' -e '^tests/pic/' -e '^tests/efi/' -e '^tests/axe2/' -e '^tests/tools/'); do
   case "$SKIP" in *" $src "*) continue ;; esac
   golden=tests/expected/${src%.lap}.out
   FELL=0
@@ -1177,6 +1180,16 @@ if pic=$(bash "$ROOT/tests/pic/run.sh" "$CC" 2>&1); then
   pass=$((pass+1)); echo "$pic" | grep -E '^skip|^tests/pic:'
 else
   fail=$((fail+1)); failed+=("tests/pic"); echo "$pic" | head -40
+fi
+
+# 4k. --pe-efi (0.44.8): the option rules, the refusals (tests/errors/pe_*.lap), the PE32+ file of
+# tests/efi/app.lap read by a C checker (headers, sections, entry, .reloc) and broken on purpose field by
+# field, and QEMU with OVMF running it as BOOTX64.EFI (CMP_REQUIRE=1 makes a missing qemu or OVMF an error).
+# The details are in tests/efi/run.sh.
+if efi=$(bash "$ROOT/tests/efi/run.sh" "$CC" 2>&1); then
+  pass=$((pass+1)); echo "$efi" | grep -E '^skip|^tests/efi:'
+else
+  fail=$((fail+1)); failed+=("tests/efi"); echo "$efi" | head -40
 fi
 
 rm -f "$CC"
