@@ -2,6 +2,22 @@
 
 Todos los cambios importantes del proyecto.
 
+## [0.44.1] - 2026-11-04
+
+### Added
+- `align(N) fn`: a function starts on a multiple of `N` (a power of two, 1 to 4096). The compiler writes `align N, db 0xCC` in front of the label, so the gap is `int3`. It works on `fn`, `interrupt fn`, `syscall fn`, `naked fn` and `bits` functions, in `--flat`, `--boot`, `--freestanding`, hosted programs and `-c` objects. `align` on a generic function, `section`, `import`, `data` or `extern` is an error. This gives `--flat 0x400000` code in a second text page (`align(4096) fn f()` is at `0x401000`).
+- `--flat 0x400000 --axe2`: writes the AXE2 file for LapageriaOS (32-byte header: `AXE2`, image bytes, entry as the virtual address of `_start`, text bytes rounded to pages, memory size, 8 reserved zero bytes; then the image). `.data` starts on the page after the text and the bss follows it, without bytes in the file. Errors, with no output file: image or image plus bss over 65536 bytes (16 pages), `_start` outside the text, a named section other than `.text`/`.data`/`.bss` or with `@`, an address other than `0x400000`, `--elf` or `--boot` with it.
+- `--sizes` (with `--flat`): prints `text=`, `data=` and `bss=` in bytes on stdout (with `--axe2` also `text_bytes=`, `image=`, `memsize=`, `entry=`). The raw image written is unchanged. Both options run `nasm -f bin` with a map, as `--elf` does, so they need `nasm`.
+- What a global `let` did in `--flat` before (checked, not changed): initialized globals (scalars, arrays, strings) in `.data` and uninitialized ones in `.bss`, in the order text, data, bss; `.data` right after the text rounded to 4 bytes; the bss takes no bytes in the file.
+
+### Changed
+- `tests/run_tests.sh`: the «flat elf» check no longer uses Python 3; `tests/tools/flat_elf_check.c` (built with `gcc -O2 -Wall -Werror` in the runner) makes the same checks (ELF header, section headers, section bytes against the raw image, symbols, entry, `PT_LOAD` of `.console`). The hexdump goldens are now compared after squeezing `od`'s spaces, so they also match with the BSD `od` of macOS. On a system with no `timeout`, a perl stand-in is used. The CI step of `make test` sets `CMP_REQUIRE=1`, which turns a missing `qemu-system-x86_64` into an error in the new QEMU test.
+
+### Tests (what was run, and where)
+- New: `tests/flat/align_fn.lap` (golden bytes and assembly; `int3` before `0x1000` and `0x1100`; `-O0` = `-O2`), `tests/lang/align_fn.lap` (hosted: assembly of `align 4096`/`align 64`, `-c`; the run that prints `&page & 4095` needs Linux and was **not** run here), `tests/axe2/` (`layout.lap`: each header field with `od`, the page positions, the whole file against `layout.hex`, the sizes, `-S` assembly, `-O0` = `-O2`, `--sizes` leaves the raw image unchanged; `max_pages.lap`: 16 pages accepted; `err_pages`, `err_bss`, `err_entry`, `err_section`; and the refused option combinations), `tests/errors/align_fn_pow2.lap`, `align_fn_target.lap`, and `tests/align/kernel.lap`: a kernel at `0x8000` booted by `tests/usermode/boot.lap` in QEMU whose `align(4096)` function sits at `0x9000`, runs, and reads initialized data; COM1 must show `PAGE`.
+- Run on the macOS development machine (nasm 3.02, QEMU installed, no Linux): `make test` gave 318 passed, 2 failed, 2 skipped. All the new tests above passed, including the QEMU kernel at `-O0` and `-O2`, and the rewritten flat ELF check. The 2 failures are in files this release does not touch and come from nasm 3.02 (the CI has 2.16.01): `tests/flat/generic.lap` (`movsxd` as `48 98`) and `tests/boot/edx_keep.lap` (order of the `66`/`67` prefixes). The two programs that need `nasm` and `ld` to link were skipped, as was the `-c` link section (`ld` is not GNU ld here). Not run here: `make nasm-test`, `make native-test`, the hosted run of `tests/lang/align_fn.lap`, and the CI itself (Linux). A first run with this runner also made the QEMU boot tests of earlier releases run on this Mac for the first time; they passed.
+- Not measured: nothing about compile time or image size beyond the numbers above.
+
 ## [0.44.0] - 2026-11-05
 
 ### Changed

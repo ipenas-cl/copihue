@@ -1,0 +1,17 @@
+// align(N) before fn: the function starts on a multiple of N. At --flat 0x10000,
+// `second` is at 0x11000 (page 1) and `third` at 0x11100. The gap is int3 (0xCC).
+fn _start() {
+    while (1) { }
+}
+
+align(4096) fn second() -> i64 {
+    return 2;
+}
+
+align(256) fn third() -> i64 {
+    return 3;
+}
+
+fn tail() -> i64 {
+    return second() + third();
+}

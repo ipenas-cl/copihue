@@ -16,7 +16,7 @@
 
 // ==== NAMING (single place to change when the language is renamed) ====
 #define LANG_NAME     "Copihue"
-#define LANG_VERSION  "0.44.0"
+#define LANG_VERSION  "0.44.1"
 #define COMPILER_BIN  "copihue"
 #define SRC_EXT       ".lap"   /* Lapageria rosea, the copihue */
 #define OLD_SRC_EXT   ".cph"   /* v0.18.x extension, still accepted with a warning */
@@ -37,6 +37,8 @@ int g_freestanding = 0;              // --freestanding: no OS, no syscalls, no _
 int g_checked = 0;                   // --checked: slice and local-array traps in freestanding/flat/boot
 const char* g_flat_org = NULL;       // --flat ADDR: freestanding flat binary loaded at ADDR, entry _start
 int g_flat_elf = 0;                  // --elf with --flat: ELF64 ET_EXEC of that image, named sections kept
+int g_axe2 = 0;                      // --axe2 with --flat 0x400000: AXE2 header + image, data on its own page
+int g_sizes = 0;                     // --sizes with --flat: text, data and bss sizes on stdout
 int g_boot = 0;                      // --boot: flat sector at 0x7C00, padded to 512, signature 0xAA55
 int g_reloc = 0;                     // -c: one ELF64 relocatable object (nasm -f elf64), no ld
 int g_native = 0;                    // --native: the default back end (compiler/native) without the fallback to nasm and ld
@@ -308,7 +310,7 @@ typedef struct AstNode {
     int line, col;        // Source position (for diagnostics)
     const char* file;     // Source file (several files share one program)
     char* section;        // Named section this item is placed in. NULL is the default
-    int align;            // align(N) on a struct, a field, or a global. 0 means none
+    int align;            // align(N) on a struct, a field, a function, or a global. 0 means none
     const char* mod;      // Defining module. NULL is the flat namespace
     char* qual;           // Use of Mod::item. NULL is unqualified. name is the link spelling
     char** tparams;       // Generic parameters. The template is not codegen'd
@@ -4905,6 +4907,16 @@ static void parse_impl(Parser* p, AstNode* prog) {
     free(disp);
 }
 
+// align(N) before a function: the code generator pads with int3 up to the
+// next multiple of N in front of the label. A generic template has no code.
+static void set_fn_align(AstNode* fn, int align) {
+    if (!fn || !align) return;
+    if (fn->ntparams)
+        diag_error(fn->line, fn->col, "align() does not apply to a generic function");
+    else
+        fn->align = align;
+}
+
 static void parse_top_item(Parser* p, AstNode* prog) {
     int item_align = 0;
     g_item_pub = 0;
@@ -4927,6 +4939,12 @@ static void parse_top_item(Parser* p, AstNode* prog) {
     g_file_started = 1;
     if (peek_word(p, "align") && peek_tok_at(p, 1, T_LPAREN))
         item_align = parse_align_prefix(p);
+    if (item_align && ((peek_word(p, "section") && peek_tok_at(p, 1, T_STR)) ||
+                       (peek_word(p, "import") && peek_tok_at(p, 1, T_STR)) ||
+                       (peek_word(p, "data") && peek_tok_at(p, 1, T_IDENT)) ||
+                       peek_word(p, "extern")))
+        diag_error(peek_tok(p).line, peek_tok(p).col,
+                   "align() applies to a struct, a field, a function, or a global");
     if (peek_word(p, "section") && peek_tok_at(p, 1, T_STR)) {
         parse_section(p, prog);
     } else if (peek_word(p, "import") && peek_tok_at(p, 1, T_STR)) {
@@ -4941,11 +4959,13 @@ static void parse_top_item(Parser* p, AstNode* prog) {
         advance_tok(p);
         AstNode* fn = parse_func(p);
         fn->flags |= AF_INTERRUPT;
+        set_fn_align(fn, item_align);
         add_top(prog, fn);
     } else if (peek_word(p, "syscall") && peek_tok_at(p, 1, T_FN)) {
         advance_tok(p);
         AstNode* fn = parse_func(p);
         fn->flags |= AF_SYSCALL;
+        set_fn_align(fn, item_align);
         add_top(prog, fn);
     } else if (peek_word(p, "data") && peek_tok_at(p, 1, T_IDENT)) {
         add_top(prog, parse_data(p));
@@ -4955,7 +4975,9 @@ static void parse_top_item(Parser* p, AstNode* prog) {
     } else if (peek_word(p, "extern") && peek_tok_at(p, 1, T_IDENT)) {
         parse_extern(p, prog);
     } else if (peek_word(p, "bits") || peek_word(p, "naked")) {
-        add_top(prog, parse_bits_naked_fn(p));
+        AstNode* fn = parse_bits_naked_fn(p);
+        set_fn_align(fn, item_align);
+        add_top(prog, fn);
     } else if (peek_word(p, "trait") && peek_tok_at(p, 1, T_IDENT)) {
         Tok kw = peek_tok(p);
         if (item_align)
@@ -4982,9 +5004,9 @@ static void parse_top_item(Parser* p, AstNode* prog) {
         gv->align = item_align;
         add_top(prog, gv);
     } else {
-        if (item_align)
-            diag_error(peek_tok(p).line, peek_tok(p).col, "align() applies to a struct or a global");
-        add_top(prog, parse_func(p));
+        AstNode* fn = parse_func(p);
+        set_fn_align(fn, item_align);
+        add_top(prog, fn);
     }
 }
 
@@ -20381,6 +20403,13 @@ static int section_bin_addr(const NamedSection* sec) {
     return sec && sec->has_addr && !g_reloc;
 }
 
+// align(N) fn: int3 (0xCC) up to the next multiple of N, in front of the
+// label, so a stray fall-through into the gap traps. A forward declaration
+// has no code, and the definition is what carries the align.
+static void emit_fn_align(Codegen* cg, AstNode* fn) {
+    if (fn->align > 1) emit(cg, "align %d, db 0xCC\n", fn->align);
+}
+
 static int func_defined_mod(AstNode* ast, const char* name, const char* mod) {
     if (!ast || !name) return 0;
     for (int i = 0; i < ast->child_count; i++) {
@@ -20729,6 +20758,7 @@ void codegen(AstNode* ast, const char* file, StringTable* strtab, TypeTable* typ
         else {
             if (flat_entry->section) emit_section_switch(&cg, flat_entry->section);
             g_inst_disp = flat_entry->inst_disp;
+            emit_fn_align(&cg, flat_entry);
             gen_func(&cg, flat_entry);
             g_inst_disp = NULL;
         }
@@ -20741,6 +20771,7 @@ void codegen(AstNode* ast, const char* file, StringTable* strtab, TypeTable* typ
                 const char* saved_disp = g_inst_disp;
                 g_inst_disp = item->inst_disp;
                 emit_section_switch(&cg, item->section);
+                emit_fn_align(&cg, item);
                 gen_func(&cg, item);
                 g_inst_disp = saved_disp;
             }
@@ -20802,6 +20833,10 @@ void codegen(AstNode* ast, const char* file, StringTable* strtab, TypeTable* typ
     NamedSection* data_sec = section_find(".data");
     if (section_bin_addr(data_sec))
         fprintf(cg.out, "section .data vstart=0x%llx align=1\n", data_sec->addr);
+    else if (g_axe2)
+        // The text pages are read-only and executable, the rest is not: the
+        // data starts on the page after the text. An empty .data adds no bytes.
+        fprintf(cg.out, "section .data align=4096\n");
     else
         fprintf(cg.out, "section .data\n");
     if (data_sec && data_sec->need_start && !data_sec->started) {
@@ -20917,6 +20952,9 @@ static void usage(FILE* o) {
         "  --checked           bounds-check []T and local arrays in --freestanding, --flat, and --boot\n"
         "  --flat <addr>       freestanding flat binary (nasm -f bin) loaded at <addr>;\n"
         "                      execution starts at fn _start, bss_start()/bss_end() give .bss bounds\n"
+        "  --axe2              with --flat 0x400000: the AXE2 file (32-byte header + image), data on\n"
+        "                      the page after the text; 1 to 16 pages, _start inside the text\n"
+        "  --sizes             with --flat: print text=, data=, bss= (bytes) on stdout\n"
         "  --elf               with --flat: ELF64 executable of that image (not a raw binary);\n"
         "                      named sections keep their load address; several files are one image\n"
         "  --boot              boot sector: --flat 0x7C00, pad to 512 bytes, signature 0xAA55;\n"
@@ -21441,6 +21479,138 @@ static void check_traits(AstNode* prog, TypeTable* tt) {
     }
 }
 
+// --flat with --sizes and/or --axe2. nasm -f bin builds the image once with
+// `[map all]`; the map gives each section's address and length. --sizes prints
+// them. --axe2 puts the 32-byte AXE2 header (see docs/REFERENCE.md) in front
+// of the image bytes. A plain --flat --sizes writes the raw image unchanged.
+#define AXE2_PAGE 4096ULL
+#define AXE2_LIMIT 65536ULL
+#define AXE2_BASE 0x400000ULL
+
+static int emit_flat_measured(const char* asm_path, const char* out_path, int axe2, int sizes) {
+    const char* map_asm = "output.axe2.asm";
+    const char* map_path = "output.axe2.map";
+    const char* raw_path = "output.axe2.bin";
+    FlatSec* secs = calloc(FLAT_MAX_SEC, sizeof *secs);
+    FlatSym* syms = calloc(FLAT_MAX_SYM, sizeof *syms);
+    unsigned char* raw = NULL;
+    unsigned long long origin = 0, entry = 0;
+    unsigned long long text_len = 0, data_len = 0, bss_len = 0, text_bytes = 0, mem_size = 0;
+    int nsec = 0, nsym = 0, has_entry = 0, rc = 1;
+    size_t raw_len = 0;
+    char buf[8192];
+    FILE* in = fopen(asm_path, "r");
+    FILE* out = fopen(map_asm, "w");
+    FILE* rf;
+
+    if (!secs || !syms || !in || !out) {
+        fprintf(stderr, COMPILER_BIN ": error: cannot prepare the flat map assembly\n");
+        if (in) fclose(in);
+        if (out) fclose(out);
+        goto done;
+    }
+    while (fgets(buf, sizeof buf, in)) fputs(buf, out);
+    fprintf(out, "\n[map all %s]\n", map_path);
+    fclose(in);
+    fclose(out);
+    if (run_cmd("nasm -f bin '%s' -o '%s'", map_asm, raw_path) != 0) {
+        fprintf(stderr, COMPILER_BIN ": error: assembler (nasm) failed\n");
+        goto done;
+    }
+    if (!flat_parse_map(map_path, &origin, secs, &nsec, syms, &nsym)) goto done;
+    {
+        int t = flat_sec_index(secs, nsec, ".text");
+        int d = flat_sec_index(secs, nsec, ".data");
+        int b = flat_sec_index(secs, nsec, ".bss");
+        if (t >= 0) text_len = secs[t].length;
+        if (d >= 0) data_len = secs[d].length;
+        if (b >= 0) bss_len = secs[b].length;
+        text_bytes = (text_len + AXE2_PAGE - 1) & ~(AXE2_PAGE - 1);
+        mem_size = (b >= 0 ? secs[b].vstart + secs[b].length : origin + text_len) - origin;
+    }
+    for (int i = 0; i < nsym; i++)
+        if (!strcmp(syms[i].name, "_start")) { entry = syms[i].virt; has_entry = 1; }
+
+    rf = fopen(raw_path, "rb");
+    if (!rf) {
+        fprintf(stderr, COMPILER_BIN ": error: flat image was not written\n");
+        goto done;
+    }
+    fseek(rf, 0, SEEK_END);
+    raw_len = (size_t)ftell(rf);
+    fseek(rf, 0, SEEK_SET);
+    raw = malloc(raw_len ? raw_len : 1);
+    if (!raw || (raw_len && fread(raw, 1, raw_len, rf) != raw_len)) {
+        fclose(rf);
+        fprintf(stderr, COMPILER_BIN ": error: cannot read the flat image\n");
+        goto done;
+    }
+    fclose(rf);
+    if (mem_size < raw_len) mem_size = raw_len;
+
+    if (axe2) {
+        if (text_len == 0) {
+            fprintf(stderr, COMPILER_BIN ": error: --axe2: the text is empty\n");
+            goto done;
+        }
+        if (raw_len > AXE2_LIMIT) {
+            fprintf(stderr, COMPILER_BIN ": error: --axe2: the image is %zu bytes (%llu pages); the limit is %llu bytes (16 pages)\n",
+                    raw_len, (raw_len + AXE2_PAGE - 1) / AXE2_PAGE, AXE2_LIMIT);
+            goto done;
+        }
+        if (mem_size > AXE2_LIMIT) {
+            fprintf(stderr, COMPILER_BIN ": error: --axe2: the image with its bss is %llu bytes (%llu pages); the limit is %llu bytes (16 pages)\n",
+                    mem_size, (mem_size + AXE2_PAGE - 1) / AXE2_PAGE, AXE2_LIMIT);
+            goto done;
+        }
+        if (!has_entry || entry < origin || entry >= origin + text_len) {
+            fprintf(stderr, COMPILER_BIN ": error: --axe2: the entry point _start (0x%llx) is outside the text (0x%llx to 0x%llx)\n",
+                    entry, origin, origin + text_len);
+            goto done;
+        }
+    }
+    if (sizes) {
+        printf("text=%llu\ndata=%llu\nbss=%llu\n", text_len, data_len, bss_len);
+        if (axe2)
+            printf("text_bytes=%llu\nimage=%zu\nmemsize=%llu\nentry=0x%llx\n",
+                   text_bytes, raw_len, mem_size, entry);
+        fflush(stdout);
+    }
+    {
+        FILE* of = fopen(out_path, "wb");
+        unsigned char hdr[32];
+        int ok;
+        if (!of) {
+            fprintf(stderr, COMPILER_BIN ": error: cannot write %s\n", out_path);
+            goto done;
+        }
+        ok = 1;
+        if (axe2) {
+            memset(hdr, 0, sizeof hdr);
+            memcpy(hdr, "AXE2", 4);
+            wr_u32(hdr + 4, (unsigned)raw_len);
+            wr_u64(hdr + 8, entry);
+            wr_u32(hdr + 16, (unsigned)text_bytes);
+            wr_u32(hdr + 20, (unsigned)mem_size);
+            ok = fwrite(hdr, 1, sizeof hdr, of) == sizeof hdr;
+        }
+        if (ok && raw_len) ok = fwrite(raw, 1, raw_len, of) == raw_len;
+        if (fclose(of) != 0 || !ok) {
+            fprintf(stderr, COMPILER_BIN ": error: cannot write %s\n", out_path);
+            goto done;
+        }
+    }
+    rc = 0;
+done:
+    free(secs);
+    free(syms);
+    free(raw);
+    remove(map_asm);
+    remove(map_path);
+    remove(raw_path);
+    return rc;
+}
+
 // --native. The encoder, the assembler and the ELF writer in compiler/native
 // are plain C files; they are included here so that one `gcc copihue.c` still
 // builds the compiler.
@@ -21509,6 +21679,8 @@ int main(int argc, char** argv) {
         else if (!strcmp(a, "--freestanding")) g_freestanding = 1;
         else if (!strcmp(a, "--checked")) g_checked = 1;
         else if (!strcmp(a, "--elf")) g_flat_elf = 1;
+        else if (!strcmp(a, "--axe2")) g_axe2 = 1;
+        else if (!strcmp(a, "--sizes")) g_sizes = 1;
         else if (!strcmp(a, "--flat")) {
             if (i + 1 >= argc) { fprintf(stderr, COMPILER_BIN ": error: --flat needs a load address\n"); return 2; }
             if (g_boot) { fprintf(stderr, COMPILER_BIN ": error: --flat and --boot cannot be combined\n"); return 2; }
@@ -21541,6 +21713,19 @@ int main(int argc, char** argv) {
     }
     if (g_reloc && g_flat_org) {
         fprintf(stderr, COMPILER_BIN ": error: -c cannot be combined with --flat or --boot\n");
+        return 2;
+    }
+    if ((g_axe2 || g_sizes) && (!g_flat_org || g_boot)) {
+        fprintf(stderr, COMPILER_BIN ": error: %s requires --flat%s\n", g_axe2 ? "--axe2" : "--sizes",
+                g_axe2 ? " 0x400000" : " (not --boot)");
+        return 2;
+    }
+    if ((g_axe2 || g_sizes) && g_flat_elf) {
+        fprintf(stderr, COMPILER_BIN ": error: %s cannot be combined with --elf\n", g_axe2 ? "--axe2" : "--sizes");
+        return 2;
+    }
+    if (g_axe2 && strtoull(g_flat_org, NULL, 0) != AXE2_BASE) {
+        fprintf(stderr, COMPILER_BIN ": error: --axe2 images load at 0x400000; use --flat 0x400000 (got --flat %s)\n", g_flat_org);
         return 2;
     }
     if (g_native && g_nasm) {
@@ -21600,6 +21785,18 @@ int main(int argc, char** argv) {
     build_type_table(types, ast);
     check_traits(ast, types);
 
+    // An AXE2 image is text, data and bss in that order. A named section or a
+    // load address would move bytes the header does not describe.
+    if (g_axe2) {
+        for (int i = 0; i < g_nnamed; i++) {
+            const char* sn = g_named_secs[i].name;
+            if (strcmp(sn, ".text") && strcmp(sn, ".data") && strcmp(sn, ".bss"))
+                diag_error(1, 1, "--axe2: section '%s' is not allowed; an AXE2 image is .text, .data and .bss", sn);
+            else if (g_named_secs[i].has_addr)
+                diag_error(1, 1, "--axe2: section '%s' cannot have a load address", sn);
+        }
+    }
+
     // A hosted program or a -c object goes to the built-in assembler straight
     // from memory; -S, --flat, --boot and --nasm go through the file.
     int via_mem = !only_asm && !g_flat_org && !g_nasm;
@@ -21615,15 +21812,16 @@ int main(int argc, char** argv) {
     if (only_asm) return 0;
     if (g_flat_org) {
         int rc = g_flat_elf ? emit_flat_elf(asm_out, exe_out)
+               : (g_axe2 || g_sizes) ? emit_flat_measured(asm_out, exe_out, g_axe2, g_sizes)
                             : run_cmd("nasm -f bin '%s' -o '%s'", asm_out, exe_out);
         if (rc != 0) {
-            if (!g_flat_elf)
+            if (!g_flat_elf && !g_axe2 && !g_sizes)
                 fprintf(stderr, COMPILER_BIN ": error: assembler (nasm) failed\n");
             return 1;
         }
         remove(asm_out);
         if (verbose) fprintf(stderr, "  wrote %s (%s, org %s)\n", exe_out,
-                             g_flat_elf ? "flat elf" : "flat binary", g_flat_org);
+                             g_flat_elf ? "flat elf" : g_axe2 ? "axe2 image" : "flat binary", g_flat_org);
         return 0;
     }
     if (via_mem) {

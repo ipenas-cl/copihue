@@ -1,0 +1,12 @@
+// flags: --flat 0x10000
+align(16) fn generic<T>(x: T) -> T {
+    return x;
+}
+
+align(16) section ".extra" {
+    let word: i64 = 1;
+}
+
+fn _start() {
+    while (1) { }
+}

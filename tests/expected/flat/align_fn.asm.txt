@@ -1,0 +1,63 @@
+bits 64
+org 0x10000
+section .data
+section .bss
+__bss_start:
+section .bss
+__bss_end:
+section .text
+_start:
+    push rbp
+    mov rbp, rsp
+    sub rsp, __frame__start
+.L0:
+    mov rax, 1
+    test rax, rax
+    jz .L1
+.L2:
+    jmp .L0
+.L1:
+    xor rax, rax
+    leave
+    ret
+__frame__start equ 64
+align 4096, db 0xCC
+second:
+    push rbp
+    mov rbp, rsp
+    sub rsp, __frame_second
+    mov rax, 2
+    leave
+    ret
+    xor rax, rax
+    leave
+    ret
+__frame_second equ 64
+align 256, db 0xCC
+third:
+    push rbp
+    mov rbp, rsp
+    sub rsp, __frame_third
+    mov rax, 3
+    leave
+    ret
+    xor rax, rax
+    leave
+    ret
+__frame_third equ 64
+tail:
+    push rbp
+    mov rbp, rsp
+    sub rsp, __frame_tail
+    call second
+    push rax
+    call third
+    mov rbx, rax
+    pop rax
+    add rax, rbx
+    leave
+    ret
+    xor rax, rax
+    leave
+    ret
+__frame_tail equ 64

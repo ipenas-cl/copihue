@@ -351,7 +351,9 @@ is 56 bytes: `name` at 0, `size` at 16, `nblocks` at 20, `blocks` at 24. The sam
 
 ### Alignment
 
-`align(N)` before `struct`, `packed struct`, a field, or a global `let` sets that alignment. `N` is a power of two from 1 to 4096. Anything else is `align() takes a power of two from 1 to 4096`. `align(64) let` inside a function is `align() applies to a struct, a field, or a global`.
+`align(N)` before `struct`, `packed struct`, a field, a global `let`, or a function sets that alignment. `N` is a power of two from 1 to 4096. Anything else is `align() takes a power of two from 1 to 4096`. `align(64) let` inside a function is `align() applies to a struct, a field, or a global`.
+
+`align(N) fn name() ...` starts the function on a multiple of `N`: the compiler writes `align N, db 0xCC` in front of the label, so the gap is filled with `int3` bytes (a stray fall-through into it traps). It works the same on `interrupt fn`, `syscall fn`, `naked fn`, and `bits 16/32 fn`, in `--flat`, `--boot`, `--freestanding`, in a hosted program, and in a `-c` object. In `--flat` the alignment counts from the load address (`org`): with `--flat 0x400000` a function aligned to 4096 is at `0x401000`, `0x402000`, and so on, as long as the load address is itself a multiple of `N`. `fn _start` is still emitted first; an `align` on `_start` pads in front of it, so it is no longer byte 0. `align(N)` on a generic function is `align() does not apply to a generic function`; on `section`, `import`, `data`, or `extern` it is `align() applies to a struct, a field, a function, or a global`. `tests/flat/align_fn.lap` (bytes and assembly), `tests/lang/align_fn.lap` (hosted; prints the low bits of the addresses), and `tests/align/kernel.lap` (a kernel booted in QEMU that runs a function at `0x9000`) cover it.
 
 A field's `align(N)` replaces its natural alignment, including inside `packed struct`. The struct's alignment becomes the strictest of its fields and of `align(N)` on the struct itself. The size is rounded up to that alignment, so `sizeof` and `offsetof` count the padding. `struct Lines { align(64) a: u64, align(64) b: u64 }` is 128 bytes, with `b` at 64. `align(64) struct One { x: u64 }` is 64 bytes. A packed struct with no `align` stays contiguous.
 
@@ -797,6 +799,50 @@ Limits: one object per invocation. A file with no `module` is the flat namespace
 `tests/link/parts/flat_entry.lap`, `flat_console.lap`, and `flat_note.lap` are one `--flat 0x10000 --elf` image. `_start` is in `.text` at `0x10000` and is byte 0 of the raw image. `module console` places `console__putc` and `console__mark` (the qword 65) in `.console` at `0x12000`. `banner` is the seven bytes `COPIHUE` in `.note`. `console__hidden` is private and is still a symbol. `-O0` and `-O2` are the same raw image and the same ELF. The image is not booted. `.console` is not at its file offset plus `0x10000`, so loading the raw file as one blob would not run that section. The check reads the ELF headers.
 
 `tests/flat/min_kernel.lap` is one such image, loaded at `0x10000`. Its IDT gates use code selector `0x18`, the 64-bit code segment of the AtomicOS bootloader GDT. Selector `0x08` on that loader is a 32-bit code segment; a gate that names it leaves long mode and the image hangs. The binary assumes that GDT is already loaded. It is not a generic bootable kernel. The image also indexes a local array, copies a packed struct, writes a `*volatile u32`, and reads CR2. Indexing a local array in `--freestanding`, `--flat`, or `--boot` does not insert the hosted bounds trap unless `--checked`. `unsafe { a[i] }` and a `for i in 0..N` that the array is long enough for still omit it. `bits 16` and `bits 32` do not insert it: the trap is a 64-bit `syscall`.
+
+### Data and bss in a flat image
+
+A `--flat` image is `.text`, then `.data`, then `.bss`, in that order whatever the order in the source (nasm puts the three standard sections in that order). Initialized globals, including an initialized array (`let table: [u8; 4] = [1, 2, 3, 4];`) and string literals, are in `.data`; uninitialized globals are in `.bss`, which is nobits: it takes no bytes in the file, and `bss_start()` / `bss_end()` bound it. This is how `--flat` has always laid a program with `let` globals out; nothing in 0.44.1 changes the bytes of an image that does not use `--axe2`. Without `--axe2` the `.data` starts where the text ends rounded to 4 bytes (nasm's default), not on a page. For `tests/axe2/layout.lap` at `0x400000` that is `.text` 4116 bytes, `.data` 12, `.bss` 72, and `.data` at `0x401014`.
+
+`--sizes` prints the sizes of the three sections on stdout, one `name=bytes` per line, for a `--flat` build (it needs `nasm`; it also writes the raw image as usual, and the image is byte for byte the one without `--sizes`):
+
+```
+text=4116
+data=12
+bss=72
+```
+
+`text` is the whole `.text` section, `align` padding included. It is an error with `--boot` or without `--flat`, and it cannot be combined with `--elf`.
+
+### AXE2 images
+
+`copihue --flat 0x400000 --axe2 -o prog.axe prog.lap` writes the file LapageriaOS loads: a 32-byte header, then the image. `--axe2` needs `--flat 0x400000` exactly (any other address is `--axe2 images load at 0x400000`), is not combined with `--elf` or `--boot`, and `-S` still stops at the assembly (with `.data` already on its own page). All numbers are little-endian:
+
+| offset | size | field |
+|---|---|---|
+| 0 | 4 | magic `AXE2` (`41 58 45 32`) |
+| 4 | 4 | bytes of image in the file (the bytes after the header) |
+| 8 | 8 | entry point: the virtual address of `_start` (`0x400000` for a plain program) |
+| 16 | 4 | bytes of text: the text rounded up to whole 4096-byte pages |
+| 20 | 4 | size in memory: from the load address to the end of the bss, never less than the image bytes |
+| 24 | 8 | reserved, zero |
+
+The layout in memory is the text first, the data starting at the page after the text (the compiler emits `section .data align=4096`), and the bss right after the data, with no bytes in the file: the loader zero-fills from the end of the file bytes to the memory size. A program with no data has no bytes after the text in the file, and its bss starts on the page after the text too. `align(4096) fn` is how code gets into a second text page. The header describes only `.text`, `.data` and `.bss`: any other named section, or an `@` load address, is `--axe2: section '.extra' is not allowed; an AXE2 image is .text, .data and .bss` (a section named `.text`, `.data` or `.bss` with no address is fine).
+
+Limits (the loader's: 1 to 16 pages of 4096): the image in the file at most 65536 bytes, and the memory size at most 65536. Over either is an error (`--axe2: the image is 65556 bytes (17 pages); the limit is 65536 bytes (16 pages)`, or `the image with its bss is ... bytes`). The entry point `_start` must be inside the text (`--axe2: the entry point _start (0x401000) is outside the text (0x400000 to 0x400014)`; it happens when `_start` is placed in another section such as `.data`), and the text cannot be empty. On any error no output file is written. With `--sizes` the AXE2 build also prints `text_bytes=`, `image=`, `memsize=` and `entry=0x...`:
+
+```
+text=4116
+data=12
+bss=72
+text_bytes=8192
+image=8204
+memsize=8276
+entry=0x400000
+```
+
+`tests/axe2/layout.lap` is that program: `_start` at byte 0, `second()` aligned to the second page, a `let` array and scalar in the data, and a bss. The suite checks each header field, the page positions, and the full file against `tests/expected/axe2/layout.hex`, and the four error cases (`err_pages`, `err_bss`, `err_entry`, `err_section`).
+
 
 ## Boot sectors
 

@@ -1,0 +1,8 @@
+// A named section other than .text, .data and .bss is not part of an AXE2 image.
+fn _start() {
+    while (1) { }
+}
+
+section ".extra" {
+    let word: i64 = 1;
+}

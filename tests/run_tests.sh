@@ -53,6 +53,11 @@ for a in "$@"; do
   esac
 done
 CAN_RUN=0; [ "$(uname -s)" = Linux ] && CAN_RUN=1
+# macOS has no timeout(1); perl is there and kills the program after N seconds.
+# (QEMU handles SIGALRM itself, so the child is killed with SIGKILL from the parent.)
+command -v timeout >/dev/null 2>&1 || timeout() {
+  perl -e 'my $t = shift; my $p = fork(); if (!$p) { exec @ARGV; exit 127 } $SIG{ALRM} = sub { kill "KILL", $p }; alarm $t; waitpid($p, 0); exit($? >> 8)' "$@"
+}
 if [ $NATIVE = 1 ] || [ $NASM = 1 ]; then
   [ $UPDATE = 0 ] || { echo "--native and --nasm do not regenerate golden files; run --update without them" >&2; exit 2; }
   [ $CAN_RUN = 1 ] || { echo "run_tests.sh --native/--nasm run the ELF executables the compiler writes, so they need Linux (this is $(uname -s)); tests/x64/run_elf.sh checks their structure anywhere" >&2; exit 2; }
@@ -93,7 +98,7 @@ check() {  # $1 = name, $2 = golden file, $3 = actual file
   else fail=$((fail+1)); failed+=("$1"); echo "FAIL $1"; [ -f "$2" ] && diff "$2" "$3" | head -10; fi
 }
 
-for src in $(ls tests/*.lap tests/*/*.lap examples/*.lap examples/*/*.lap examples/*/*/*.lap | grep -v -e '^tests/errors/' -e '^tests/freestanding/' -e "^tests/flat/" -e "^tests/boot/" -e '^tests/usermode/' -e '^tests/ctx/' -e '^tests/native/'); do
+for src in $(ls tests/*.lap tests/*/*.lap examples/*.lap examples/*/*.lap examples/*/*/*.lap | grep -v -e '^tests/errors/' -e '^tests/freestanding/' -e "^tests/flat/" -e "^tests/boot/" -e '^tests/usermode/' -e '^tests/ctx/' -e '^tests/native/' -e '^tests/align/' -e '^tests/axe2/' -e '^tests/tools/'); do
   case "$SKIP" in *" $src "*) continue ;; esac
   golden=tests/expected/${src%.lap}.out
   FELL=0
@@ -261,7 +266,7 @@ for src in tests/flat/*.lap; do
   if [ "$(grep -m1 -E "^[A-Za-z_][A-Za-z0-9_]*:$" <(sed -n "/^section .text/,\$p" "$WORK/flat.asm"))" != "_start:" ]; then
     fail=$((fail+1)); failed+=("$src"); echo "FAIL $src: _start is not the first function"; continue
   fi
-  od -An -tx1 -v "$WORK/flat.bin" > "$WORK/flat.hex"
+  od -An -tx1 -v "$WORK/flat.bin" | tr -s ' ' | sed -e 's/ *$//' -e '/^$/d' > "$WORK/flat.hex"
   check "$src" "tests/expected/flat/$name.hex" "$WORK/flat.hex"
   if grep -q '^// also-o2' "$src"; then
     if ! ( cd "$WORK" && "$CC" -O2 --flat 0x10000 -o flat2.bin "$ROOT/$src" 2>>err.txt ); then
@@ -273,6 +278,147 @@ for src in tests/flat/*.lap; do
     pass=$((pass+1))
   fi
 done
+
+# 4c. align(N) fn and the AXE2 image (0.44.1). Bytes are read with od -j/-N and compared as
+#     hex strings, so this works with the BSD od of macOS as well as GNU's.
+hexat() { od -An -v -tx1 -j "$2" -N "$3" "$1" | tr -d ' \n'; }     # file offset count
+hexall() { { od -An -v -tx1 "$1" | tr -d ' \n' | fold -w 64; echo; }; }
+le32() { printf '%02x%02x%02x%02x' $(($1 & 255)) $((($1 >> 8) & 255)) $((($1 >> 16) & 255)) $((($1 >> 24) & 255)); }
+
+# align(N) before fn, in --flat: second() on page 1 (0x11000), third() on a 256 boundary, int3 between.
+src=tests/flat/align_fn.lap
+if ! ( cd "$WORK" && "$CC" --flat 0x10000 -S -o af.asm "$ROOT/$src" 2>err.txt && "$CC" --flat 0x10000 -o af.bin "$ROOT/$src" 2>>err.txt && "$CC" -O2 --flat 0x10000 -o af2.bin "$ROOT/$src" 2>>err.txt ); then
+  fail=$((fail+1)); failed+=("$src (align)"); echo "FAIL $src (align):"; cat "$WORK/err.txt"
+else
+  grep -vE '^\s*(;|$)' "$WORK/af.asm" | grep -v '^; Generated' > "$WORK/af.norm"
+  check "$src (assembly)" tests/expected/flat/align_fn.asm.txt "$WORK/af.norm"
+  if ! cmp -s "$WORK/af.bin" "$WORK/af2.bin"; then
+    fail=$((fail+1)); failed+=("$src (align -O0 vs -O2)"); echo "FAIL $src: -O0 and -O2 images differ"
+  elif [ "$(hexat "$WORK/af.bin" 4095 2)" != cc55 ] || [ "$(hexat "$WORK/af.bin" 4351 2)" != cc55 ]; then
+    fail=$((fail+1)); failed+=("$src (align bytes)"); echo "FAIL $src: the functions are not at 0x1000 and 0x1100 behind int3 padding"
+  else pass=$((pass+1)); fi
+fi
+# The same align(N) in a hosted program and in a -c object is the same directive in front of the label.
+if ! ( cd "$WORK" && "$CC" -S -o ah.asm "$ROOT/tests/lang/align_fn.lap" 2>err.txt && "$CC" -c -o ah.o "$ROOT/tests/lang/align_fn.lap" 2>>err.txt ); then
+  fail=$((fail+1)); failed+=("tests/lang/align_fn.lap (-S, -c)"); echo "FAIL tests/lang/align_fn.lap -S/-c:"; cat "$WORK/err.txt"
+elif [ "$(grep -c '^align [0-9]*, db 0xCC$' "$WORK/ah.asm")" != 2 ] || ! grep -qx 'align 4096, db 0xCC' "$WORK/ah.asm" || ! grep -qx 'align 64, db 0xCC' "$WORK/ah.asm"; then
+  fail=$((fail+1)); failed+=("tests/lang/align_fn.lap (asm)"); echo "FAIL tests/lang/align_fn.lap: expected 'align 4096, db 0xCC' and 'align 64, db 0xCC' once each"
+else pass=$((pass+1)); fi
+
+# AXE2: --flat 0x400000 --axe2 writes the 32-byte header and the image; --sizes prints the section sizes.
+src=tests/axe2/layout.lap
+if ! ( cd "$WORK" && rm -f output.axe2.* &&
+       "$CC" --flat 0x400000 --axe2 --sizes -o l0.axe "$ROOT/$src" >sizes0.txt 2>err.txt &&
+       "$CC" -O2 --flat 0x400000 --axe2 --sizes -o l2.axe "$ROOT/$src" >sizes2.txt 2>>err.txt &&
+       "$CC" --flat 0x400000 --axe2 -S -o l.asm "$ROOT/$src" 2>>err.txt &&
+       "$CC" --flat 0x400000 -o lp.bin "$ROOT/$src" 2>>err.txt &&
+       "$CC" --flat 0x400000 --sizes -o lq.bin "$ROOT/$src" >sizesq.txt 2>>err.txt ); then
+  fail=$((fail+1)); failed+=("$src (axe2)"); echo "FAIL $src (axe2):"; cat "$WORK/err.txt"
+elif ! cmp -s "$WORK/l0.axe" "$WORK/l2.axe" || ! cmp -s "$WORK/sizes0.txt" "$WORK/sizes2.txt"; then
+  fail=$((fail+1)); failed+=("$src (axe2 -O0 vs -O2)"); echo "FAIL $src: -O0 and -O2 differ"
+elif ls "$WORK"/output.axe2.* >/dev/null 2>&1; then
+  fail=$((fail+1)); failed+=("$src (axe2 temp files)"); echo "FAIL $src: output.axe2.* left behind"
+else
+  grep -vE '^\s*(;|$)' "$WORK/l.asm" | grep -v '^; Generated' > "$WORK/l.norm"
+  check "$src (assembly)" tests/expected/axe2/layout.asm.txt "$WORK/l.norm"
+  check "$src (sizes)" tests/expected/axe2/layout.sizes "$WORK/sizes0.txt"
+  hexall "$WORK/l0.axe" > "$WORK/l.hex"
+  check "$src (file)" tests/expected/axe2/layout.hex "$WORK/l.hex"
+  # The header, field by field: magic, image bytes, entry, text bytes, memory size, reserved.
+  bad=""
+  [ "$(hexat "$WORK/l0.axe" 0 4)" = 41584532 ] || bad="$bad magic;"
+  [ "$(hexat "$WORK/l0.axe" 4 4)" = "$(le32 8204)" ] || bad="$bad image bytes;"
+  [ "$(hexat "$WORK/l0.axe" 8 8)" = 0000400000000000 ] || bad="$bad entry;"
+  [ "$(hexat "$WORK/l0.axe" 16 4)" = "$(le32 8192)" ] || bad="$bad text bytes;"
+  [ "$(hexat "$WORK/l0.axe" 20 4)" = "$(le32 8276)" ] || bad="$bad memory size;"
+  [ "$(hexat "$WORK/l0.axe" 24 8)" = 0000000000000000 ] || bad="$bad reserved;"
+  # The image: _start (push rbp) at its byte 0, second() on page 1, the data on page 2 (table, counter),
+  # and no bytes for the bss: the file is the header plus 8192 + 12.
+  [ "$(hexat "$WORK/l0.axe" 32 1)" = 55 ] || bad="$bad _start at image byte 0;"
+  [ "$(hexat "$WORK/l0.axe" 4128 1)" = 55 ] || bad="$bad second() at 0x1000;"
+  [ "$(hexat "$WORK/l0.axe" 8224 12)" = 010203040700000000000000 ] || bad="$bad data on page 2;"
+  [ "$(wc -c < "$WORK/l0.axe" | tr -d ' ')" = 8236 ] || bad="$bad file size;"
+  # --sizes alone: the raw image is the one --flat always wrote, and text/data/bss are those of the AXE2 build.
+  cmp -s "$WORK/lp.bin" "$WORK/lq.bin" || bad="$bad --sizes changed the raw image;"
+  [ "$(cat "$WORK/sizesq.txt")" = "$(head -3 "$WORK/sizes0.txt")" ] || bad="$bad --sizes text/data/bss;"
+  if [ -n "$bad" ]; then fail=$((fail+1)); failed+=("$src (axe2 header)"); echo "FAIL $src (axe2):$bad"; else pass=$((pass+1)); fi
+fi
+# 16 pages is accepted: the image is under 65536 bytes and the memory size is exactly 65536.
+src=tests/axe2/max_pages.lap
+if ! ( cd "$WORK" && "$CC" --flat 0x400000 --axe2 -o mp.axe "$ROOT/$src" 2>err.txt ); then
+  fail=$((fail+1)); failed+=("$src (axe2)"); echo "FAIL $src (axe2):"; cat "$WORK/err.txt"
+else
+  img=$(( $(wc -c < "$WORK/mp.axe" | tr -d ' ') - 32 ))
+  if [ "$(hexat "$WORK/mp.axe" 4 4)" != "$(le32 $img)" ] || [ "$(hexat "$WORK/mp.axe" 16 8)" != "$(le32 65536)$(le32 65536)" ]; then
+    fail=$((fail+1)); failed+=("$src (axe2 header)"); echo "FAIL $src: header does not say image=$img text=65536 memory=65536"
+  else pass=$((pass+1)); fi
+fi
+# Over 16 pages in the file or in memory, the entry outside the text, a section the header cannot describe:
+# an error, nothing on stdout, no output file, no temporary file.
+for n in pages bss entry section; do
+  src=tests/axe2/err_$n.lap
+  rm -f "$WORK/e.axe" "$WORK"/output.axe2.*
+  if ( cd "$WORK" && "$CC" --flat 0x400000 --axe2 --sizes -o e.axe "$ROOT/$src" >out.txt 2>err.txt ); then
+    fail=$((fail+1)); failed+=("$src"); echo "FAIL $src: compiled but should have failed"; continue
+  fi
+  if [ -s "$WORK/out.txt" ] || [ -e "$WORK/e.axe" ] || ls "$WORK"/output.axe2.* >/dev/null 2>&1; then
+    fail=$((fail+1)); failed+=("$src (left files)"); echo "FAIL $src: wrote stdout, the output file or a temporary file"; continue
+  fi
+  grep 'error:' "$WORK/err.txt" | sed "s|$ROOT/||g" > "$WORK/err.norm"
+  check "$src" "tests/expected/axe2/err_$n.err" "$WORK/err.norm"
+done
+# The option combinations that --axe2 and --sizes refuse (exit status 2, a one-line message).
+while IFS='|' read -r flags want; do
+  rm -f "$WORK/c.out"
+  # shellcheck disable=SC2086
+  ( cd "$WORK" && "$CC" $flags -o c.out "$ROOT/tests/hello.lap" >/dev/null 2>err.txt ); rc=$?
+  if [ $rc != 2 ] || ! grep -qF -- "$want" "$WORK/err.txt" || [ -e "$WORK/c.out" ]; then
+    fail=$((fail+1)); failed+=("copihue $flags"); echo "FAIL copihue $flags: want exit 2 and '$want', got exit $rc:"; cat "$WORK/err.txt"
+  else pass=$((pass+1)); fi
+done <<'EOF'
+--axe2|--axe2 requires --flat 0x400000
+--axe2 --boot|--axe2 requires --flat 0x400000
+--axe2 --flat 0x10000|--axe2 images load at 0x400000
+--axe2 --flat 0x400000 --elf|--axe2 cannot be combined with --elf
+--sizes|--sizes requires --flat
+--sizes --boot|--sizes requires --flat
+--sizes --flat 0x10000 --elf|--sizes cannot be combined with --elf
+EOF
+
+# QEMU: align(4096) fn page() sits at 0x9000 in a kernel loaded at 0x8000 (tests/usermode/boot.lap reads it),
+# runs, and reads the initialized data after the text. COM1 must show PAGE.
+# Needs qemu-system-x86_64 and timeout (perl stands in on macOS). Without them it is skipped with a notice;
+# CMP_REQUIRE=1 (the CI) makes that a failure.
+if command -v qemu-system-x86_64 >/dev/null 2>&1 && command -v perl >/dev/null 2>&1; then
+  if ! ( cd "$WORK" && "$CC" --boot -o aboot.bin "$ROOT/tests/usermode/boot.lap" 2>err.txt &&
+         "$CC" --flat 0x8000 -o akern0.bin "$ROOT/tests/align/kernel.lap" 2>>err.txt &&
+         "$CC" -O2 --flat 0x8000 -o akern2.bin "$ROOT/tests/align/kernel.lap" 2>>err.txt ); then
+    fail=$((fail+1)); failed+=("tests/align/kernel.lap"); echo "FAIL tests/align/kernel.lap:"; cat "$WORK/err.txt"
+  else
+    for kern in akern0.bin akern2.bin; do
+      if [ "$(wc -c < "$WORK/$kern" | tr -d ' ')" -gt 8192 ]; then
+        fail=$((fail+1)); failed+=("tests/align $kern (size)"); echo "FAIL tests/align $kern: larger than the 16 sectors the boot sector reads"; continue
+      fi
+      dd if=/dev/zero of="$WORK/apad.bin" bs=8192 count=1 2>/dev/null
+      dd if="$WORK/$kern" of="$WORK/apad.bin" conv=notrunc 2>/dev/null
+      cat "$WORK/aboot.bin" "$WORK/apad.bin" > "$WORK/adisk.img"
+      rm -f "$WORK/aserial.txt"
+      timeout 8 qemu-system-x86_64 -display none -boot a \
+        -drive file="$WORK/adisk.img",format=raw,if=floppy,index=0 \
+        -serial file:"$WORK/aserial.txt" </dev/null >/dev/null 2>&1 || true
+      if ! grep -q PAGE "$WORK/aserial.txt" 2>/dev/null; then
+        fail=$((fail+1)); failed+=("tests/align $kern qemu"); echo "FAIL tests/align $kern: QEMU serial did not contain PAGE"; od -An -tx1c "$WORK/aserial.txt" 2>&1 | head -3; continue
+      fi
+      pass=$((pass+1))
+    done
+  fi
+else
+  if [ "${CMP_REQUIRE:-0}" = 1 ]; then
+    fail=$((fail+1)); failed+=("tests/align qemu (missing tool)"); echo "FAIL tests/align: CMP_REQUIRE=1 and qemu-system-x86_64 or perl is missing"
+  else
+    echo "skip tests/align QEMU run: qemu-system-x86_64 or perl is not installed (CMP_REQUIRE=1 makes this an error)"
+  fi
+fi
 
 # 5. Boot sectors: tests/boot/*.lap build with --boot into a 512-byte image
 # 6. tests/usermode: boot sector plus a flat kernel. QEMU must print USER.
@@ -321,7 +467,7 @@ for src in tests/boot/*.lap; do
   if [ "$(wc -c < "$WORK/boot.bin")" -ne 512 ] || [ "$(tail -c 2 "$WORK/boot.bin" | od -An -tx1 | tr -d ' \n')" != "55aa" ]; then
     fail=$((fail+1)); failed+=("$src"); echo "FAIL $src: not a 512-byte sector with signature 55 aa"; continue
   fi
-  od -An -tx1 -v "$WORK/boot.bin" > "$WORK/boot.hex"
+  od -An -tx1 -v "$WORK/boot.bin" | tr -s ' ' | sed -e 's/ *$//' -e '/^$/d' > "$WORK/boot.hex"
   check "$src" "tests/expected/boot/$name.hex" "$WORK/boot.hex"
   if command -v qemu-system-x86_64 >/dev/null 2>&1; then
     rm -f "$WORK/serial.txt"
@@ -347,7 +493,7 @@ if [ -f tests/usermode/boot.lap ] && [ -f tests/usermode/kernel.lap ]; then
   elif [ "$(wc -c < "$WORK/uboot.bin")" -ne 512 ] || [ "$(tail -c 2 "$WORK/uboot.bin" | od -An -tx1 | tr -d ' \n')" != "55aa" ]; then
     fail=$((fail+1)); failed+=("tests/usermode/boot.lap"); echo "FAIL tests/usermode/boot.lap: not a 512-byte sector with signature 55 aa"
   else
-    od -An -tx1 -v "$WORK/uboot.bin" > "$WORK/uboot.hex"
+    od -An -tx1 -v "$WORK/uboot.bin" | tr -s ' ' | sed -e 's/ *$//' -e '/^$/d' > "$WORK/uboot.hex"
     check "tests/usermode/boot.lap" "tests/expected/usermode/boot.hex" "$WORK/uboot.hex"
     if ! ( cd "$WORK" && "$CC" --flat 0x8000 -o ukernel.bin "$ROOT/tests/usermode/kernel.lap" 2>err.txt && "$CC" -O2 --flat 0x8000 -o ukernel2.bin "$ROOT/tests/usermode/kernel.lap" 2>>err.txt ); then
       fail=$((fail+1)); failed+=("tests/usermode/kernel.lap"); echo "FAIL tests/usermode/kernel.lap:"; cat "$WORK/err.txt"
@@ -359,7 +505,7 @@ if [ -f tests/usermode/boot.lap ] && [ -f tests/usermode/kernel.lap ]; then
       elif [ "$ksz" -gt 8192 ] || [ "$ksz2" -gt 8192 ]; then
         fail=$((fail+1)); failed+=("tests/usermode/kernel.lap"); echo "FAIL tests/usermode/kernel.lap: image is larger than 16 sectors ($ksz / $ksz2)"
       else
-        od -An -tx1 -v "$WORK/ukernel.bin" > "$WORK/ukernel.hex"
+        od -An -tx1 -v "$WORK/ukernel.bin" | tr -s ' ' | sed -e 's/ *$//' -e '/^$/d' > "$WORK/ukernel.hex"
         check "tests/usermode/kernel.lap" "tests/expected/usermode/kernel.hex" "$WORK/ukernel.hex"
         if command -v qemu-system-x86_64 >/dev/null 2>&1; then
           for kern in ukernel.bin ukernel2.bin; do
@@ -392,7 +538,7 @@ if [ -f tests/ctx/boot.lap ] && [ -f tests/ctx/kernel.lap ]; then
   elif [ "$(wc -c < "$WORK/cboot.bin")" -ne 512 ] || [ "$(tail -c 2 "$WORK/cboot.bin" | od -An -tx1 | tr -d ' \n')" != "55aa" ]; then
     fail=$((fail+1)); failed+=("tests/ctx/boot.lap"); echo "FAIL tests/ctx/boot.lap: not a 512-byte sector with signature 55 aa"
   else
-    od -An -tx1 -v "$WORK/cboot.bin" > "$WORK/cboot.hex"
+    od -An -tx1 -v "$WORK/cboot.bin" | tr -s ' ' | sed -e 's/ *$//' -e '/^$/d' > "$WORK/cboot.hex"
     check "tests/ctx/boot.lap" "tests/expected/ctx/boot.hex" "$WORK/cboot.hex"
     if ! ( cd "$WORK" && "$CC" --flat 0x8000 -o ckernel.bin "$ROOT/tests/ctx/kernel.lap" 2>err.txt && "$CC" -O2 --flat 0x8000 -o ckernel2.bin "$ROOT/tests/ctx/kernel.lap" 2>>err.txt ); then
       fail=$((fail+1)); failed+=("tests/ctx/kernel.lap"); echo "FAIL tests/ctx/kernel.lap:"; cat "$WORK/err.txt"
@@ -404,7 +550,7 @@ if [ -f tests/ctx/boot.lap ] && [ -f tests/ctx/kernel.lap ]; then
       elif [ "$ksz" -gt 8192 ] || [ "$ksz2" -gt 8192 ]; then
         fail=$((fail+1)); failed+=("tests/ctx/kernel.lap"); echo "FAIL tests/ctx/kernel.lap: image is larger than 16 sectors ($ksz / $ksz2)"
       else
-        od -An -tx1 -v "$WORK/ckernel.bin" > "$WORK/ckernel.hex"
+        od -An -tx1 -v "$WORK/ckernel.bin" | tr -s ' ' | sed -e 's/ *$//' -e '/^$/d' > "$WORK/ckernel.hex"
         check "tests/ctx/kernel.lap" "tests/expected/ctx/kernel.hex" "$WORK/ckernel.hex"
         if command -v qemu-system-x86_64 >/dev/null 2>&1; then
           for kern in ckernel.bin ckernel2.bin; do
@@ -787,62 +933,10 @@ if ! ( cd "$WORK" &&
   fail=$((fail+1)); failed+=("flat elf"); echo "FAIL flat elf:"; cat "$WORK/err.txt"
 elif ! cmp -s "$WORK/k.bin" "$WORK/k2.bin" || ! cmp -s "$WORK/k.elf" "$WORK/k2.elf"; then
   fail=$((fail+1)); failed+=("flat elf"); echo "FAIL flat elf: -O0 and -O2 images differ"
-elif ! python3 - "$WORK/k.elf" "$WORK/k.bin" << 'PY'
-import sys, struct
-data = open(sys.argv[1], "rb").read()
-raw = open(sys.argv[2], "rb").read()
-assert data[:4] == b"\x7fELF" and data[4] == 2 and data[5] == 1
-e_type, e_machine = struct.unpack_from("<HH", data, 16)
-assert e_type == 2 and e_machine == 62
-e_entry, e_phoff, e_shoff = struct.unpack_from("<QQQ", data, 24)
-e_phentsize, e_phnum, e_shentsize, e_shnum, e_shstrndx = struct.unpack_from("<HHHHH", data, 54)
-assert e_phentsize == 56 and e_shentsize == 64 and e_phnum >= 1 and e_shnum >= 4
-def shdr(i):
-    return struct.unpack_from("<IIQQQQIIQQ", data, e_shoff + i * 64)
-shstr = data[shdr(e_shstrndx)[4]:shdr(e_shstrndx)[4] + shdr(e_shstrndx)[5]]
-def nm(off):
-    return shstr[off:shstr.index(b"\0", off)].decode()
-secs = {}
-for i in range(e_shnum):
-    sh = shdr(i)
-    secs[nm(sh[0])] = sh
-for name in (".text", ".console", ".note", ".data", ".bss"):
-    assert name in secs, name
-assert secs[".console"][3] == 0x12000
-blob = secs[".text"][4]
-assert data[blob:blob + len(raw)] == raw
-for name in (".text", ".console", ".note"):
-    sh = secs[name]
-    assert sh[1] == 1 and sh[5] > 0
-    assert data[sh[4]:sh[4] + sh[5]] == raw[sh[4] - blob:sh[4] - blob + sh[5]]
-sym = secs[".symtab"]
-strtab = data[secs[".strtab"][4]:secs[".strtab"][4] + secs[".strtab"][5]]
-syms = {}
-for i in range(sym[5] // 24):
-    st_name, st_info, st_other, st_shndx, st_value, st_size = struct.unpack_from("<IBBHQQ", data, sym[4] + i * 24)
-    if st_name == 0:
-        continue
-    syms[strtab[st_name:strtab.index(b"\0", st_name)].decode()] = st_value
-assert e_entry == syms["_start"] == secs[".text"][3] == 0x10000
-assert syms["console__putc"] == secs[".console"][3]
-assert syms["console__mark"] > secs[".console"][3]
-assert syms["banner"] == secs[".note"][3]
-assert "console__hidden" in syms
-def file_off(sec, val):
-    sh = secs[sec]
-    return sh[4] + (val - sh[3])
-assert data[file_off(".console", syms["console__mark"]):][:8] == (65).to_bytes(8, "little")
-assert data[file_off(".note", syms["banner"]):][:7] == b"COPIHUE"
-assert secs[".text"][3] + secs[".text"][5] <= secs[".console"][3]
-found = False
-for i in range(e_phnum):
-    p_type, p_flags, p_offset, p_vaddr, p_paddr, p_filesz, p_memsz, p_align = struct.unpack_from("<IIQQQQQQ", data, e_phoff + i * 56)
-    if p_type == 1 and p_vaddr == 0x12000 and p_filesz == secs[".console"][5] and p_align == 1:
-        found = True
-assert found
-PY
+elif ! gcc -O2 -Wall -Werror -o "$WORK/flat_elf_check" "$ROOT/tests/tools/flat_elf_check.c" 2>"$WORK/err.txt" ||
+     ! "$WORK/flat_elf_check" "$WORK/k.elf" "$WORK/k.bin" 2>"$WORK/err.txt"
 then
-  fail=$((fail+1)); failed+=("flat elf"); echo "FAIL flat elf: ELF layout"
+  fail=$((fail+1)); failed+=("flat elf"); echo "FAIL flat elf: ELF layout"; cat "$WORK/err.txt"
 else
   pass=$((pass+1))
 fi
