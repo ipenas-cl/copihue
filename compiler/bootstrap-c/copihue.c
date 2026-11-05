@@ -20539,21 +20539,41 @@ static void put_outf(Codegen* cg, FILE* out, const char* fmt, ...) {
 // Same bytes the .data/.bss file pass has always written. `out` NULL appends
 // to the code buffer, which is where a named section other than .data/.bss
 // (and every section of a boot image) has to live.
-static void write_global_align(Codegen* cg, FILE* out, GlobalVar* gv) {
+// The alignment a global asks for, or 0 when it takes none. Ordinary scalars
+// and structs are already at most 8; emitting align 8 in front of every global
+// would pad flat images. align(N) and a type stricter than 8 (a cache line)
+// are the ones that move the counter.
+static int global_align_want(Codegen* cg, GlobalVar* gv) {
     int want = gv->align;
     StructType* st = NULL;
     if (!gv->is_pointer && gv->type_name)
         st = typetab_lookup(cg->types, gv->is_array && gv->elem_type ? gv->elem_type : gv->type_name);
     if (st && st->align > want) want = st->align;
-    // Ordinary scalars and structs are already at most 8. Emitting align 8
-    // in front of every global would pad flat images. align(N) and a type
-    // stricter than 8 (a cache line) are the ones that move the counter.
-    if (gv->align > 1 || want > 8) {
-        int bss = !gv->is_initialized && (!gv->section || !strcmp(gv->section, ".bss"));
-        // `align N` in a nobits section warns: the default fill initializes.
-        // resb is the uninitialized pad. A progbits section uses a zero byte.
-        if (want > 1) put_outf(cg, out, bss ? "align %d, resb 1\n" : "align %d, db 0\n", want);
+    return (gv->align > 1 || want > 8) && want > 1 ? want : 0;
+}
+
+static void write_global_align(Codegen* cg, FILE* out, GlobalVar* gv) {
+    int want = global_align_want(cg, gv);
+    int bss = !gv->is_initialized && (!gv->section || !strcmp(gv->section, ".bss"));
+    // `align N` in a nobits section warns: the default fill initializes.
+    // resb is the uninitialized pad. A progbits section uses a zero byte.
+    if (want) put_outf(cg, out, bss ? "align %d, resb 1\n" : "align %d, db 0\n", want);
+}
+
+// The strictest alignment among the globals the file pass puts in .data
+// (want_init) or in .bss (not). In a flat image the section itself must start on
+// that boundary, or `align N` inside it only aligns relative to the section.
+static int section_align_need(Codegen* cg, int want_init) {
+    int need = 0;
+    for (int i = 0; i < cg->global_symtab->count; i++) {
+        GlobalVar* gv = &cg->global_symtab->vars[i];
+        int w;
+        if (gv->is_extern || !gv->is_initialized != !want_init) continue;
+        if (gv->section && strcmp(gv->section, want_init ? ".data" : ".bss")) continue;
+        w = global_align_want(cg, gv);
+        if (w > need) need = w;
     }
+    return need;
 }
 
 static void write_global_def(Codegen* cg, FILE* out, GlobalVar* gv) {
@@ -21049,6 +21069,16 @@ void codegen(AstNode* ast, const char* file, StringTable* strtab, TypeTable* typ
         return;
     }
     if (g_flat_org) fprintf(cg.out, "bits 64\norg %s\n\n", g_flat_org);
+    if (g_flat_org) {
+        // nasm counts an alignment from the start of the image, which is the
+        // load address: a let is at a multiple of N only if the org is.
+        int need = section_align_need(&cg, 1);
+        int bneed = section_align_need(&cg, 0);
+        if (bneed > need) need = bneed;
+        if (need > 1 && strtoull(g_flat_org, NULL, 0) % (unsigned long long)need)
+            fprintf(stderr, COMPILER_BIN ": warning: align(%d) on a let, but --flat %s is not a multiple of %d: "
+                    "the let is aligned from the start of the image\n", need, g_flat_org, need);
+    }
     NamedSection* data_sec = section_find(".data");
     if (section_bin_addr(data_sec))
         fprintf(cg.out, "section .data vstart=0x%llx align=1\n", data_sec->addr);
@@ -21056,6 +21086,10 @@ void codegen(AstNode* ast, const char* file, StringTable* strtab, TypeTable* typ
         // The text pages are read-only and executable, the rest is not: the
         // data starts on the page after the text. An empty .data adds no bytes.
         fprintf(cg.out, "section .data align=4096\n");
+    else if (g_flat_org && section_align_need(&cg, 1) > 0)
+        // An align(N) let in a flat image: the section starts on that boundary
+        // (counted from the org), so the let inside it does too.
+        fprintf(cg.out, "section .data align=%d\n", section_align_need(&cg, 1));
     else
         fprintf(cg.out, "section .data\n");
     if (data_sec && data_sec->need_start && !data_sec->started) {
@@ -21096,6 +21130,8 @@ void codegen(AstNode* ast, const char* file, StringTable* strtab, TypeTable* typ
     if (g_flat_org) {
         if (section_bin_addr(bss_sec))
             fprintf(cg.out, "\nsection .bss vstart=0x%llx align=1\n__bss_start:\n", bss_sec->addr);
+        else if (section_align_need(&cg, 0) > 0)
+            fprintf(cg.out, "\nsection .bss align=%d\n__bss_start:\n", section_align_need(&cg, 0));
         else
             fprintf(cg.out, "\nsection .bss\n__bss_start:\n");
         has_bss = 1;

@@ -1,0 +1,5 @@
+align(8) const N = 4;
+
+fn main() -> i64 {
+    return N;
+}

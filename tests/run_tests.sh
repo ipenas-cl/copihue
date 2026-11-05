@@ -436,6 +436,44 @@ for n in big bss entry section nostart; do
   check "$src" "tests/expected/axe1/err_$n.err" "$WORK/err.norm"
 done
 
+# align(N) before a global let, in --flat 0x400000: head 0x401000, page (align 4096) 0x402000, tail right after it,
+# zbuf (align 4096, the first thing in the bss) 0x403000 so the bss has a page of its own, mark behind it.
+# The addresses are checked in the code (the imm32 of each lea), in --sizes (data_at, bss_at) and in the bytes
+# of the data page. --axe1 refuses it: the page does not fit in one.
+src=tests/align/let.lap
+if ! ( cd "$WORK" && rm -f output.axe2.* &&
+       "$CC" --flat 0x400000 -S -o lt.asm "$ROOT/$src" 2>err.txt &&
+       "$CC" --flat 0x400000 -o lt0.bin "$ROOT/$src" 2>>err.txt &&
+       "$CC" -O2 --flat 0x400000 -o lt2.bin "$ROOT/$src" 2>>err.txt &&
+       "$CC" --flat 0x400000 --axe2 --sizes -o lt.axe "$ROOT/$src" >lt.sizes 2>>err.txt ); then
+  fail=$((fail+1)); failed+=("$src (align let)"); echo "FAIL $src (align let):"; cat "$WORK/err.txt"
+elif ! cmp -s "$WORK/lt0.bin" "$WORK/lt2.bin"; then
+  fail=$((fail+1)); failed+=("$src (align let -O0 vs -O2)"); echo "FAIL $src: -O0 and -O2 differ"
+else
+  grep -vE '^\s*(;|$)' "$WORK/lt.asm" | grep -v '^; Generated' > "$WORK/lt.norm"
+  check "$src (assembly)" tests/expected/align/let.asm.txt "$WORK/lt.norm"
+  check "$src (sizes)" tests/expected/align/let.sizes "$WORK/lt.sizes"
+  bad=""
+  [ "$(hexat "$WORK/lt0.bin" 12 4)" = 00104000 ] || bad="$bad head at 0x401000;"
+  [ "$(hexat "$WORK/lt0.bin" 24 4)" = 00204000 ] || bad="$bad page at 0x402000;"
+  [ "$(hexat "$WORK/lt0.bin" 36 4)" = 20204000 ] || bad="$bad tail at 0x402020;"
+  [ "$(hexat "$WORK/lt0.bin" 48 4)" = 00304000 ] || bad="$bad zbuf at 0x403000;"
+  [ "$(hexat "$WORK/lt0.bin" 60 4)" = 10304000 ] || bad="$bad mark at 0x403010;"
+  [ "$(hexat "$WORK/lt0.bin" 4096 8)" = 0500000000000000 ] || bad="$bad head's bytes;"
+  [ "$(hexat "$WORK/lt0.bin" 8192 16)" = 01000000000000000200000000000000 ] || bad="$bad page's bytes;"
+  [ "$(hexat "$WORK/lt0.bin" 8224 8)" = 0600000000000000 ] || bad="$bad tail's bytes;"
+  [ "$(wc -c < "$WORK/lt0.bin" | tr -d ' ')" = 8232 ] || bad="$bad file size (no bytes for the bss);"
+  grep -qx 'data_at=0x401000' "$WORK/lt.sizes" || bad="$bad data_at;"
+  grep -qx 'bss_at=0x403000' "$WORK/lt.sizes" || bad="$bad bss_at;"
+  if ( cd "$WORK" && "$CC" --flat 0x400000 --axe1 -o lt1.axe "$ROOT/$src" >/dev/null 2>lt1.err ) || [ -e "$WORK/lt1.axe" ] \
+     || ! grep -q -- '--axe1: the image is' "$WORK/lt1.err"; then bad="$bad --axe1 should refuse it;"; fi
+  # An org that is not a multiple of 4096 still builds, with a warning that the let is aligned from the image start.
+  if ! ( cd "$WORK" && "$CC" --flat 0x400800 -o lt3.bin "$ROOT/$src" >/dev/null 2>lt3.err ) || ! grep -q 'is not a multiple of 4096' "$WORK/lt3.err"; then
+    bad="$bad org warning;"
+  fi
+  if [ -n "$bad" ]; then fail=$((fail+1)); failed+=("$src (align let)"); echo "FAIL $src (align let):$bad"; else pass=$((pass+1)); fi
+fi
+
 # QEMU: align(4096) fn page() sits at 0x9000 in a kernel loaded at 0x8000 (tests/usermode/boot.lap reads it),
 # runs, and reads the initialized data after the text. COM1 must show PAGE.
 # Needs qemu-system-x86_64 and timeout (perl stands in on macOS). Without them it is skipped with a notice;

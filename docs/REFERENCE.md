@@ -374,6 +374,18 @@ A field's `align(N)` replaces its natural alignment, including inside `packed st
 
 A global is placed with NASM `align` when it says `align(N)` or when its type's alignment is stricter than 8. In `.bss` the pad is `resb`. Two `align(64)` globals do not share a 64-byte line: their addresses differ by at least 64 and each is 0 mod 64. A local stays an 8-byte slot. `tests/lang/align64.lap` prints the offsets, the sizes, the gap, and the low 6 bits of the addresses.
 
+In a `--flat` image (and so `--axe1` and `--axe2`) nasm counts `align N` from the start of the section, so before 0.44.3 an `align(4096) let` was aligned only relative to its section, and the section started wherever the previous one ended (4 bytes granularity for `.data`, right after the data for `.bss`): the let was on a multiple of 4096 in memory only when its section happened to start on one. Now, when a `--flat` program has an `align(N)` global (or a type stricter than 8) in `.data` or in `.bss`, the compiler starts that section on an `N` boundary too (`section .data align=N`, `section .bss align=N`), counted from the load address. The first aligned global of a section is therefore on a multiple of `N`, and so is every later one that asks for it. No hand padding is needed to get the `.bss` on a page of its own: make an `align(4096) let` the first uninitialized global.
+
+```copihue
+let head: i64 = 5;                          // .data: 0x401000
+align(4096) let page: [i64; 4] = [1, 2, 3, 4]; // 0x402000
+let tail: i64 = 6;                          // 0x402020
+align(4096) let zbuf: [u8; 16];             // .bss starts here: 0x403000
+let mark: i64;                              // 0x403010
+```
+
+That is `tests/align/let.lap` built with `--flat 0x400000`. The cost of an aligned `.data` is in the file: the section starts at the first `N` boundary after the text, so the gap (here from `0x400055` to `0x401000`) is zero bytes in the image; `.bss` is nobits, so an aligned `.bss` costs nothing in the file. With `--axe2` the `.data` is already on the page after the text, and `--sizes` prints `data_at=` and `bss_at=` so the addresses can be read without running the image. With `--axe1` an `align(4096) let` in `.data` does not fit in the one page (`--axe1: the image is ...`). If the load address is not a multiple of `N` (`--flat 0x400800` with `align(4096)`) the build still works and says `warning: align(4096) on a let, but --flat 0x400800 is not a multiple of 4096: the let is aligned from the start of the image`. A global in a named section other than `.data` and `.bss` keeps the old behavior (`align N` inside that section). A hosted program and a `-c` object are unchanged: the linker places their sections on pages. The suite checks the `lea` immediates, the bytes of the data page, `--sizes`, and `-O0` against `-O2`; it does not run the image.
+
 `a = b` copies one struct value onto another of the same type. The copy is exactly the struct's size: whole qwords, then a byte tail, so a packed record does not spill into the next field or array element. It works for locals, globals, array elements (`table[i] = other`), and nested fields (`box.point = p`). A different struct type is a compile error. Nested scalar access (`box.point.x`) addresses that field, not the first eight bytes of the parent.
 
 Passing a struct to a function is still a copy into the callee's frame. There is no move, and the two objects are independent after the assignment.

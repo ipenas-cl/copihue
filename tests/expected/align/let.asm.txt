@@ -1,0 +1,40 @@
+bits 64
+org 0x400000
+section .data align=4096
+head: dq 5
+align 4096, db 0
+page: dq 1, 2, 3, 4
+tail: dq 6
+section .bss align=4096
+__bss_start:
+align 4096, resb 1
+zbuf: resb 16
+mark: resq 1
+section .bss
+__bss_end:
+section .text
+_start:
+    push rbp
+    mov rbp, rsp
+    sub rsp, __frame__start
+    lea rax, [head]
+    mov [rbp-8], rax
+    lea rax, [page]
+    mov [rbp-16], rax
+    lea rax, [tail]
+    mov [rbp-24], rax
+    lea rax, [zbuf]
+    mov [rbp-32], rax
+    lea rax, [mark]
+    mov [rbp-40], rax
+.L0:
+    mov rax, 1
+    test rax, rax
+    jz .L1
+.L2:
+    jmp .L0
+.L1:
+    xor rax, rax
+    leave
+    ret
+__frame__start equ 112
