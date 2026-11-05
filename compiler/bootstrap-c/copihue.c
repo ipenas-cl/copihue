@@ -16,7 +16,7 @@
 
 // ==== NAMING (single place to change when the language is renamed) ====
 #define LANG_NAME     "Copihue"
-#define LANG_VERSION  "0.44.1"
+#define LANG_VERSION  "0.44.2"
 #define COMPILER_BIN  "copihue"
 #define SRC_EXT       ".lap"   /* Lapageria rosea, the copihue */
 #define OLD_SRC_EXT   ".cph"   /* v0.18.x extension, still accepted with a warning */
@@ -5057,6 +5057,44 @@ static void cold_emit(const char* fmt, ...) {
 static void cold_flush(Codegen* cg) {
     if (g_cold && g_cold_len > 0) emit(cg, "%s", g_cold);
     g_cold_len = 0;
+}
+
+// A frame this big can skip the guard page under the stack: touch every page on the way down.
+#define STACK_PROBE_MIN 4096
+
+// The prologue allocates the frame with `sub rsp, __frame_F`, whose size is known only after the
+// body. Once it is, a frame of STACK_PROBE_MIN bytes or more swaps that one line for a loop that
+// lowers rsp one page at a time and touches the page it lands on (the same idea as
+// -fstack-clash-protection and __chkstk), then touches the lowest word. Smaller frames keep the
+// single `sub`. r11 is the page counter: it is not a parameter or return register, and the callers
+// of every prologue (function, interrupt, syscall) leave nothing in it. The line is found by text,
+// not by offset: emit_extern_sym can insert at the start of the buffer meanwhile.
+static void probe_frame(Codegen* cg, const char* fn, int frame) {
+    if (frame < STACK_PROBE_MIN || !cg->code_buf) return;
+    char line[160];
+    int ll = snprintf(line, sizeof line, "    sub rsp, __frame_%s\n", fn);
+    char* at = strstr(cg->code_buf, line);
+    if (!at) return;
+    char seq[512];
+    int sl = snprintf(seq, sizeof seq,
+        "    mov r11, %d\n"
+        ".Lprobe_%s:\n"
+        "    sub rsp, 4096\n"
+        "    or qword [rsp], 0\n"
+        "    sub r11, 4096\n"
+        "    cmp r11, 4096\n"
+        "    ja .Lprobe_%s\n"
+        "    sub rsp, r11\n"
+        "    or qword [rsp], 0\n", frame, fn, fn);
+    size_t off = (size_t)(at - cg->code_buf);
+    size_t need = (size_t)cg->code_len + (size_t)(sl - ll) + 1;
+    while (need > (size_t)cg->code_cap) {
+        cg->code_cap = cg->code_cap ? cg->code_cap * 2 : 4096;
+        cg->code_buf = safe_realloc(cg->code_buf, cg->code_cap);
+    }
+    memmove(cg->code_buf + off + sl, cg->code_buf + off + ll, (size_t)cg->code_len - off - ll + 1);
+    memcpy(cg->code_buf + off, seq, (size_t)sl);
+    cg->code_len += sl - ll;
 }
 
 // In-range path falls through. The trap is appended and emitted after ret.
@@ -20014,6 +20052,7 @@ void gen_func(Codegen* cg, AstNode* n) {
         int stack_size = cg->symtab->stack_size + 64;
         stack_size = ((stack_size + 15) / 16) * 16;   // keep rsp 16-byte aligned
         emit(cg, "__frame_%s equ %d\n", g_fn_name, stack_size);
+        probe_frame(cg, g_fn_name, stack_size);
     }
     for (int i = 0; i < g_naked_slot_n; i++) {
         if (legacy_bits()) emit(cg, "%s: dd 0\n", g_naked_slots[i]);
