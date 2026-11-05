@@ -21,6 +21,7 @@ typedef struct {
     char mnem[16];
     char* target;
     int is_call, is_jmp, shortk, islong, forcelong;
+    int ext_t;          // the target is an `extern` name: always the long form, with a relocation
     long tidx;          // item index of the target label
     // IT_ALIGN
     int align, fill;
@@ -51,6 +52,8 @@ typedef struct {
     Sym** tab; size_t ntab;
     Equ* equ; int nequ, capequ;
     char** glob; int nglob, capglob;
+    char** ext; int next, capext;
+    int obj;            // assembling a relocatable object
     long* addr;
 } Ctx;
 
@@ -89,6 +92,19 @@ static unsigned hash(const char* s) {
 static Sym* sym_find(Ctx* c, const char* name) {
     for (Sym* s = c->tab[hash(name) % c->ntab]; s; s = s->next) if (!strcmp(s->name, name)) return s;
     return NULL;
+}
+
+static int ext_find(const Ctx* c, const char* name) {
+    for (int i = 0; i < c->next; i++) if (!strcmp(c->ext[i], name)) return 1;
+    return 0;
+}
+
+static void ext_add(Ctx* c, const char* name) {
+    if (c->next == c->capext) {
+        c->capext = c->capext ? c->capext * 2 : 8;
+        c->ext = realloc(c->ext, (size_t)c->capext * sizeof *c->ext);
+    }
+    c->ext[c->next++] = dup(name);
 }
 
 static int equ_find(Ctx* c, const char* name, int64_t* v) {
@@ -457,6 +473,13 @@ static int read_lines(Ctx* c, const char* src) {
                 c->glob[c->nglob++] = dup(args);
                 goto next;
             }
+            if (!strcmp(x.dir, "extern")) {
+                if (!c->obj) { rc = fail(c, line, "directive 'extern' not supported (an executable has nothing to link it with; only a -c object)"); goto next; }
+                if (!*args || strpbrk(args, " \t,") || args[0] == '.') { rc = fail(c, line, "extern takes one name"); goto next; }
+                if (ext_find(c, args)) { rc = fail(c, line, "extern '%s' declared twice", args); goto next; }
+                ext_add(c, args);
+                goto next;
+            }
             if (!is_data_dir(x.dir) && strcmp(x.dir, "times")) { rc = fail(c, line, "directive '%s' not supported", x.dir); goto next; }
             rc = data_directive(c, sec, line, x.dir, args, parent);
             goto next;
@@ -573,6 +596,17 @@ static void reloc_push(Ctx* c, AsmOut* o, size_t* caps, int in, long off, int ty
     r->addend = addend + (s->sec == ASM_SEC_TEXT ? sym_addr(c, s) : s->off);
 }
 
+// A relocation against a name declared `extern`: the symbol is the name itself.
+static void reloc_push_ext(AsmOut* o, size_t* caps, int in, long off, int type, const char* name, int64_t addend) {
+    AsmSection* sc = &o->sec[in];
+    if (sc->nrel == caps[in]) { caps[in] = caps[in] ? caps[in] * 2 : 64; sc->rel = realloc(sc->rel, caps[in] * sizeof *sc->rel); }
+    AsmReloc* r = &sc->rel[sc->nrel++];
+    memset(r, 0, sizeof *r);
+    r->in = in; r->off = (int)off; r->type = type; r->sec = ASM_SEC_UNDEF;
+    snprintf(r->sym, sizeof r->sym, "%s", name);
+    r->addend = addend;
+}
+
 static int sym_cmp(const void* a, const void* b) {
     const AsmSym* x = a; const AsmSym* y = b;
     if (x->sec != y->sec) return x->sec < y->sec ? -1 : 1;
@@ -584,13 +618,22 @@ static int assemble(Ctx* c, AsmOut* out) {
     // Every `global` must be defined; every branch target must be a .text label.
     for (int i = 0; i < c->nglob; i++) {
         Sym* s = sym_find(c, c->glob[i]);
+        if (!s && c->obj) continue;      // nasm -f elf64 drops a global that nothing defines or uses
         if (!s) return fail(c, 0, "global '%s' is not defined", c->glob[i]);
         s->global = 1;
     }
+    for (int i = 0; i < c->next; i++)
+        if (sym_find(c, c->ext[i])) return fail(c, sym_find(c, c->ext[i])->line, "'%s' is declared extern and also defined", c->ext[i]);
     for (long i = 0; i < c->nit; i++) {
         Item* it = &c->it[i];
         if (it->kind != IT_BRANCH) continue;
         Sym* s = sym_find(c, it->target);
+        if (!s && ext_find(c, it->target)) {
+            // A jump or call to another object: near form, the displacement is the linker's.
+            if (it->shortk) return fail(c, it->line, "short jump to the extern '%s'", it->target);
+            it->ext_t = 1; it->forcelong = 1; it->islong = 1;
+            continue;
+        }
         if (!s) return fail(c, it->line, "undefined label '%s'", it->target);
         if (s->sec != ASM_SEC_TEXT) return fail(c, it->line, "'%s' is not a label of .text", it->target);
         it->tidx = s->item;
@@ -614,7 +657,7 @@ static int assemble(Ctx* c, AsmOut* out) {
         if (it->kind == IT_ALIGN) { memset(d, it->fill, (size_t)it->n); continue; }
         if (it->kind == IT_BRANCH) {
             long size = branch_size(it);
-            long rel = sym_addr(c, sym_find(c, it->target)) - (c->addr[i] + size);
+            long rel = it->ext_t ? 0 : sym_addr(c, sym_find(c, it->target)) - (c->addr[i] + size);
             XEnc e;
             if (x64_encode_branch(it->mnem, !it->islong, (int32_t)rel, &e) != size) return fail(c, it->line, "branch to '%s' does not encode", it->target);
             memcpy(d, e.b, (size_t)size);
@@ -623,7 +666,8 @@ static int assemble(Ctx* c, AsmOut* out) {
             if (it->is_call) out->calls++;
             else if (it->is_jmp) { if (it->islong) out->jmp_long++; else out->jmp_short++; }
             else { if (it->islong) out->jcc_long++; else out->jcc_short++; }
-            if (it->islong && !it->is_call) {
+            if (it->ext_t) reloc_push_ext(out, relcap, ASM_SEC_TEXT, c->addr[i] + size - 4, XR_PC32, it->target, -4);
+            else if (it->islong && !it->is_call) {
                 long rs = sym_addr(c, sym_find(c, it->target)) - (c->addr[i] + 2);
                 if (rs >= -128 && rs <= 127) out->long_fits++;
             }
@@ -632,9 +676,10 @@ static int assemble(Ctx* c, AsmOut* out) {
         memcpy(d, c->pool + it->poff, (size_t)it->n);
         if (!it->rsym) continue;
         Sym* s = sym_find(c, it->rsym);
-        if (!s) return fail(c, it->line, "undefined symbol '%s'", it->rsym);
         const XReloc* r = &it->rel;
         long field = c->addr[i] + r->off;
+        if (!s && ext_find(c, it->rsym)) { reloc_push_ext(out, relcap, ASM_SEC_TEXT, field, r->type, it->rsym, r->addend); continue; }
+        if (!s) return fail(c, it->line, "undefined symbol '%s'", it->rsym);
         if (s->sec == ASM_SEC_TEXT && r->type == XR_PC32) {
             int64_t v = sym_addr(c, s) + r->addend - field;
             if (v < INT32_MIN || v > INT32_MAX) return fail(c, it->line, "displacement to '%s' out of range", it->rsym);
@@ -657,6 +702,7 @@ static int assemble(Ctx* c, AsmOut* out) {
     for (size_t i = 0; i < c->ndr; i++) {
         const DReloc* r = &c->dr[i];
         Sym* s = sym_find(c, r->sym);
+        if (!s && ext_find(c, r->sym)) { reloc_push_ext(out, relcap, r->in, (long)r->off, r->type, r->sym, r->addend); continue; }
         if (!s) return fail(c, r->line, "undefined symbol '%s'", r->sym);
         reloc_push(c, out, relcap, r->in, (long)r->off, r->type, s, r->addend);
     }
@@ -671,6 +717,16 @@ static int assemble(Ctx* c, AsmOut* out) {
             y->off = s->sec == ASM_SEC_TEXT ? sym_addr(c, s) : s->off;
         }
     qsort(out->sym, out->nsym, sizeof *out->sym, sym_cmp);
+    // The undefined symbols of the object: the externs some code or data uses
+    // (nasm leaves an unused one out).
+    out->ext = calloc(c->next ? (size_t)c->next : 1, sizeof *out->ext);
+    for (int i = 0; i < c->next; i++) {
+        int used = 0;
+        for (int k = 0; k < ASM_NSEC && !used; k++)
+            for (size_t r = 0; r < out->sec[k].nrel && !used; r++)
+                used = out->sec[k].rel[r].sec == ASM_SEC_UNDEF && !strcmp(out->sec[k].rel[r].sym, c->ext[i]);
+        if (used) out->ext[out->next++] = dup(c->ext[i]);
+    }
     return 0;
 }
 
@@ -679,11 +735,11 @@ const AsmSym* asm_find_sym(const AsmOut* o, const char* name) {
     return NULL;
 }
 
-int asm_assemble(const char* src, AsmOut* out, char* err, size_t errsz) {
+static int assemble_text(const char* src, AsmOut* out, char* err, size_t errsz, int obj) {
     Ctx c;
     memset(&c, 0, sizeof c);
     memset(out, 0, sizeof *out);
-    c.err = err; c.errsz = errsz;
+    c.err = err; c.errsz = errsz; c.obj = obj;
     c.ntab = 4099;
     c.tab = calloc(c.ntab, sizeof *c.tab);
     G = &c;
@@ -705,8 +761,18 @@ int asm_assemble(const char* src, AsmOut* out, char* err, size_t errsz) {
     free(c.equ);
     for (int i = 0; i < c.nglob; i++) free(c.glob[i]);
     free(c.glob);
+    for (int i = 0; i < c.next; i++) free(c.ext[i]);
+    free(c.ext);
     if (rc) { asm_free(out); return -1; }
     return 0;
+}
+
+int asm_assemble(const char* src, AsmOut* out, char* err, size_t errsz) {
+    return assemble_text(src, out, err, errsz, 0);
+}
+
+int asm_assemble_obj(const char* src, AsmOut* out, char* err, size_t errsz) {
+    return assemble_text(src, out, err, errsz, 1);
 }
 
 void asm_free(AsmOut* o) {
@@ -714,5 +780,7 @@ void asm_free(AsmOut* o) {
     free(o->br);
     for (size_t i = 0; i < o->nsym; i++) free(o->sym[i].name);
     free(o->sym);
+    for (size_t i = 0; i < o->next; i++) free(o->ext[i]);
+    free(o->ext);
     memset(o, 0, sizeof *o);
 }
