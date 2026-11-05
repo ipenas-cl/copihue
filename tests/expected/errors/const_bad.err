@@ -1,0 +1,34 @@
+tests/errors/const_bad.lap:2:7: error: constant 'A' is already declared
+      2 | const A = 5;
+        |       ^
+tests/errors/const_bad.lap:3:11: error: the value of a constant divides by zero
+      3 | const B = A / 0;
+        |           ^
+tests/errors/const_bad.lap:5:11: error: the value of a constant must be a constant integer expression
+      5 | const C = runtime + 1;
+        |           ^
+tests/errors/const_bad.lap:7:5: error: 'D' is a constant; a variable cannot reuse its name
+      7 | let D: i64;
+        |     ^
+tests/errors/const_bad.lap:9:6: error: 'A' is a constant; a variable cannot reuse its name
+      9 | fn f(A: i64) -> i64 {
+        |      ^
+tests/errors/const_bad.lap:14:5: error: cannot assign to a constant
+     14 |     A = 6;
+        |     ^
+tests/errors/const_bad.lap:15:5: error: cannot assign to a constant
+     15 |     A += 1;
+        |     ^
+tests/errors/const_bad.lap:17:11: error: constant 'E' is already declared
+     17 |     const E = 2;
+        |           ^
+tests/errors/const_bad.lap:18:11: error: constant 'A' is already declared
+     18 |     const A = 9;
+        |           ^
+tests/errors/const_bad.lap:19:20: error: an array length must be a constant integer expression
+     19 |     let arr: [i64; runtime];
+        |                    ^
+tests/errors/const_bad.lap:20:20: error: an array length must be from 0 to 2147483647
+     20 |     let neg: [i64; -3];
+        |                    ^
+11 errors, compilation failed

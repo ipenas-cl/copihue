@@ -1,0 +1,4 @@
+module cfg;
+pub const SIZE = 6;
+const HIDDEN = 2;
+pub fn size() -> i64 { return SIZE + HIDDEN; }

@@ -1,0 +1,14 @@
+// A pub const of a module is cfg::NAME elsewhere; the same name in this file is another constant.
+import "parts/const_cfg.lap";
+
+const SIZE = 100;
+let buf: [u8; cfg::SIZE];
+
+fn main() -> i64 {
+    buf[cfg::SIZE - 1] = 1;
+    print_int(cfg::size() + SIZE);   // 8 + 100
+    println("");
+    print_int(buf[cfg::SIZE - 1]);   // 1
+    println("");
+    return 0;
+}

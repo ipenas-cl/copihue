@@ -1798,6 +1798,107 @@ static void take_qual(Parser* p, Tok* name, char** qual) {
     }
 }
 
+// const NAME = <integer expression>; The parser folds a constant into a number
+// at every use, so the back end never sees the name. A module-level constant
+// lives for the file (a module's, under its link name); a function-level one
+// lasts to the end of its block. Both are declared before use.
+#define MAX_CONSTS 1024
+typedef struct {
+    char* key;            // source name (local) or link name (file level)
+    long long val;
+    int local;
+    int pub;
+    const char* mod;
+} ConstDef;
+static ConstDef g_consts[MAX_CONSTS];
+static int g_nconsts = 0;
+static AstNode* parse_const_decl(Parser* p, int local);
+
+// qualified: the name is already a link name (mod::NAME).
+static ConstDef* const_find(const char* name, int qualified) {
+    if (!name) return NULL;
+    if (!qualified) {
+        for (int i = g_nconsts - 1; i >= 0; i--)
+            if (g_consts[i].local && !strcmp(g_consts[i].key, name)) return &g_consts[i];
+    }
+    {
+        const char* key = qualified ? name : link_sym(g_file_mod, name);
+        for (int i = 0; i < g_nconsts; i++)
+            if (!g_consts[i].local && !strcmp(g_consts[i].key, key)) return &g_consts[i];
+    }
+    return NULL;
+}
+
+// A let, a parameter or a loop variable may not reuse a constant's name.
+static void const_clash(Tok name) {
+    char* s = strndup(name.s, name.len);
+    if (const_find(s, 0))
+        diag_error(name.line, name.col, "'%s' is a constant; a variable cannot reuse its name", s);
+    free(s);
+}
+
+// 1 = constant (value in *out), 0 = not a constant expression, -1 = division by zero.
+static int const_eval(AstNode* n, long long* out) {
+    long long a, b;
+    int r;
+    if (!n) return 0;
+    if (n->type == AST_NUMBER && n->value) { *out = atoll(n->value); return 1; }
+    if (n->type == AST_UNARY && n->op && n->child_count == 1) {
+        if ((r = const_eval(n->children[0], &a)) != 1) return r;
+        switch (n->op[0]) {
+        case '-': *out = (long long)(0ULL - (unsigned long long)a); return 1;
+        case '~': *out = ~a; return 1;
+        case '!': *out = !a; return 1;
+        }
+        return 0;
+    }
+    if ((n->type == AST_BINOP || n->type == AST_COMPARE || n->type == AST_LOGICAL) &&
+        n->op && n->child_count == 2) {
+        const char* o = n->op;
+        unsigned long long ua, ub;
+        if ((r = const_eval(n->children[0], &a)) != 1) return r;
+        if ((r = const_eval(n->children[1], &b)) != 1) return r;
+        ua = (unsigned long long)a;
+        ub = (unsigned long long)b;
+        if (!strcmp(o, "+")) { *out = (long long)(ua + ub); return 1; }
+        if (!strcmp(o, "-")) { *out = (long long)(ua - ub); return 1; }
+        if (!strcmp(o, "*")) { *out = (long long)(ua * ub); return 1; }
+        if (!strcmp(o, "/") || !strcmp(o, "%")) {
+            if (b == 0) return -1;
+            if (a == LLONG_MIN && b == -1) { *out = o[0] == '/' ? a : 0; return 1; }
+            *out = o[0] == '/' ? a / b : a % b;
+            return 1;
+        }
+        if (!strcmp(o, "<<")) { *out = (b >= 0 && b < 64) ? (long long)(ua << b) : 0; return 1; }
+        if (!strcmp(o, ">>")) { *out = (b >= 0 && b < 64) ? (a >> b) : (a < 0 ? -1 : 0); return 1; }
+        if (!strcmp(o, "&")) { *out = a & b; return 1; }
+        if (!strcmp(o, "|")) { *out = a | b; return 1; }
+        if (!strcmp(o, "^")) { *out = a ^ b; return 1; }
+        if (!strcmp(o, "==")) { *out = a == b; return 1; }
+        if (!strcmp(o, "!=")) { *out = a != b; return 1; }
+        if (!strcmp(o, "<")) { *out = a < b; return 1; }
+        if (!strcmp(o, "<=")) { *out = a <= b; return 1; }
+        if (!strcmp(o, ">")) { *out = a > b; return 1; }
+        if (!strcmp(o, ">=")) { *out = a >= b; return 1; }
+        if (!strcmp(o, "&&")) { *out = a && b; return 1; }
+        if (!strcmp(o, "||")) { *out = a || b; return 1; }
+    }
+    return 0;
+}
+
+// A constant integer in the source: array lengths and const initializers.
+// Reports the error itself and returns `fallback` after one.
+static long long parse_const_int(Parser* p, const char* what, long long fallback) {
+    Tok at = peek_tok(p);
+    AstNode* e = parse_expr(p);
+    long long v = 0;
+    int r = const_eval(e, &v);
+    if (r == 1) return v;
+    if (r < 0) diag_error(at.line, at.col, "%s divides by zero", what);
+    else diag_error(at.line, at.col, "%s must be a constant integer expression", what);
+    return fallback;
+}
+
 #define MAX_TPARAMS 8
 static char* g_tparse_names[MAX_TPARAMS];
 static int g_ntparse = 0;
@@ -2468,6 +2569,34 @@ AstNode* parse_primary(Parser* p) {
             t.len = (int)strlen(app);
         }
         take_qual(p, &t, &qual);
+        if (!check_tok(p, T_LPAREN) && g_nconsts > 0) {
+            char* cname = strndup(t.s, t.len);
+            ConstDef* cd = const_find(cname, qual != NULL);
+            free(cname);
+            if (cd) {
+                AstNode* num = ast_new(AST_NUMBER);
+                char nb[32];
+                if (qual && !cd->pub && !same_mod(cd->mod, g_file_mod))
+                    diag_error(t.line, t.col, "constant '%s::%.*s' is private to its module", qual,
+                               (int)(t.len - strlen(qual) - 2), t.s + strlen(qual) + 2);
+                if ((!g_no_eq && check_tok(p, T_EQ)) || check_tok(p, T_PLUSEQ) ||
+                    check_tok(p, T_MINUSEQ) || check_tok(p, T_STAREQ) || check_tok(p, T_SLASHEQ) ||
+                    check_tok(p, T_MODEQ) || check_tok(p, T_PLUSPLUS) || check_tok(p, T_MINUSMINUS))
+                {
+                    // Report it and read the rest of the statement, so one mistake is one error.
+                    int incdec = check_tok(p, T_PLUSPLUS) || check_tok(p, T_MINUSMINUS);
+                    diag_error(t.line, t.col, "cannot assign to a constant");
+                    advance_tok(p);
+                    if (!incdec) parse_expr(p);
+                }
+                snprintf(nb, sizeof nb, "%lld", cd->val);
+                num->value = strdup(nb);
+                num->line = t.line;
+                num->col = t.col;
+                free(qual);
+                return num;
+            }
+        }
         // `<...>` is a type-argument list only when a real `>` closes it and
         // the next token is `(` (a call) or `{` (a struct literal). `a < b` stays a comparison.
         as_call = check_tok(p, T_LT) && type_arg_follow(p, T_LPAREN);
@@ -3072,6 +3201,8 @@ AstNode* parse_stmt(Parser* p) {
         expect(p, T_SEMI);
         return ret;
     }
+    if (peek_word(p, "const") && peek_tok_at(p, 1, T_IDENT) && peek_tok_at(p, 2, T_EQ))
+        return parse_const_decl(p, 1);
     if (match_tok(p, T_LET)) {
         int is_volatile = 0;
         if (peek_word(p, "volatile")) {
@@ -3079,6 +3210,7 @@ AstNode* parse_stmt(Parser* p) {
             is_volatile = 1;
         }
         Tok name = advance_tok(p);
+        const_clash(name);
         AstNode* let = ast_new(AST_LET);
         let->name = strndup(name.s, name.len);
         if (is_volatile) let->flags |= AF_VOLATILE;
@@ -3396,10 +3528,12 @@ AstNode* parse_stmt(Parser* p) {
 AstNode* parse_block(Parser* p) {
     expect(p, T_LBRACE);
     AstNode* block = ast_new(AST_BLOCK);
+    int consts_at_entry = g_nconsts;
     while (!check_tok(p, T_RBRACE) && !check_tok(p, T_EOF)) {
         ast_add(block, parse_stmt(p));
     }
     expect(p, T_RBRACE);
+    g_nconsts = consts_at_entry;   // function-level constants end with their block
     return block;
 }
 
@@ -3695,8 +3829,15 @@ TypeSpec parse_type(Parser* p) {
         }
         spec.base_type = pointee_name(inner);
         expect(p, T_SEMI);
-        Tok count = advance_tok(p);
-        spec.array_count = atoi(count.s);
+        {
+            Tok at = peek_tok(p);
+            long long n = parse_const_int(p, "an array length", 0);
+            if (n < 0 || n > INT_MAX) {
+                diag_error(at.line, at.col, "an array length must be from 0 to %d", INT_MAX);
+                n = 0;
+            }
+            spec.array_count = (int)n;
+        }
         expect(p, T_RBRACKET);
         return spec;
     }
@@ -3744,6 +3885,7 @@ AstNode* parse_global_var(Parser* p) {
         is_volatile = 1;
     }
     Tok name = advance_tok(p);
+    const_clash(name);
 
     AstNode* global_var = ast_new(AST_GLOBAL_VAR);
     global_var->name = strndup(name.s, name.len);
@@ -3798,6 +3940,7 @@ AstNode* parse_func(Parser* p) {
     expect(p, T_LPAREN);
     while (!check_tok(p, T_RPAREN)) {
         Tok param = advance_tok(p);
+        const_clash(param);
         AstNode* par = ast_new(AST_IDENT);
         par->name = strndup(param.s, param.len);
         ast_add(func, par);
@@ -4527,6 +4670,7 @@ static int pub_follows(Parser* p) {
     if (peek_tok_at(p, 1, T_FN) || peek_tok_at(p, 1, T_LET) || peek_tok_at(p, 1, T_STRUCT))
         return 1;
     if (peek_word_at(p, 1, "enum") && peek_tok_at(p, 2, T_IDENT)) return 1;
+    if (peek_word_at(p, 1, "const") && peek_tok_at(p, 2, T_IDENT)) return 1;
     if (peek_word_at(p, 1, "extern") || peek_word_at(p, 1, "data") ||
         peek_word_at(p, 1, "packed") || peek_word_at(p, 1, "interrupt") ||
         peek_word_at(p, 1, "syscall") || peek_word_at(p, 1, "bits") ||
@@ -4917,6 +5061,35 @@ static void set_fn_align(AstNode* fn, int align) {
         fn->align = align;
 }
 
+// `const NAME = expr;` at module level (local = 0) or in a block (local = 1).
+// Nothing reaches the tree; a statement gets an empty block.
+static AstNode* parse_const_decl(Parser* p, int local) {
+    Tok kw = advance_tok(p);
+    Tok name = advance_tok(p);
+    char* raw = strndup(name.s, name.len);
+    const char* key = local ? raw : link_sym(g_file_mod, raw);
+    int pub = g_item_pub;
+    long long v;
+    g_item_pub = 0;
+    expect(p, T_EQ);
+    v = parse_const_int(p, "the value of a constant", 0);
+    expect(p, T_SEMI);
+    if (const_find(raw, 0))
+        diag_error(name.line, name.col, "constant '%s' is already declared", raw);
+    else if (g_nconsts >= MAX_CONSTS)
+        diag_error(kw.line, kw.col, "too many constants (maximum %d)", MAX_CONSTS);
+    else {
+        ConstDef* cd = &g_consts[g_nconsts++];
+        cd->key = strdup(key);
+        cd->val = v;
+        cd->local = local;
+        cd->pub = pub;
+        cd->mod = g_file_mod;
+    }
+    free(raw);
+    return local ? ast_new(AST_BLOCK) : NULL;
+}
+
 static void parse_top_item(Parser* p, AstNode* prog) {
     int item_align = 0;
     g_item_pub = 0;
@@ -4939,6 +5112,12 @@ static void parse_top_item(Parser* p, AstNode* prog) {
     g_file_started = 1;
     if (peek_word(p, "align") && peek_tok_at(p, 1, T_LPAREN))
         item_align = parse_align_prefix(p);
+    if (peek_word(p, "const") && peek_tok_at(p, 1, T_IDENT) && peek_tok_at(p, 2, T_EQ)) {
+        if (item_align)
+            diag_error(peek_tok(p).line, peek_tok(p).col, "align() does not apply to a constant");
+        parse_const_decl(p, 0);
+        return;
+    }
     if (item_align && ((peek_word(p, "section") && peek_tok_at(p, 1, T_STR)) ||
                        (peek_word(p, "import") && peek_tok_at(p, 1, T_STR)) ||
                        (peek_word(p, "data") && peek_tok_at(p, 1, T_IDENT)) ||

@@ -1,0 +1,3 @@
+module cfg;
+pub const SIZE = 6;
+const HIDDEN = 2;

@@ -1,0 +1,22 @@
+const A = 4;
+const A = 5;
+const B = A / 0;
+let runtime = 3;
+const C = runtime + 1;
+const D = 2;
+let D: i64;
+
+fn f(A: i64) -> i64 {
+    return A;
+}
+
+fn main() -> i64 {
+    A = 6;
+    A += 1;
+    const E = 1;
+    const E = 2;
+    const A = 9;
+    let arr: [i64; runtime];
+    let neg: [i64; -3];
+    return 0;
+}
