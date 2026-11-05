@@ -1,0 +1,19 @@
+fn f(x: i64) -> i64 {
+    return x;
+}
+
+fn main() -> i64 {
+    let a: i64 = 1;
+    let b: i64 = 2;
+    f(a) = 5;
+    3 = a;
+    (a + b) = 5;
+    -a = 5;
+    &a = 5;
+    a + b = 5;
+    (a as i64) = 5;
+    f(a) += 1;
+    f(a)++;
+    (a) = 5;
+    return 0;
+}

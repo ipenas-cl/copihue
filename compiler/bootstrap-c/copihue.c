@@ -29,6 +29,7 @@ int g_cur_line = 0, g_cur_col = 0;   // position of the last consumed token
 int g_error_count = 0;
 static int g_no_semi = 0;  // >0 while parsing a for(...) increment (no ';')
 static int g_no_eq = 0;    // deref operand must not swallow '=' (*p = v)
+static int g_expr_start = -1;  // token index where the innermost parse_expr began: `x = v` assigns only there
 static int g_no_brace = 0; // for-in operand must not swallow the body '{'
 #define MAX_LOOP_DEPTH 64
 static int g_loop_break[MAX_LOOP_DEPTH], g_loop_cont[MAX_LOOP_DEPTH], g_loop_depth = 0;
@@ -2552,6 +2553,7 @@ AstNode* parse_primary(Parser* p) {
         return arr;
     }
     if (check_tok(p, T_IDENT)) {
+        int start_pos = p->pos;
         Tok t = advance_tok(p);
         char* qual = NULL;
         char* gargs[MAX_TPARAMS];
@@ -2684,6 +2686,12 @@ AstNode* parse_primary(Parser* p) {
         // Assignment. Suppressed while parsing a dereference operand so
         // `*p = v` is a store through p, not `*(p = v)`.
         if (!g_no_eq && check_tok(p, T_EQ)) {
+            // `x = v` assigns x only where an expression begins. After an operator
+            // (`-x = v`, `a + b = v`, `&x = v`) the target would be the operator's
+            // result, and x would be assigned in silence.
+            if (start_pos != g_expr_start)
+                diag_error(t.line, t.col,
+                           "the assignment target is not assignable: the result of an operator expression");
             advance_tok(p);
             AstNode* assign = ast_new(AST_ASSIGN);
             assign->name = strndup(t.s, t.len);
@@ -3028,7 +3036,11 @@ AstNode* parse_logical_or(Parser* p) {
 }
 
 AstNode* parse_expr(Parser* p) {
-    return parse_logical_or(p);
+    int saved = g_expr_start;
+    g_expr_start = p->pos;
+    AstNode* e = parse_logical_or(p);
+    g_expr_start = saved;
+    return e;
 }
 
 AstNode* parse_block(Parser* p);
@@ -3181,6 +3193,25 @@ static AstNode* parse_for_in(Parser* p) {
     ast_add(block, wh);
     free(xname);
     return block;
+}
+
+// Why an expression cannot be the left side of an assignment, for the shapes whose
+// answer does not depend on types. NULL: it may be a place (the code generator checks).
+static const char* not_place_reason(AstNode* e) {
+    switch (e->type) {
+    case AST_CALL:           return "the result of a call";
+    case AST_NUMBER:         return "a number literal";
+    case AST_STRING:         return "a string literal";
+    case AST_ARRAY_LITERAL:
+    case AST_STRUCT_LITERAL: return "a literal";
+    case AST_BINOP:
+    case AST_UNARY:
+    case AST_COMPARE:
+    case AST_LOGICAL:        return "the result of an operator expression";
+    case AST_CAST:           return "the result of a cast";
+    case AST_ADDR_OF:        return "an address (&x is a value, not a place)";
+    default:                 return "an expression that is not a place";
+    }
 }
 
 AstNode* parse_stmt(Parser* p) {
@@ -3377,7 +3408,34 @@ AstNode* parse_stmt(Parser* p) {
             return jp;
         }
     }
+    Tok stmt_tok = peek_tok(p);
     AstNode* expr = parse_expr(p);
+
+    // A statement that assigns something that is not a place. Which index, field or
+    // dereference is a place depends on types, so the code generator checks those.
+    if (expr && (check_tok(p, T_EQ) || check_tok(p, T_PLUSEQ) || check_tok(p, T_MINUSEQ) ||
+                 check_tok(p, T_STAREQ) || check_tok(p, T_SLASHEQ) || check_tok(p, T_MODEQ) ||
+                 check_tok(p, T_PLUSPLUS) || check_tok(p, T_MINUSMINUS))) {
+        int plain = check_tok(p, T_EQ);
+        int placeish = expr->type == AST_INDEX || expr->type == AST_DEREF ||
+                       expr->type == AST_FIELD_ACCESS;
+        const char* why = NULL;
+        if (expr->type == AST_IDENT) {
+            if (plain) why = "a parenthesized name; write the name without parentheses";
+        } else if (placeish) {
+            if (!plain)
+                why = "compound assignment and ++/-- apply to a variable, not to an element, "
+                      "a field or a dereference; write it out (x[i] = x[i] + v)";
+        } else why = not_place_reason(expr);
+        if (why) {
+            int incdec = check_tok(p, T_PLUSPLUS) || check_tok(p, T_MINUSMINUS);
+            diag_error(stmt_tok.line, stmt_tok.col, "the assignment target is not assignable: %s", why);
+            advance_tok(p);
+            if (!incdec) parse_expr(p);
+            end_simple_stmt(p);
+            return ast_new(AST_BLOCK);
+        }
+    }
 
     // Check for increment/decrement operators: x++ or x--
     if (expr && expr->type == AST_IDENT) {

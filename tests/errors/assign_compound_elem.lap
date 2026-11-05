@@ -1,0 +1,14 @@
+struct P {
+    x: i64
+}
+
+fn main() -> i64 {
+    let t: [i64; 4];
+    let s: P;
+    let q: *i64 = &t;
+    t[0] += 1;
+    s.x -= 1;
+    *q *= 2;
+    t[1]++;
+    return 0;
+}

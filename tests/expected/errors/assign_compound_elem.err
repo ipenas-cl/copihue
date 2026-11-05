@@ -1,0 +1,13 @@
+tests/errors/assign_compound_elem.lap:9:5: error: the assignment target is not assignable: compound assignment and ++/-- apply to a variable, not to an element, a field or a dereference; write it out (x[i] = x[i] + v)
+      9 |     t[0] += 1;
+        |     ^
+tests/errors/assign_compound_elem.lap:10:5: error: the assignment target is not assignable: compound assignment and ++/-- apply to a variable, not to an element, a field or a dereference; write it out (x[i] = x[i] + v)
+     10 |     s.x -= 1;
+        |     ^
+tests/errors/assign_compound_elem.lap:11:5: error: the assignment target is not assignable: compound assignment and ++/-- apply to a variable, not to an element, a field or a dereference; write it out (x[i] = x[i] + v)
+     11 |     *q *= 2;
+        |     ^
+tests/errors/assign_compound_elem.lap:12:5: error: the assignment target is not assignable: compound assignment and ++/-- apply to a variable, not to an element, a field or a dereference; write it out (x[i] = x[i] + v)
+     12 |     t[1]++;
+        |     ^
+4 errors, compilation failed

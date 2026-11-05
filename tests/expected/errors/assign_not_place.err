@@ -1,0 +1,31 @@
+tests/errors/assign_not_place.lap:8:5: error: the assignment target is not assignable: the result of a call
+      8 |     f(a) = 5;
+        |     ^
+tests/errors/assign_not_place.lap:9:5: error: the assignment target is not assignable: a number literal
+      9 |     3 = a;
+        |     ^
+tests/errors/assign_not_place.lap:10:5: error: the assignment target is not assignable: the result of an operator expression
+     10 |     (a + b) = 5;
+        |     ^
+tests/errors/assign_not_place.lap:11:6: error: the assignment target is not assignable: the result of an operator expression
+     11 |     -a = 5;
+        |      ^
+tests/errors/assign_not_place.lap:12:6: error: the assignment target is not assignable: the result of an operator expression
+     12 |     &a = 5;
+        |      ^
+tests/errors/assign_not_place.lap:13:9: error: the assignment target is not assignable: the result of an operator expression
+     13 |     a + b = 5;
+        |         ^
+tests/errors/assign_not_place.lap:14:5: error: the assignment target is not assignable: the result of a cast
+     14 |     (a as i64) = 5;
+        |     ^
+tests/errors/assign_not_place.lap:15:5: error: the assignment target is not assignable: the result of a call
+     15 |     f(a) += 1;
+        |     ^
+tests/errors/assign_not_place.lap:16:5: error: the assignment target is not assignable: the result of a call
+     16 |     f(a)++;
+        |     ^
+tests/errors/assign_not_place.lap:17:5: error: the assignment target is not assignable: a parenthesized name; write the name without parentheses
+     17 |     (a) = 5;
+        |     ^
+10 errors, compilation failed
