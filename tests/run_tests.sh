@@ -25,23 +25,41 @@
 # 9. --native refusals: tests/native/*.lap and the option combinations --native
 #    cannot take must fail with the message in tests/expected/native/<name>.err.
 #
-#   tests/run_tests.sh --native   only 1, with --native (the compiler writes the ELF itself, no nasm,
-#                                 no ld): same programs, -O0 and -O2, same golden files. Linux only.
+#
+# The default build is the compiler's own: it assembles and writes the ELF itself, with no nasm and
+# no ld, for every program and every -c object. A program it cannot take (user assembly, naked,
+# interrupt and syscall functions) is built with nasm and ld with a warning; sections 1 and 8 fail
+# if anything else falls back.
+#
+#   tests/run_tests.sh --nasm     only 1, with --nasm (nasm and ld, the way before the built-in back end):
+#                                 same programs, -O0 and -O2, same golden files. Linux only.
+#   tests/run_tests.sh --native   only 1, with --native (the default, but strict: no fallback to nasm):
+#                                 the programs that need nasm are skipped, by name. Linux only.
+#
+# The executables are Linux ELF files. On another system (macOS) the compiler still builds every
+# program, and that is all section 1 can check there; the sections that run or link them (1's output
+# check, 8) are skipped with a notice. The CI is Linux and runs everything.
 set -u
 cd "$(dirname "$0")/.."
 ROOT=$PWD
 CC=$ROOT/compiler/bootstrap-c/copihue
-UPDATE=0; NATIVE=0; NATFLAG=
+UPDATE=0; NATIVE=0; NASM=0; NATFLAG=
 for a in "$@"; do
   case $a in
     --update) UPDATE=1 ;;
     --native) NATIVE=1; NATFLAG=--native ;;
-    *) echo "usage: tests/run_tests.sh [--update | --native]" >&2; exit 2 ;;
+    --nasm) NASM=1; NATFLAG=--nasm ;;
+    *) echo "usage: tests/run_tests.sh [--update | --native | --nasm]" >&2; exit 2 ;;
   esac
 done
-if [ $NATIVE = 1 ]; then
-  [ $UPDATE = 0 ] || { echo "--native does not regenerate golden files; run --update without it" >&2; exit 2; }
-  [ "$(uname -s)" = Linux ] || { echo "run_tests.sh --native runs the ELF executables the compiler writes, so it needs Linux (this is $(uname -s)); tests/x64/run_elf.sh checks their structure anywhere" >&2; exit 2; }
+CAN_RUN=0; [ "$(uname -s)" = Linux ] && CAN_RUN=1
+if [ $NATIVE = 1 ] || [ $NASM = 1 ]; then
+  [ $UPDATE = 0 ] || { echo "--native and --nasm do not regenerate golden files; run --update without them" >&2; exit 2; }
+  [ $CAN_RUN = 1 ] || { echo "run_tests.sh --native/--nasm run the ELF executables the compiler writes, so they need Linux (this is $(uname -s)); tests/x64/run_elf.sh checks their structure anywhere" >&2; exit 2; }
+fi
+if [ $CAN_RUN = 0 ]; then
+  [ $UPDATE = 0 ] || { echo "--update runs the programs, so it needs Linux (this is $(uname -s))" >&2; exit 2; }
+  echo "notice: this is $(uname -s), not Linux: the programs are compiled (with the built-in back end) but not run, and the link tests (section 8) are skipped"
 fi
 gcc -O2 -Wall -o "$CC" compiler/bootstrap-c/copihue.c || exit 1
 
@@ -50,17 +68,22 @@ gcc -O2 -Wall -o "$CC" compiler/bootstrap-c/copihue.c || exit 1
 SKIP=" examples/simple_api_server.lap examples/realtime_api_monitor.lap tests/test_http_simple.lap tests/http/test_http_client.lap tests/http/test_http_post.lap tests/http/test_suite_http.lap "
 
 WORK=$(mktemp -d); trap 'rm -rf "$WORK"' EXIT
-pass=0; fail=0; failed=(); skipped=()
+pass=0; fail=0; failed=(); skipped=(); compiled=0; fellback=()
+FELL=0
 
 mask() { sed -E 's/[0-9]{9,}/ADDR/g'; }
 
-run_program() {  # $1 = source, $2 = opt level -> prints masked stdout + rc
+run_program() {  # $1 = source, $2 = opt level -> prints masked stdout + rc (or COMPILED where nothing can run); sets FELL
   local src=$1 opt=$2
   ( cd "$WORK" && rm -f prog data.txt && "$CC" "$opt" $NATFLAG -o prog "$ROOT/$src" >/dev/null 2>compile.err ) \
     || {
-      if [ -n "$NATFLAG" ] && grep -q -e '--native does not take this program' "$WORK/compile.err"; then echo "NATIVE REFUSED"; return; fi
+      if [ "$NATFLAG" = --native ] && grep -q -e '--native does not take this program' "$WORK/compile.err"; then echo "NATIVE REFUSED"; return; fi
+      # Off Linux the fallback to nasm and ld cannot finish (ld is not an ELF linker there).
+      if [ $CAN_RUN = 0 ] && grep -q 'falling back to nasm' "$WORK/compile.err"; then FELL=1; echo "NEEDS NASM"; return; fi
       echo "COMPILE ERROR"; sed "s|$ROOT/||g" "$WORK/compile.err"; return
     }
+  grep -q 'falling back to nasm' "$WORK/compile.err" && FELL=1
+  [ $CAN_RUN = 1 ] || { echo "COMPILED"; return; }
   ( cd "$WORK" && timeout 5 ./prog </dev/null 2>&1; echo "exit=$?" ) | mask
 }
 
@@ -73,6 +96,7 @@ check() {  # $1 = name, $2 = golden file, $3 = actual file
 for src in $(ls tests/*.lap tests/*/*.lap examples/*.lap examples/*/*.lap examples/*/*/*.lap | grep -v -e '^tests/errors/' -e '^tests/freestanding/' -e "^tests/flat/" -e "^tests/boot/" -e '^tests/usermode/' -e '^tests/ctx/' -e '^tests/native/'); do
   case "$SKIP" in *" $src "*) continue ;; esac
   golden=tests/expected/${src%.lap}.out
+  FELL=0
   run_program "$src" -O0 > "$WORK/o0"
   run_program "$src" -O2 > "$WORK/o2"
   # --native refuses user assembly, naked/interrupt/syscall functions (a clear error, no fallback).
@@ -85,21 +109,36 @@ for src in $(ls tests/*.lap tests/*/*.lap examples/*.lap examples/*/*.lap exampl
     fi
     continue
   fi
+  # By default the built-in back end takes every program except the ones with user assembly or
+  # naked/interrupt/syscall functions, which fall back to nasm and ld with a warning. Anything
+  # else that falls back is a gap in the built-in assembler: a failure, not a silent pass.
+  if [ $FELL = 1 ] && [ $NASM = 0 ]; then
+    if grep -qE 'asm\(|naked|interrupt fn|syscall fn' "$src"; then
+      fellback+=("$src")
+      if grep -q '^NEEDS NASM' "$WORK/o0" "$WORK/o2"; then skipped+=("$src"); echo "skip $src: needs nasm and ld (user assembly or naked/interrupt/syscall function), which cannot finish on $(uname -s)"; continue; fi
+    else
+      fail=$((fail+1)); failed+=("$src (fell back to nasm)"); echo "FAIL $src: the built-in assembler did not take it (fell back to nasm):"
+      ( cd "$WORK" && "$CC" -O0 -o prog "$ROOT/$src" 2>&1 >/dev/null | head -3 ); continue
+    fi
+  fi
   if ! cmp -s "$WORK/o0" "$WORK/o2"; then
     fail=$((fail+1)); failed+=("$src (-O0 vs -O2)"); echo "FAIL $src: -O0 and -O2 differ"; diff "$WORK/o0" "$WORK/o2" | head -10; continue
   fi
   grep -q "^COMPILE ERROR" "$WORK/o0" && { fail=$((fail+1)); failed+=("$src"); echo "FAIL $src:"; cat "$WORK/o0"; continue; }
+  if [ $CAN_RUN = 0 ]; then compiled=$((compiled+1)); continue; fi
   grep -qE "^exit=(12[4-9]|13[0-9]|14[0-9])$" "$WORK/o0" && { fail=$((fail+1)); failed+=("$src"); echo "FAIL $src: crashed or timed out ($(tail -1 "$WORK/o0"))"; continue; }
   check "$src" "$golden" "$WORK/o0"
 done
 
-if [ $NATIVE = 1 ]; then
+if [ $NATIVE = 1 ] || [ $NASM = 1 ]; then
   rm -f "$CC"
   echo
-  echo "passed: $pass  failed: $fail  skipped: ${#skipped[@]}  (programs only, built with --native)"
+  echo "passed: $pass  failed: $fail  skipped: ${#skipped[@]}  (programs only, built with $NATFLAG)"
   [ $fail = 0 ] || { printf '  %s\n' "${failed[@]}"; exit 1; }
   exit 0
 fi
+echo
+echo "programs: ${#fellback[@]} built with nasm and ld because they use user assembly or naked/interrupt/syscall functions; the rest by the built-in back end"
 
 # 9. --native refuses what the built-in assembler does not take, with a clear message,
 # and writes no file. Nothing is run, so this works on any system.
@@ -115,13 +154,57 @@ for src in tests/native/*.lap; do
   sed "s|$ROOT/||g" "$WORK/err.txt" > "$WORK/err.norm"
   check "$src (--native)" "tests/expected/native/$name.err" "$WORK/err.norm"
 done
-for combo in "-S" "-c" "--freestanding" "--flat 0x10000" "--boot"; do
+for combo in "-S" "--freestanding" "--flat 0x10000" "--boot"; do
   tag=$(echo "$combo" | tr -d ' -' | tr -c 'A-Za-z0-9\n' _)
   if ( cd "$WORK" && "$CC" --native $combo -o nat.out "$ROOT/tests/hello.lap" >/dev/null 2>err.txt ); then
     fail=$((fail+1)); failed+=("--native $combo"); echo "FAIL --native $combo: should have been refused"; continue
   fi
   check "--native $combo" "tests/expected/native/combo_$tag.err" "$WORK/err.txt"
 done
+if ( cd "$WORK" && "$CC" --native --nasm -o nat.out "$ROOT/tests/hello.lap" >/dev/null 2>err.txt ) || ! grep -q -e '--native and --nasm cannot be combined' "$WORK/err.txt"; then
+  fail=$((fail+1)); failed+=("--native --nasm"); echo "FAIL --native --nasm: should have been refused"; cat "$WORK/err.txt"
+else pass=$((pass+1)); fi
+
+# 9b. The built-in back end is the default. No nasm, no ld, no output.asm on disk; the fallback to nasm
+# is announced; -c writes an ET_REL object. Nothing is run, so this works on any system.
+rm -rf "$WORK/def" "$WORK/fakebin" && mkdir -p "$WORK/def" "$WORK/fakebin"
+# nasm and ld that record the call and fail: the default build must not run either.
+for t in nasm ld; do printf '#!/bin/sh\necho %s >> "%s/tools.log"\nexit 1\n' "$t" "$WORK" > "$WORK/fakebin/$t"; chmod +x "$WORK/fakebin/$t"; done
+if ! ( cd "$WORK/def" && PATH="$WORK/fakebin:$PATH" "$CC" -o hello "$ROOT/tests/hello.lap" >/dev/null 2>err.txt && PATH="$WORK/fakebin:$PATH" "$CC" -c -o hello.o "$ROOT/tests/hello.lap" >>/dev/null 2>>err.txt ) || [ -s "$WORK/def/err.txt" ] || [ -e "$WORK/tools.log" ]; then
+  fail=$((fail+1)); failed+=("default build"); echo "FAIL default build: did not compile, printed something or ran nasm/ld ($(cat "$WORK/tools.log" 2>/dev/null | tr '\n' ' ')):"; cat "$WORK/def/err.txt"
+elif [ -e "$WORK/def/output.asm" ] || [ -e "$WORK/def/output.o" ]; then
+  fail=$((fail+1)); failed+=("default build files"); echo "FAIL default build left output.asm or output.o behind"
+elif [ "$(head -c 4 "$WORK/def/hello" | od -An -c | tr -d ' ')" != '177ELF' ] || [ "$(od -An -tx1 -j16 -N2 "$WORK/def/hello" | tr -d ' ')" != "0200" ]; then
+  fail=$((fail+1)); failed+=("default build elf"); echo "FAIL default build: not an ELF ET_EXEC file"
+else pass=$((pass+1)); fi
+if ! ( cd "$WORK/def" && "$CC" -c -o hello.o "$ROOT/tests/hello.lap" >/dev/null 2>err.txt ) || [ -s "$WORK/def/err.txt" ] || [ -e "$WORK/def/output.asm" ]; then
+  fail=$((fail+1)); failed+=("default -c"); echo "FAIL default -c: did not compile, printed something or left output.asm:"; cat "$WORK/def/err.txt"
+elif [ "$(od -An -tx1 -j16 -N2 "$WORK/def/hello.o" | tr -d ' ')" != "0100" ] || [ "$(od -An -tx1 -j40 -N8 "$WORK/def/hello.o" | tr -d ' ')" = "0000000000000000" ]; then
+  fail=$((fail+1)); failed+=("default -c elf"); echo "FAIL default -c: not an ET_REL file with section headers"
+else pass=$((pass+1)); fi
+# The fallback is announced, names the construct and its line, and builds with nasm (the link step may fail off Linux).
+for src in tests/native/refuse_asm.lap tests/native/refuse_naked.lap; do
+  ( cd "$WORK/def" && "$CC" -o fb "$ROOT/$src" >/dev/null 2>err.txt )
+  if ! grep -q 'warning: the built-in assembler does not take this program (line [0-9]*: .*); falling back to nasm and ld' "$WORK/def/err.txt"; then
+    fail=$((fail+1)); failed+=("$src (fallback warning)"); echo "FAIL $src: no fallback warning:"; cat "$WORK/def/err.txt"
+  else pass=$((pass+1)); fi
+  rm -f "$WORK/def/fb" "$WORK/def/output.asm" "$WORK/def/output.o"
+  ( cd "$WORK/def" && "$CC" -c -o fb.o "$ROOT/$src" >/dev/null 2>err.txt )
+  if ! grep -q 'falling back to nasm$' "$WORK/def/err.txt" || ! [ -s "$WORK/def/fb.o" ]; then
+    fail=$((fail+1)); failed+=("$src (-c fallback)"); echo "FAIL $src -c: no fallback warning or no object:"; cat "$WORK/def/err.txt"
+  else pass=$((pass+1)); fi
+  rm -f "$WORK/def/fb.o" "$WORK/def/output.asm"
+done
+# --freestanding -c is nasm's by design: silent.
+if ! ( cd "$WORK/def" && "$CC" --freestanding -c -o fs.o "$ROOT/tests/link/parts/sec_plain.lap" >/dev/null 2>err.txt ) || [ -s "$WORK/def/err.txt" ] || ! [ -s "$WORK/def/fs.o" ]; then
+  fail=$((fail+1)); failed+=("--freestanding -c"); echo "FAIL --freestanding -c: did not build or printed something:"; cat "$WORK/def/err.txt"
+else pass=$((pass+1)); fi
+# --nasm keeps output.asm and output.o (it needs a Linux ld to finish).
+if [ $CAN_RUN = 1 ]; then
+  if ! ( cd "$WORK/def" && "$CC" --nasm -o viejo "$ROOT/tests/hello.lap" >/dev/null 2>err.txt ) || [ ! -s "$WORK/def/output.asm" ] || [ ! -s "$WORK/def/output.o" ] || [ ! -x "$WORK/def/viejo" ]; then
+    fail=$((fail+1)); failed+=("--nasm"); echo "FAIL --nasm: did not build with nasm and ld or left no output.asm/output.o:"; cat "$WORK/def/err.txt"
+  else pass=$((pass+1)); fi
+else echo "skip --nasm build check: ld on $(uname -s) does not link ELF files"; fi
 
 for src in tests/errors/*.lap; do
   name=$(basename "$src" .lap)
@@ -346,6 +429,10 @@ fi
 # Several files on one command line share one namespace. The hosted loop
 # compiles a single path, so this block is separate. Helpers live under
 # parts/ and are not matched by tests/*/*.lap.
+# From here to the `-c --flat` check, programs are linked with ld and run: Linux only.
+if [ $CAN_RUN = 0 ]; then
+  echo "skip multi-file and -c link tests: they link with ld and run the result, and this is $(uname -s) (tests/x64/run_obj.sh compares the -c objects with nasm's here)"
+else
 cli_run() {
   local opt=$1
   ( cd "$WORK" && rm -f cli_prog && "$CC" "$opt" -o cli_prog \
@@ -558,6 +645,7 @@ elif grep -q "^COMPILE ERROR" "$WORK/mglink0"; then
 else
   check "generic module link" "tests/expected/tests/link/generic_mod.out" "$WORK/mglink0"
 fi
+fi   # CAN_RUN
 if ( cd "$WORK" && "$CC" -c --flat 0x10000 -o flat_bad.o "$ROOT/tests/link/parts/mod_add.lap" >/dev/null 2>err.txt ); then
   fail=$((fail+1)); failed+=("link -c --flat"); echo "FAIL link -c --flat: compiled"
 elif ! grep -q "cannot be combined with --flat or --boot" "$WORK/err.txt"; then
@@ -585,7 +673,9 @@ link_fs() {
     ld -T "$ROOT/tests/link/flat.ld" -e _start --oformat binary fs_entry.o fs_putc.o -o "$out" ) \
     >/dev/null 2>err.txt
 }
-if ! ( cd "$WORK" && "$CC" --boot -o link_boot.bin "$ROOT/tests/usermode/boot.lap" >/dev/null 2>err.txt ); then
+if [ $CAN_RUN = 0 ]; then
+  echo "skip freestanding link test: it links with a GNU ld script, and ld on $(uname -s) is not GNU ld"
+elif ! ( cd "$WORK" && "$CC" --boot -o link_boot.bin "$ROOT/tests/usermode/boot.lap" >/dev/null 2>err.txt ); then
   fail=$((fail+1)); failed+=("link boot"); echo "FAIL link boot:"; cat "$WORK/err.txt"
 elif ! link_fs -O0 fs0.bin || ! link_fs -O2 fs2.bin; then
   fail=$((fail+1)); failed+=("link freestanding"); echo "FAIL link freestanding:"; cat "$WORK/err.txt"
@@ -773,5 +863,6 @@ fi
 
 rm -f "$CC"
 echo
-echo "passed: $pass  failed: $fail"
+echo "passed: $pass  failed: $fail  skipped: ${#skipped[@]}"
+[ $CAN_RUN = 1 ] || echo "compiled but not run (this is $(uname -s)): $compiled programs at -O0 and -O2; their output was not checked"
 [ $fail = 0 ] || { printf '  %s\n' "${failed[@]}"; exit 1; }

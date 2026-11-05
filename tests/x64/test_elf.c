@@ -82,7 +82,8 @@ static int verify_tail(const char* name, const uint8_t* f, size_t n, const NObj*
         sh[i] = (Sh){(uint32_t)nobj_rd(p, 4), (uint32_t)nobj_rd(p + 4, 4), (uint32_t)nobj_rd(p + 40, 4), (uint32_t)nobj_rd(p + 44, 4),
                      nobj_rd(p + 8, 8), nobj_rd(p + 16, 8), nobj_rd(p + 24, 8), nobj_rd(p + 32, 8), nobj_rd(p + 48, 8), nobj_rd(p + 56, 8)};
     }
-#define TFAIL(...) do { free(sh); FAILF(__VA_ARGS__); } while (0)
+// Print first: the arguments may read `sh` (h->, sy->, ss->), which is freed after.
+#define TFAIL(...) do { printf("FAIL %s: ", name); printf(__VA_ARGS__); printf("\n"); free(sh); return 1; } while (0)
     if (!zeros(f, shoff, shoff + 64)) TFAIL("section 0 is not the null section");
     const Sh* ss = &sh[shstrndx];
     if (ss->type != 3 || ss->off + ss->size > shoff) TFAIL(".shstrtab is not a string table inside the file");

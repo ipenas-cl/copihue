@@ -13,12 +13,12 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y nasm curl qemu-system-x86
       - name: Build the compiler (warnings are errors)
         run: make CFLAGS="-O2 -Wall -Werror"
-      - name: Regression suite (all tests and examples at -O0 and -O2, error messages, freestanding)
+      - name: Regression suite (the default build, where the compiler writes the ELF itself, no nasm and no ld for programs and -c objects; all tests and examples at -O0 and -O2, error messages, freestanding, -c linked with ld)
         run: make test
-      - name: Regression suite with --native (the compiler writes the ELF itself, no nasm, no ld; -O0 and -O2, same golden files)
-        run: make native-run-test
-      - name: x86-64 encoder x64.c, assembler asm.c and ELF writer elf.c (labels, jumps, call, sections, executable structure) against nasm -f elf64
-        run: make native-test
+      - name: Regression suite with --nasm (the old path, nasm and ld; -O0 and -O2, same golden files)
+        run: make nasm-test
+      - name: x86-64 encoder x64.c, assembler asm.c, ELF writer elf.c and -c objects (labels, jumps, call, sections, executable structure; objects compared with nasm's, linked with ld and gcc, run, read by readelf and objdump) against nasm -f elf64
+        run: CMP_REQUIRE=1 make native-test
       - name: The --native ELF read by readelf and objdump (section headers, .symtab, FUNC/OBJECT symbols)
         run: CMP_REQUIRE=1 make native-readelf-test
       - name: .text of --native against nasm + ld (objcopy -O binary -j .text, cmp)

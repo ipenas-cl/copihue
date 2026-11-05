@@ -53,4 +53,18 @@ int elf_build(const AsmOut* a, uint8_t** img, size_t* n, ElfLayout* lay, char* e
 // Writes the executable to `path` with mode 0755.
 int elf_write_exec(const AsmOut* a, const char* path, char* err, size_t errsz);
 
+// A relocatable object (ET_REL) for `ld`/`gcc` instead of an executable (-c).
+// Sections .text, .rodata, .data, .bss (those with bytes), a .rela.* for each
+// that has relocations, then .symtab, .strtab, .shstrtab. Relocations are kept
+// (`R_X86_64_64`, `_PC32`, `_32`, `_32S`), against the section symbols for
+// labels of the program (as nasm does, `global` or not) and against an
+// undefined GLOBAL symbol for each name declared `extern`. Symbols: null, one
+// per section, the labels without a dot (LOCAL first, then GLOBAL; FUNC in
+// .text, OBJECT elsewhere, sizes as in the executable) and the externs.
+// Not written: STT_FILE, symbols for `equ` constants and for the
+// `parent.child` labels, which nasm does write. Builds the file in memory
+// (malloc'd; the caller frees *img).
+int elf_build_obj(const AsmOut* a, uint8_t** img, size_t* n, char* err, size_t errsz);
+int elf_write_obj(const AsmOut* a, const char* path, char* err, size_t errsz);
+
 #endif

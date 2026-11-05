@@ -105,6 +105,15 @@ static int elf_is_symbol(const AsmOut* a, const AsmSym* y) {
     return !strchr(y->name, '.') && a->sec[y->sec].size > 0;
 }
 
+// st_size of symbol i: up to the next symbol of its section at a higher offset, else the section's end.
+static uint64_t elf_sym_size(const AsmOut* a, size_t i) {
+    const AsmSym* y = &a->sym[i];
+    uint64_t end = a->sec[y->sec].size;
+    for (size_t j = i + 1; j < a->nsym && a->sym[j].sec == y->sec; j++)
+        if (elf_is_symbol(a, &a->sym[j]) && a->sym[j].off > y->off) { end = (uint64_t)a->sym[j].off; break; }
+    return end - (uint64_t)y->off;
+}
+
 // .symtab and .strtab for the final layout. Returns 0 or -1 (out of memory).
 // *first_global is the index of the first GLOBAL symbol (sh_info of .symtab).
 static int elf_symtab(const AsmOut* a, const ElfLayout* L, const int* shndx, ElfBuf* sy, ElfBuf* st, uint32_t* first_global) {
@@ -116,10 +125,7 @@ static int elf_symtab(const AsmOut* a, const ElfLayout* L, const int* shndx, Elf
         for (size_t i = 0; i < a->nsym; i++) {
             const AsmSym* y = &a->sym[i];
             if (!elf_is_symbol(a, y) || (y->global != 0) != (pass == 1)) continue;
-            // Size: up to the next symbol of the section at a higher offset, else the section's end.
-            uint64_t end = a->sec[y->sec].size;
-            for (size_t j = i + 1; j < a->nsym && a->sym[j].sec == y->sec; j++)
-                if (elf_is_symbol(a, &a->sym[j]) && a->sym[j].off > y->off) { end = (uint64_t)a->sym[j].off; break; }
+            uint64_t end = (uint64_t)y->off + elf_sym_size(a, i);
             uint8_t e[SYM_SIZE] = {0};
             long nm = elf_str(st, y->name);
             if (nm < 0) return -1;
@@ -143,6 +149,7 @@ static void elf_shdr(uint8_t* p, uint32_t name, uint32_t type, uint64_t flags, u
 
 // Patch one relocation with the final addresses (no relocation is kept).
 static int elf_patch(const AsmOut* a, const ElfLayout* L, const AsmReloc* r, uint8_t* field, uint64_t place, char* err, size_t errsz) {
+    if (r->sec < 0) return elf_fail(err, errsz, "'%s' is declared extern and an executable has nothing to link it with", r->sym);
     int64_t s = (int64_t)L->base[r->sec] + r->addend;
     switch (r->type) {
     case XR_64: elf_w(field, (uint64_t)s, 8); return 0;
@@ -264,6 +271,181 @@ int elf_build(const AsmOut* a, uint8_t** img, size_t* n, ElfLayout* L, char* err
 oom:
     free(sy.b); free(st.b); free(hs.b);
     return elf_fail(err, errsz, "out of memory");
+}
+
+// ---- relocatable objects (-c) ------------------------------------------------
+
+enum { RELA_SIZE = 24 };
+
+static void elf_sym_entry(ElfBuf* sy, ElfBuf* st, const char* name, int info, int shndx, uint64_t value, uint64_t size, int* oom) {
+    uint8_t e[SYM_SIZE] = {0};
+    long nm = name ? elf_str(st, name) : 0;
+    if (nm < 0) { *oom = 1; return; }
+    elf_w(e, (uint64_t)nm, 4);
+    e[4] = (uint8_t)info;
+    elf_w(e + 6, (uint64_t)shndx, 2);
+    elf_w(e + 8, value, 8);
+    elf_w(e + 16, size, 8);
+    if (elf_buf_put(sy, e, SYM_SIZE)) *oom = 1;
+}
+
+int elf_build_obj(const AsmOut* a, uint8_t** img, size_t* n, char* err, size_t errsz) {
+    static const char* const NAME[ASM_NSEC] = {".text", ".data", ".bss", ".rodata"};
+    static const char* const RNAME[ASM_NSEC] = {".rela.text", ".rela.data", NULL, ".rela.rodata"};
+    static const uint64_t FLAGS[ASM_NSEC] = {6, 3, 3, 2};     // AX, WA, WA, A
+    static const int ORDER[ASM_NSEC] = {ASM_SEC_TEXT, ASM_SEC_RODATA, ASM_SEC_DATA, ASM_SEC_BSS};
+    int shndx[ASM_NSEC] = {0}, relndx[ASM_NSEC] = {0}, secsym[ASM_NSEC] = {0};
+    long shname[ASM_NSEC] = {0}, relname[ASM_NSEC] = {0};
+    int nsh = 1;
+    ElfBuf sy = {0}, st = {0}, hs = {0};
+    uint8_t* f = NULL;
+    int oom = 0;
+    uint32_t* extidx = NULL;
+
+    for (int i = 0; i < ASM_NSEC; i++) {
+        int k = ORDER[i];
+        if (a->sec[k].size) shndx[k] = nsh++;
+    }
+    if (nsh == 1) return elf_fail(err, errsz, "the object has no code and no data");
+    if (elf_str(&hs, "") < 0) goto oom;
+    for (int i = 0; i < ASM_NSEC; i++) {
+        int k = ORDER[i];
+        if (!shndx[k]) continue;
+        if ((shname[k] = elf_str(&hs, NAME[k])) < 0) goto oom;
+    }
+    for (int i = 0; i < ASM_NSEC; i++) {
+        int k = ORDER[i];
+        if (!shndx[k] || k == ASM_SEC_BSS || !a->sec[k].nrel) continue;
+        relndx[k] = nsh++;
+        if ((relname[k] = elf_str(&hs, RNAME[k])) < 0) goto oom;
+    }
+    int i_symtab = nsh, i_strtab = nsh + 1, i_shstr = nsh + 2;
+    nsh += 3;
+    long n_symtab = elf_str(&hs, ".symtab"), n_strtab = elf_str(&hs, ".strtab"), n_shstr = elf_str(&hs, ".shstrtab");
+    if (n_symtab < 0 || n_strtab < 0 || n_shstr < 0) goto oom;
+
+    // Symbols: the null one, a section symbol per section (relocations point at
+    // them), the labels without a dot (LOCAL, then GLOBAL) and the externs.
+    uint8_t zero[SYM_SIZE] = {0};
+    if (elf_buf_put(&sy, zero, SYM_SIZE) || elf_str(&st, "") < 0) goto oom;
+    uint32_t count = 1, first_global = 1;
+    for (int i = 0; i < ASM_NSEC; i++) {
+        int k = ORDER[i];
+        if (!shndx[k]) continue;
+        elf_sym_entry(&sy, &st, NULL, 3, shndx[k], 0, 0, &oom);       // LOCAL SECTION
+        secsym[k] = (int)count++;
+    }
+    for (int pass = 0; pass < 2 && !oom; pass++) {
+        if (pass == 1) first_global = count;
+        for (size_t i = 0; i < a->nsym; i++) {
+            const AsmSym* y = &a->sym[i];
+            if (!elf_is_symbol(a, y) || (y->global != 0) != (pass == 1)) continue;
+            elf_sym_entry(&sy, &st, y->name, ((y->global ? 1 : 0) << 4) | (y->sec == ASM_SEC_TEXT ? 2 : 1), shndx[y->sec],
+                          (uint64_t)y->off, elf_sym_size(a, i), &oom);
+            count++;
+        }
+    }
+    extidx = calloc(a->next ? a->next : 1, sizeof *extidx);
+    if (!extidx) goto oom;
+    for (size_t j = 0; j < a->next && !oom; j++) {
+        elf_sym_entry(&sy, &st, a->ext[j], 1 << 4, 0, 0, 0, &oom);     // GLOBAL NOTYPE UND
+        extidx[j] = count++;
+    }
+    if (oom) goto oom;
+
+    // File layout: header, the sections with bytes (each at its alignment), the
+    // .rela sections, .symtab, .strtab, .shstrtab, the section header table.
+    uint64_t off[ASM_NSEC] = {0}, cur = EHDR_SIZE, o_rel[ASM_NSEC] = {0};
+    for (int i = 0; i < ASM_NSEC; i++) {
+        int k = ORDER[i];
+        if (!shndx[k]) continue;
+        cur = elf_up(cur, (uint64_t)(a->sec[k].align > 0 ? a->sec[k].align : 1));
+        off[k] = cur;
+        if (k != ASM_SEC_BSS) cur += a->sec[k].size;
+    }
+    for (int i = 0; i < ASM_NSEC; i++) {
+        int k = ORDER[i];
+        if (!relndx[k]) continue;
+        cur = elf_up(cur, 8);
+        o_rel[k] = cur;
+        cur += (uint64_t)a->sec[k].nrel * RELA_SIZE;
+    }
+    cur = elf_up(cur, 8);
+    uint64_t o_symtab = cur, o_strtab = o_symtab + sy.n, o_shstr = o_strtab + st.n;
+    uint64_t o_sh = elf_up(o_shstr + hs.n, 8);
+    uint64_t total = o_sh + (uint64_t)nsh * SHDR_SIZE;
+    f = calloc((size_t)total, 1);
+    if (!f) goto oom;
+
+    for (int k = 0; k < ASM_NSEC; k++) {
+        const AsmSection* s = &a->sec[k];
+        if (!shndx[k]) continue;
+        if (k != ASM_SEC_BSS) memcpy(f + off[k], s->bytes, s->size);
+        for (size_t i = 0; i < s->nrel && relndx[k]; i++) {
+            const AsmReloc* r = &s->rel[i];
+            uint64_t sym;
+            if (r->sec == ASM_SEC_UNDEF) {
+                size_t j = 0;
+                while (j < a->next && strcmp(a->ext[j], r->sym)) j++;
+                if (j == a->next) { free(f); free(extidx); free(sy.b); free(st.b); free(hs.b); return elf_fail(err, errsz, "relocation against '%s', which is not declared extern", r->sym); }
+                sym = extidx[j];
+            } else {
+                if (!secsym[r->sec]) { free(f); free(extidx); free(sy.b); free(st.b); free(hs.b); return elf_fail(err, errsz, "relocation to the empty section %s", r->sym); }
+                sym = (uint64_t)secsym[r->sec];
+            }
+            uint8_t* e = f + o_rel[k] + i * RELA_SIZE;
+            elf_w(e, (uint64_t)r->off, 8);
+            elf_w(e + 8, sym << 32 | (uint64_t)r->type, 8);
+            elf_w(e + 16, (uint64_t)r->addend, 8);
+        }
+    }
+    memcpy(f + o_symtab, sy.b, sy.n);
+    memcpy(f + o_strtab, st.b, st.n);
+    memcpy(f + o_shstr, hs.b, hs.n);
+    uint8_t* sh = f + o_sh;                         // entry 0 stays all zero
+    for (int i = 0; i < ASM_NSEC; i++) {
+        int k = ORDER[i];
+        if (!shndx[k]) continue;
+        const AsmSection* s = &a->sec[k];
+        elf_shdr(sh + (size_t)shndx[k] * SHDR_SIZE, (uint32_t)shname[k], k == ASM_SEC_BSS ? 8 : 1, FLAGS[k], 0, off[k], s->size, 0, 0,
+                 (uint64_t)(s->align > 0 ? s->align : 1), 0);
+        if (relndx[k])
+            elf_shdr(sh + (size_t)relndx[k] * SHDR_SIZE, (uint32_t)relname[k], 4, 0x40, 0, o_rel[k], (uint64_t)s->nrel * RELA_SIZE,
+                     (uint32_t)i_symtab, (uint32_t)shndx[k], 8, RELA_SIZE);
+    }
+    elf_shdr(sh + (size_t)i_symtab * SHDR_SIZE, (uint32_t)n_symtab, 2, 0, 0, o_symtab, sy.n, (uint32_t)i_strtab, first_global, 8, SYM_SIZE);
+    elf_shdr(sh + (size_t)i_strtab * SHDR_SIZE, (uint32_t)n_strtab, 3, 0, 0, o_strtab, st.n, 0, 0, 1, 0);
+    elf_shdr(sh + (size_t)i_shstr * SHDR_SIZE, (uint32_t)n_shstr, 3, 0, 0, o_shstr, hs.n, 0, 0, 1, 0);
+    free(sy.b); free(st.b); free(hs.b); free(extidx);
+
+    memcpy(f, "\x7f" "ELF\2\1\1", 7);
+    elf_w(f + 16, 1, 2);                           // ET_REL
+    elf_w(f + 18, 62, 2);                          // EM_X86_64
+    elf_w(f + 20, 1, 4);
+    elf_w(f + 40, o_sh, 8);                        // e_shoff
+    elf_w(f + 52, EHDR_SIZE, 2);                   // e_ehsize
+    elf_w(f + 58, SHDR_SIZE, 2);                   // e_shentsize
+    elf_w(f + 60, (uint64_t)nsh, 2);
+    elf_w(f + 62, (uint64_t)i_shstr, 2);
+    *img = f;
+    *n = (size_t)total;
+    return 0;
+oom:
+    free(sy.b); free(st.b); free(hs.b); free(extidx); free(f);
+    return elf_fail(err, errsz, "out of memory");
+}
+
+int elf_write_obj(const AsmOut* a, const char* path, char* err, size_t errsz) {
+    uint8_t* img;
+    size_t n;
+    if (elf_build_obj(a, &img, &n, err, errsz)) return -1;
+    FILE* fp = fopen(path, "wb");
+    if (!fp) { free(img); return elf_fail(err, errsz, "cannot write '%s'", path); }
+    int ok = fwrite(img, 1, n, fp) == n;
+    ok = fclose(fp) == 0 && ok;
+    free(img);
+    if (!ok) return elf_fail(err, errsz, "error writing '%s'", path);
+    return 0;
 }
 
 int elf_write_exec(const AsmOut* a, const char* path, char* err, size_t errsz) {

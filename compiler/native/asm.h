@@ -27,8 +27,10 @@ typedef struct {
     int type;           // XR_*
     char sym[128];
     int64_t addend;
-    int sec;            // ASM_SEC_* of the target
+    int sec;            // ASM_SEC_* of the target, or ASM_SEC_UNDEF for a name declared `extern` (sym is that name)
 } AsmReloc;
+
+#define ASM_SEC_UNDEF (-1)
 
 // One branch to a label, in .text order (for diagnostics).
 typedef struct {
@@ -64,6 +66,8 @@ typedef struct {
     AsmSection sec[ASM_NSEC];
     AsmSym* sym;
     size_t nsym;
+    char** ext;         // names declared `extern`, in declaration order (a relocatable object lists them as undefined)
+    size_t next;
     AsmBranch* br;
     size_t nbr;
     // Branches to a label, after relaxation.
@@ -75,6 +79,13 @@ typedef struct {
 // Assemble NUL-terminated text. Returns 0 on success. On failure returns -1
 // and writes "line N: reason" into err; out holds nothing to free.
 int asm_assemble(const char* src, AsmOut* out, char* err, size_t errsz);
+
+// The same for a relocatable object (-c): a `global` of a name the text does not
+// define is dropped, as nasm does, instead of being an error.
+// In both, out->ext lists the `extern` names some code or data uses (nasm leaves
+// an unused one out); an executable has nothing to link them with, so elf.c
+// refuses a relocation against one.
+int asm_assemble_obj(const char* src, AsmOut* out, char* err, size_t errsz);
 void asm_free(AsmOut* out);
 
 // The label `name` (a `global` or not), or NULL.

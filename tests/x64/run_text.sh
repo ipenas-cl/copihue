@@ -7,7 +7,7 @@
 # Needs nasm, GNU ld for x86-64 and objcopy (binutils); without them it says so and exits 0.
 # For each program and level:
 #   nat  = copihue --native                  (no nasm, no ld)
-#   ref  = nasm -f elf64 + ld                (what copihue does without --native)
+#   ref  = nasm -f elf64 + ld                (what copihue --nasm does)
 #   .text of both is extracted with `objcopy -O binary -j .text` and compared with cmp.
 # Three outcomes:
 #   same     the bytes are identical.
