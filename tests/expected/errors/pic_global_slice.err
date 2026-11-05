@@ -1,0 +1,4 @@
+tests/errors/pic_global_slice.lap:4:19: error: --pic: the initializer of global 'view' is the address of nums, which depends on the load address and a --pic image has no relocations; assign it in a function
+      4 | let view: []i64 = nums;
+        |                   ^
+1 error, compilation failed

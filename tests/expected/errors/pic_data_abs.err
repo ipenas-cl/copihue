@@ -1,0 +1,4 @@
+tests/errors/pic_data_abs.lap:9:5: error: --pic: data block 'pointers' holds the absolute address of 'table', which depends on the load address and a --pic image has no relocations; store a difference of labels (table - pointers) and add the base at run time
+      9 |     dq table;
+        |     ^
+1 error, compilation failed

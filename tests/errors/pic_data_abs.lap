@@ -1,0 +1,13 @@
+// flags: --flat 0x10000 --pic
+// A data block that holds the address of a label would need a relocation at load time.
+data table {
+    dq 1;
+    dq 2;
+}
+
+data pointers {
+    dq table;
+}
+
+fn _start() {
+}

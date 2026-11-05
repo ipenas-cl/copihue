@@ -2,6 +2,33 @@
 
 Todos los cambios importantes del proyecto.
 
+## [0.44.7] - 2026-11-05
+
+Pedido de LapageriaOS / AtomicOS (HR-01 punto 5, HR-02 puntos 2 y 4): un stub UEFI compilado con `--flat 0x1000` lo carga el firmware en una dirección que no se conoce al compilar. Las globales y las cadenas de Copihue se direccionaban en absoluto (`mov rax, str_0`, `[g]` con la dirección de `org`), así que el stub no podía usarlas y alcanzaba `data` con `lea reg, [rel etiqueta]` desde `asm()`, con un `naked fn` de una línea por símbolo.
+
+### Added
+- **`--pic` (con `--flat`)**: el código generado no usa ninguna dirección absoluta de un símbolo de la imagen. Se emite `default rel` después de `org`, de modo que `[g]`, `[g+8]`, `[blob]`, `jmp [tabla]` son relativos a RIP, y la dirección de una etiqueta en un registro sale `lea reg, [rel etiqueta]` en lugar de `mov reg, etiqueta`: cadenas literales, un nombre de `data` o de función usado como valor, `bss_start()`/`bss_end()`, `section_start()`/`section_end()`. `&global`, `&bloque`, `&f` (también el adaptador de una `ms64 fn`) y las llamadas por puntero ya eran `lea reg, [etiqueta]` y quedan relativos por `default rel`. Las direcciones literales (`*(0xB8000 as *u8)`) siguen absolutas a propósito y nasm no avisa de ellas con `--pic`.
+- **Revisión del ensamblador generado.** Con `--pic` el compilador relee su propio asm antes de ensamblar y rechaza `mov r, etiqueta`, `push etiqueta`, `[etiqueta + reg]`, `[abs etiqueta]` y `dq etiqueta` (la diferencia de dos etiquetas se acepta: no se mueve con la imagen). Una línea que viene de un `asm("...")` se informa en esa llamada, con archivo:línea:columna; cualquier otra es `internal: --pic left an absolute address ...` (un error del compilador).
+- **`&local` en `--flat`** (`HandleProtocol(h, guid, &x)`): confirmado con y sin `--pic`; es `lea rax, [rbp-N]` y no depende de la dirección de carga. Está en `tests/pic/kernel.lap` (`set_out(&x, 42)`, `set_out(&counter, 99)`).
+- **Errores de Copihue, con archivo:línea:columna y sin archivo de salida, para lo que necesitaría relocación en carga:** un global cuyo inicializador es la dirección de una cadena o de otro global (`let s: *u8 = "texto";`, `let v: []i64 = nums;`, `let s = "texto";`); un operando de `data` que es la dirección de una etiqueta (`dd gdt`); una función `bits 16` o `bits 32`; una `section "x" @ dirección`; y las etiquetas usadas como dirección en `asm()`.
+- **Combinaciones.** `--pic` exige `--flat ADDR` (`--pic needs --flat <addr>`, también con `-S`, `--freestanding` y `-c`). Con `--boot`, `--elf`, `--axe1` o `--axe2` es error (la imagen se carga en una dirección que el propio formato fija). Valen `-S`, `--sizes`, `--checked`, `--nasm` (no cambia nada: `--flat` siempre pasa por nasm), `-O0`, `-O1`, `-O2` y varios archivos en una imagen. `--flat 0x10000 --pic` y `--flat 0x40000 --pic` escriben el mismo archivo.
+
+### Tests
+- `tests/pic/kernel.lap`: carga útil `--flat --pic` que limpia su `.bss` con `bss_start()`/`bss_end()`, lee y escribe escalares de `.data` y `.bss`, arreglos, un struct y un arreglo de structs, toma cadenas (`"pic"`, `"xyz"[1]`, `msg = "global"`), `&blob`, `&words` (con `dq stop - words`), `&x` y `&counter` como parámetros de salida, `&f` en un local, un global y una tabla, una variable `ms64 fn`, y compara `&_start` con la dirección donde el arnés la dejó (22 comprobaciones). Escribe `PIC` por COM1.
+- `tests/pic/harness.in` y `tests/pic/run.sh` (sección 4j de `tests/run_tests.sh`): el arnés (32 bits, sin `--pic`) copia la carga útil a la dirección pedida, escribe esa dirección en 0x5000 y salta. **QEMU en esta Mac: `PIC` en 0x10000 (la base de `--flat`) y en 0x40000, a `-O0` y `-O2`.** Prueba de mutación: la misma carga compilada sin `--pic` imprime `PIC` en 0x10000 (control) y **no** lo imprime en 0x40000, a `-O0` y `-O2`. Los dos `--flat` (0x10000 y 0x40000) con `--pic` dan los mismos bytes; sin `--pic`, distintos. Una comprobación con awk, independiente de la del compilador, no encuentra ninguna etiqueta como dirección absoluta en el asm con `--pic` y sí las encuentra en el asm sin `--pic`. Las reglas de opciones (7) también están ahí. Sin `qemu-system-x86_64` y `perl` se omite la parte de QEMU; `CMP_REQUIRE=1` (la CI) lo convierte en fallo.
+- `tests/errors/pic_*.lap` (6, con `// flags: --flat 0x10000 --pic` y su `.err`, generado por el compilador y revisado a mano): `pic_data_abs`, `pic_global_string`, `pic_global_slice`, `pic_bits32`, `pic_asm_abs`, `pic_section_addr`. `tests/pic/run.sh` además comprueba que esas fuentes compilan sin `--pic`.
+- `tests/pic/` queda fuera del corpus de `tests/run_tests.sh`, `tools/native/corpus.sh` y `tests/x64/run_text.sh`.
+- Sin `--pic` el código no cambió: el asm (`-S`; `-O0`, `-O2`, `--freestanding -O2` y `--flat 0x8000 -O2`) de los 761 pares programa/modo de `tests/` y `examples/` que compilan es idéntico byte a byte al de 0.44.6 (salvo la línea de versión); 575 no compilan en ese modo, igual que antes.
+- Los programas de `tests/` y `examples/` que compilan con `--flat 0x8000` (los de `tests/flat`, `tests/freestanding`, `tests/boot`... más los que compilan con un `_start` vacío añadido: 78 pares a `-O0`/`-O2`) compilan con `--pic`, salvo los que tienen funciones `bits 16/32`, `dd etiqueta` en un `data` o una sección con `@`, que son el error esperado.
+- No se escribió a mano ninguna salida esperada: los `.err` los generó el compilador.
+- `gcc -O2 -Wall -Werror` sin advertencias.
+
+### Pendiente
+- No se probó contra un firmware UEFI real (OVMF) ni un `efi_main` de verdad; solo el arnés de QEMU con BIOS que copia la carga útil.
+- Un global que guarde la dirección de otro (`let p: *i64 = &g;`) sigue sin poder iniciarse: se asigna en una función. Una tabla de punteros relativa (offsets sumados a la base en carga) no la genera el compilador.
+- El arnés de la prueba es de 32 bits y no es `--pic`; un stub con cambio de modo debe ser otra imagen.
+- Una `asm()` con `[etiqueta + reg]` es error en vez de reescribirse; el texto de `asm()` se revisa con un analizador sencillo (mnemónico, operandos, etiquetas definidas en la misma imagen).
+
 ## [0.44.6] - 2026-11-05
 
 Pedido de LapageriaOS / AtomicOS (HR-01, punto 4, y HR-02, punto 1): llamar al firmware UEFI con la convención Microsoft x64 se hacía con tres `naked fn` y `asm()` (`efi_call2`, `efi_call4`, `_start`) y con un `efi_call` en ensamblador que movía SysV a MS y ponía el quinto argumento en `[rsp+32]`. Ahora el compilador la conoce.

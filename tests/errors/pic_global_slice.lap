@@ -1,0 +1,7 @@
+// flags: --flat 0x10000 --pic
+// A slice global that starts as an array holds the address of that array.
+let nums: [i64; 4] = [1, 2, 3, 4];
+let view: []i64 = nums;
+
+fn _start() {
+}

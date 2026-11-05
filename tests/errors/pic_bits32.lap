@@ -1,0 +1,8 @@
+// flags: --flat 0x10000 --pic
+// There is no RIP-relative addressing outside 64-bit mode.
+bits 32 naked fn trampoline() {
+    cli();
+}
+
+fn _start() {
+}

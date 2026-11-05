@@ -1,0 +1,11 @@
+// flags: --flat 0x10000 --pic
+// asm() text is checked: a label used as an immediate is its absolute address.
+data banner { db "hi", 0; }
+
+naked fn show() {
+    asm("mov rsi, banner");
+    asm("lea rdi, [rel banner]");
+}
+
+fn _start() {
+}

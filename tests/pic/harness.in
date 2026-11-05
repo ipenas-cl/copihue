@@ -1,0 +1,68 @@
+// Harness of tests/pic (not a --pic image; tests/pic/run.sh turns @DEST@ into a number and builds it
+// with --flat 0x8000). tests/usermode/boot.lap loads 16 sectors at 0x8000. This code is padded to
+// 1024 bytes; the payload (tests/pic/kernel.lap built with --pic) follows at 0x8400. _start switches
+// to long mode with the first 2MB identity-mapped (see tests/ginit/kernel.lap), copies the payload to
+// @DEST@, writes @DEST@ at 0x5000 and jumps there.
+
+data gdt {
+    dq 0;
+    dw 0;
+    dw 0;
+    db 0;
+    db 0x9A;
+    db 0x20;
+    db 0;
+    dw 0xFFFF;
+    dw 0;
+    db 0;
+    db 0x92;
+    db 0xCF;
+    db 0;
+}
+
+data gdtr {
+    dw 23;
+    dd gdt;
+}
+
+naked fn launch() {
+    asm("cld");
+    asm("mov rsi, 0x8400");
+    asm("mov rdi, @DEST@");
+    asm("mov rcx, 6144");
+    asm("rep movsb");
+    asm("mov qword [0x5000], @DEST@");
+    asm("mov rax, @DEST@");
+    asm("jmp rax");
+}
+
+bits 32 naked fn _start() {
+    cli();
+    asm("lgdt [gdtr]");
+    asm("mov ax, 0x10");
+    asm("mov ds, ax");
+    asm("mov es, ax");
+    asm("mov ss, ax");
+    asm("mov esp, 0x6000");
+    asm("cld");
+    asm("xor eax, eax");
+    asm("mov edi, 0x1000");
+    asm("mov ecx, 3072");
+    asm("rep stosd");
+    asm("mov dword [0x1000], 0x2007");
+    asm("mov dword [0x2000], 0x3007");
+    asm("mov dword [0x3000], 0x87");
+    asm("mov eax, cr4");
+    asm("or eax, 0x20");
+    asm("mov cr4, eax");
+    asm("mov eax, 0x1000");
+    asm("mov cr3, eax");
+    asm("mov ecx, 0xC0000080");
+    asm("rdmsr");
+    asm("or eax, 0x100");
+    asm("wrmsr");
+    asm("mov eax, cr0");
+    asm("or eax, 0x80000000");
+    asm("mov cr0, eax");
+    asm("jmp 0x08:launch");
+}

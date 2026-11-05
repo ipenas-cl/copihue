@@ -1,0 +1,4 @@
+tests/errors/pic_global_string.lap:3:21: error: --pic: the initializer of global 'greeting' is the address of a string literal, which depends on the load address and a --pic image has no relocations; assign it in a function
+      3 | let greeting: *u8 = "hello";
+        |                     ^
+1 error, compilation failed

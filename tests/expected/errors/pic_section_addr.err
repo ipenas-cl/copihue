@@ -1,0 +1,4 @@
+tests/errors/pic_section_addr.lap:3:1: error: --pic: section '.hi' has a load address (@), which fixes where its labels are; a --pic image is placed by whoever loads it
+      3 | section ".hi" @ 0x20000 {
+        | ^
+1 error, compilation failed

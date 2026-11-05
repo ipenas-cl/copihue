@@ -1,0 +1,170 @@
+// A flat payload built with --pic (0.44.7) and run by QEMU at two load addresses (tests/pic/run.sh).
+// The harness (tests/pic/harness.in) copies it to the address it is given, writes that address at
+// 0x5000, and jumps to it. The payload clears its own .bss with bss_start()/bss_end(), then reads and
+// writes globals (scalars, arrays, a struct, a struct array), takes the address of a string, a data
+// block (&blob) and a local (&x, an output parameter), calls through &f, through a global and through
+// a table of function addresses, and through an `ms64 fn` variable. COM1 shows PIC when every check
+// holds and FAIL and the number of the first check that does not otherwise. The bytes are the same
+// whatever the address; the output must be too.
+
+struct Pair { a: i64, b: u32 }
+
+let counter: i64 = 7;
+let small: u8 = 200;
+let wide: u32 = 70000;
+let nums: [i64; 4] = [10, 20, 30, 40];
+let bytes: [u8; 4] = [1, 2, 3, 4];
+let bad: i64 = 0;
+let pr: Pair;
+let pairs: [Pair; 2];
+let zero: i64;
+let hits: i64;
+let ftab: [i64; 3];
+let gcb: i64;
+let mscb: ms64 fn = 0;
+let msg: *u8 = 0;
+
+data blob {
+    db 10;
+    db 20;
+    db 30;
+    db 40;
+}
+
+data words {
+    dq 1;
+    dq 2;
+    stop:
+    dq 0;
+    dq stop - words;
+}
+
+fn serial_putc(c: i64) -> i64 {
+    let tries = 0;
+    while ((inb(0x3FD) & 0x20) == 0 && tries < 1000) { tries = tries + 1; }
+    outb(0x3F8, c);
+    return 0;
+}
+
+fn puts(s: *u8) -> i64 {
+    let i = 0;
+    while (s[i] != 0) {
+        serial_putc(s[i]);
+        i = i + 1;
+    }
+    return i;
+}
+
+fn check(n: i64, ok: i64) -> i64 {
+    if (ok == 0 && bad == 0) { bad = n; }
+    return 0;
+}
+
+fn sum_nums() -> i64 {
+    let t = 0;
+    let i = 0;
+    while (i < 4) { t = t + nums[i]; i = i + 1; }
+    return t;
+}
+
+fn sum_for() -> i64 {
+    let t = 0;
+    for i in 0..4 { t = t + nums[i]; }
+    return t;
+}
+
+fn set_out(p: *i64, v: i64) -> i64 {
+    *p = v;
+    return 0;
+}
+
+fn add3(a: i64) -> i64 { return a + 3; }
+
+fn bump() -> i64 {
+    hits = hits + 1;
+    return hits;
+}
+
+ms64 fn msadd(a: i64, b: i64) -> i64 { return a + b; }
+
+fn _start() {
+    let a: *u8 = bss_start();
+    let b: *u8 = bss_end();
+    while ((a as i64) < (b as i64)) {
+        *a = 0;
+        a = a + 1;
+    }
+
+    // scalars in .data and .bss
+    check(1, counter == 7);
+    counter = counter + 5;
+    check(2, counter == 12);
+    check(3, small == 200 && wide == 70000);
+    check(4, zero == 0 && hits == 0);
+    bump();
+    bump();
+    check(5, bump() == 3 && hits == 3);
+
+    // arrays
+    check(6, sum_nums() == 100 && sum_for() == 100);
+    nums[2] = 5;
+    check(7, sum_nums() == 75 && nums[2] == 5);
+    let i = 0;
+    let t = 0;
+    while (i < 4) { t = t + bytes[i]; bytes[i] = 9; i = i + 1; }
+    check(8, t == 10 && bytes[3] == 9);
+
+    // a struct and an array of structs
+    pr.a = 3;
+    pr.b = 4;
+    pairs[1].a = 9;
+    pairs[1].b = 8;
+    check(9, pr.a + pr.b == 7 && pairs[1].a + pairs[1].b == 17 && pairs[0].a == 0);
+
+    // strings
+    let s: *u8 = "pic";
+    check(10, s[0] == 112 && s[2] == 99 && s[3] == 0);
+    check(11, "xyz"[1] == 121);
+    msg = "global";
+    check(12, msg[0] == 103 && msg[5] == 108);
+
+    // a data block
+    let q: *u8 = &blob;
+    check(13, q[0] == 10 && q[3] == 40);
+    let w: *i64 = &words;
+    check(14, w[1] == 2 && w[3] == 16);
+
+    // an output parameter
+    let x: i64 = 0;
+    set_out(&x, 42);
+    check(15, x == 42);
+    set_out(&counter, 99);
+    check(16, counter == 99);
+
+    // function addresses
+    let f = &add3;
+    check(17, f(4) == 7);
+    gcb = &add3;
+    check(18, gcb(10) == 13);
+    ftab[0] = &add3;
+    ftab[2] = &bump;
+    let g = ftab[0];
+    check(19, g(1) == 4);
+    let h = ftab[2];
+    check(20, h() == 4);
+    mscb = &msadd;
+    check(21, mscb(20, 22) == 42);
+
+    // where this runs is where the harness put it
+    let me: i64 = &_start;
+    check(22, me == *(0x5000 as *i64));
+
+    if (bad == 0) {
+        puts("PIC");
+    } else {
+        puts("FAIL");
+        serial_putc(48 + bad / 10);
+        serial_putc(48 + bad % 10);
+    }
+    while (1) { hlt(); }
+}

@@ -1,0 +1,4 @@
+tests/errors/pic_asm_abs.lap:6:5: error: --pic: asm("mov rsi, banner") uses 'banner' as an address that depends on the load address: an immediate that is the absolute address of a label; use lea reg, [rel label]
+      6 |     asm("mov rsi, banner");
+        |     ^
+1 error, compilation failed

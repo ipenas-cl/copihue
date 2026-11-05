@@ -1,4 +1,4 @@
-# Copihue Language Reference (v0.44.6)
+# Copihue Language Reference (v0.44.7)
 
 This document describes the language that `copihue` accepts today. Anything not listed here is not supported.
 Planned features are in the README roadmap.
@@ -962,6 +962,38 @@ bss=72
 ```
 
 `text` is the whole `.text` section, `align` padding included. It is an error with `--boot` or without `--flat`, and it cannot be combined with `--elf`.
+
+### Position-independent images (`--pic`)
+
+`copihue --flat ADDR --pic -o out.bin file.lap` (0.44.7) builds a flat image that runs wherever it is loaded, not only at `ADDR`. A UEFI stub is the use: the firmware loads it at an address nobody knows when it is built. Without `--pic` a global, a string, a `data` block and a function are reached by their absolute address (`mov rax, str_0`, `mov rax, [g]` with a disp32 that nasm fills in from `org`); with it, none is.
+
+The compiler writes `default rel` after `org`, so every `[label]` and `[label + n]` memory operand is RIP-relative (`mov rax, [g]` is `mov rax, [rip+disp32]`), and it spells the address of a label as `lea reg, [rel label]` instead of `mov reg, label`. That covers:
+
+| In the source | In the assembly |
+|---|---|
+| read or write a global (`g`, `g = v`, `a[i]`, `s.f`, a bss global, a volatile global) | `mov rax, [g]`, `mov [g], rax` (RIP-relative through `default rel`) |
+| a string literal (`"text"`, `s = "text"`, `"text"[i]`) | `lea rax, [rel str_0]` |
+| `&global`, `&array`, `&blob` (a `data` block), a bare `blob` | `lea rax, [blob]` / `lea rax, [rel blob]` |
+| `&f`, a function name used as a value, a call through it, `&f` of an `ms64 fn` (the thunk) | `lea rax, [f]` and `call rbx` |
+| `bss_start()`, `bss_end()`, `section_start()`, `section_end()` | `lea rax, [rel __bss_start]` |
+| `&local`, an output parameter (`set(&x)`) | `lea rax, [rbp-8]`; it never depended on the load address |
+
+A literal address (`*(0xB8000 as *u8)`, `inb`/`outb`, a memory-mapped register) is not a symbol of the image and stays absolute on purpose; nasm is told not to warn about it. `call label` and `jmp label` are rel32 and were already independent. `-O0`, `-O2` and `--checked` give the same kind of code; `--nasm` is accepted and changes nothing, because a flat image is always assembled by nasm. `--sizes` works.
+
+**`&local` in `--flat`.** The address of a local is `lea rax, [rbp-N]` and works in every build; it was confirmed for 0.44.7 with and without `--pic` (`HandleProtocol(h, guid, &x)` is `set_out(&x, 42)` in `tests/pic/kernel.lap`).
+
+**What cannot be position independent is an error** at the place that holds the address, with file, line and column, and no output file:
+
+- A global whose initializer is the address of a string or of another global (`let s: *u8 = "text";`, `let v: []i64 = nums;`, `let s = "text";`): `--pic: the initializer of global 's' is the address of a string literal, which depends on the load address and a --pic image has no relocations; assign it in a function`. The slot would hold an absolute address that only a relocation at load time could fix, and the image has none. (`let p: *i64 = &y;` and `let f: *u8 = &fn;` were already `not a constant expression` since 0.44.5.)
+- A `data` block operand that is the address of a label (`dd gdt`, `dq table + 8`): `--pic: data block 'gdtr' holds the absolute address of 'gdt' ...`. A difference of two labels (`dq stop - words`) does not move with the image and is accepted. Build the table at run time (`lea rax, [rel gdt]` and a store), or store the offset and add the base.
+- `asm("...")` text is checked after the code is generated: a label as an immediate (`mov rsi, banner`, `push label`, `cmp rax, label`), `[label + reg]` (`mov rax, [tbl+rax*8]`) and `[abs label]` are errors on the `asm` call (`--pic: asm("mov rsi, banner") uses 'banner' as an address ...`). `lea rax, [label]`, `mov rax, [label]`, `mov rax, [label + 8]` and `label - label` are fine; under `default rel` the first three are RIP-relative.
+- A `bits 16` or `bits 32` function (`--pic: a bits 32 function cannot be position independent`): there is no RIP-relative addressing outside 64-bit mode. A stub that must switch modes belongs in a separate image built without `--pic`.
+- A `section "name" @ addr { }` (`--pic: section '.hi' has a load address (@) ...`): the address fixes where its labels are.
+- Anything else that leaves the address of a label in the assembly is reported as `internal: --pic left an absolute address of 'x' in the assembly (line N: ...)`, a compiler bug: the compiler reads its own assembly back before it runs nasm.
+
+**Combinations.** `--pic` needs `--flat ADDR` (`--pic needs --flat <addr>`; `-S --pic` and `--freestanding --pic` alone are the same error, and so is `-c --pic`). `--boot`, `--elf`, `--axe1` and `--axe2` are errors (`--pic cannot be combined with --boot`, `... with --elf`, `... with --axe1 or --axe2`): a boot sector, an ET_EXEC file and an AXE image are loaded at one address that the file itself names. `-S`, `--sizes`, `--checked`, `--nasm`, `-O0`, `-O1`, `-O2` and several files in one image are accepted. `ADDR` is still the `org`; it is only where nasm believes the image will be, and the bytes do not depend on it (`--flat 0x10000 --pic` and `--flat 0x40000 --pic` write the same file).
+
+`tests/pic/run.sh` checks all of it: the option errors, `tests/errors/pic_*.lap`, an awk check on the assembly of `tests/pic/kernel.lap` (no label as an absolute address; the same check finds them in the assembly built without `--pic`), the same bytes for two `--flat` bases, and QEMU running that payload copied to 0x10000 and to 0x40000 by `tests/pic/harness.in` (the harness is 32-bit code, so it is not a `--pic` image). The payload clears its `.bss`, reads and writes scalars, arrays, a struct and an array of structs, takes strings, `&blob`, `&local`, `&f`, calls through a local, a global, a table and an `ms64 fn` variable, and checks that `&_start` is where the harness put it. It prints `PIC` at both addresses, at `-O0` and `-O2`. Built without `--pic` and run at the second address it does not print `PIC`.
 
 ### AXE1 images
 
