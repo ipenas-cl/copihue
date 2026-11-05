@@ -1,0 +1,4 @@
+tests/errors/ms64_slice_param.lap:5:11: error: an ms64 parameter is an integer or a pointer; 's' is a struct, a slice, an enum, or an owning pointer
+      5 | ms64 fn f(s: []u8) -> i64 {
+        |           ^
+1 error, compilation failed

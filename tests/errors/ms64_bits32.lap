@@ -1,0 +1,7 @@
+bits 32 naked ms64 fn f(a: i64) -> i64 {
+    return a;
+}
+
+fn main() -> i64 {
+    return 0;
+}

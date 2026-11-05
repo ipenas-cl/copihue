@@ -1,0 +1,9 @@
+enum Opt { None, Some(i64) }
+
+ms64 fn f() -> Opt {
+    return Opt::None;
+}
+
+fn main() -> i64 {
+    return 0;
+}

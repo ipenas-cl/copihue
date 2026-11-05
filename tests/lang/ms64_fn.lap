@@ -1,0 +1,65 @@
+// A Copihue function with the Microsoft x64 convention (0.44.6): `ms64 fn`. Defined and called
+// here only from Copihue, so the compiler's own assembler and linker build it (no naked function,
+// no nasm). The caller puts arguments 1 to 4 in rcx, rdx, r8, r9 and the rest above 32 bytes of
+// shadow space; the function behind the symbol moves them to where its body reads them, and keeps
+// rdi, rsi, and rbx for the caller. A pointer to it is a variable of type `ms64 fn`.
+// tests/lang/ms64_call.lap checks the registers and the stack from assembly callees.
+
+let gfn: ms64 fn = 0;
+
+ms64 fn m0() -> i64 { return 42; }
+ms64 fn m1(a: i64) -> i64 { return a + 100; }
+ms64 fn m4(a: i64, b: i64, c: i64, d: i64) -> i64 {
+    return d * 1000 + c * 100 + b * 10 + a;
+}
+ms64 fn m5(a: i64, b: i64, c: i64, d: i64, e: i64) -> i64 {
+    return e * 10000 + d * 1000 + c * 100 + b * 10 + a;
+}
+ms64 fn m6(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64) -> i64 {
+    return f * 100000 + e * 10000 + d * 1000 + c * 100 + b * 10 + a;
+}
+ms64 fn m8(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, h: i64) -> i64 {
+    return h * 10000000 + g * 1000000 + f * 100000 + e * 10000 + d * 1000 + c * 100 + b * 10 + a;
+}
+ms64 fn m9(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, h: i64, i: i64) -> i64 {
+    return i * 1000 + m8(a, b, c, d, e, f, g, h) % 1000;
+}
+ms64 fn fact(n: i64) -> i64 {
+    if (n < 2) { return 1; }
+    return n * fact(n - 1);
+}
+ms64 fn apply4(f: ms64 fn, a: i64, b: i64, c: i64, d: i64) -> i64 {
+    return f(a, b, c, d);
+}
+fn plain(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64) -> i64 {
+    return a + b + c + d + e + f + g;
+}
+ms64 fn mixed(a: i64, b: i64) -> i64 {
+    return plain(a, b, 1, 1, 1, 1, 1);
+}
+fn show(v: i64) -> i64 {
+    print_int(v);
+    println("");
+    return 0;
+}
+
+fn main() -> i64 {
+    let keep: i64 = 7;
+    let p: ms64 fn = &m6;
+    gfn = &m5;
+    show(m0());
+    show(m1(5));
+    show(m4(1, 2, 3, 4));
+    show(m5(1, 2, 3, 4, 5));
+    show(m6(1, 2, 3, 4, 5, 6));
+    show(m8(1, 2, 3, 4, 5, 6, 7, 8));
+    show(m9(1, 1, 1, 1, 1, 1, 1, 1, 9));
+    show(p(6, 5, 4, 3, 2, 1));
+    show(gfn(5, 4, 3, 2, 1));
+    show(m4(m1(1) - 100, m1(2) - 100, 3, m0() - 38));
+    show(fact(10));
+    show(apply4(&m4, 4, 3, 2, 1));
+    show(mixed(2, 3));
+    show(keep + 1);
+    return 0;
+}

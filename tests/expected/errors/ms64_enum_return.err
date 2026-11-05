@@ -1,0 +1,4 @@
+tests/errors/ms64_enum_return.lap:3:9: error: an ms64 function returns an integer or a pointer, not an enum
+      3 | ms64 fn f() -> Opt {
+        |         ^
+1 error, compilation failed

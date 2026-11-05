@@ -1,0 +1,4 @@
+tests/errors/ms64_bits32.lap:1:23: error: an ms64 function is 64-bit; bits 32 cannot be ms64
+      1 | bits 32 naked ms64 fn f(a: i64) -> i64 {
+        |                       ^
+1 error, compilation failed
