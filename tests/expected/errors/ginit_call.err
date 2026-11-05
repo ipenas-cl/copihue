@@ -1,0 +1,4 @@
+tests/errors/ginit_call.lap:3:22: error: the initializer of global 'ahci_port' is not a constant expression: a call
+      3 | let ahci_port: i64 = seed();
+        |                      ^
+1 error, compilation failed

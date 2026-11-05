@@ -1,0 +1,18 @@
+struct P { x: i64, y: i64 }
+
+fn id(v: i64) -> i64 { return v; }
+
+let n: i64 = 5;
+let a: [i64; 3] = [1, id(2), 3];
+let b: *i64 = &n;
+let c: P = P { x: 1, y: 2 };
+let d: i64 = true;
+let e: *u8 = id(0) as *u8;
+let f: [i64; 2] = 5;
+let g: i64 = "text";
+let h: [i64; 2] = [n, 0];
+let i: i64 = n as u8;
+
+fn main() -> i64 {
+    return 0;
+}

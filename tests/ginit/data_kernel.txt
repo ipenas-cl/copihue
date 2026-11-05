@@ -1,0 +1,19 @@
+neg: dq -1
+neg2: dq -4
+k: dq 18
+m: dq 2147483648
+mask: dq 255
+wrapped: dq 44
+sext: dq -56
+big: dq -9223372036854775808
+allones: dq -1
+wide: dq 1099511627781
+wmax: dq 9223372036854775807
+sz: dq 17
+off: dq 8
+shr: dq 32
+div: dq -3
+tbl: dq 4, -4, 1099511627776
+bytes: db 128, 60, 4
+dwords: dd 2147483648, 49
+vga: dq 753824

@@ -1,0 +1,14 @@
+const BIG = 1 << 31;
+
+let a: u32 = 0 - 1;
+let b: i32 = BIG;
+let c: u8 = 200 + 100;
+let d: u64 = -1;
+let e: i16 = 32768;
+let f: [u8; 3] = [1, 2, 256];
+let ok1: u8 = 300 as u8;
+let ok2: u32 = BIG;
+
+fn main() -> i64 {
+    return 0;
+}

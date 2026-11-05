@@ -1,0 +1,4 @@
+tests/errors/ginit_global.lap:2:18: error: the initializer of global 'limit' is not a constant expression: the name 'base', which is not a const
+      2 | let limit: i64 = base + 28;
+        |                  ^
+1 error, compilation failed

@@ -1,0 +1,8 @@
+const ZERO = 0;
+
+let a: i64 = 10 / ZERO;
+let b: i64 = 10 % (3 - 3);
+
+fn main() -> i64 {
+    return a + b;
+}

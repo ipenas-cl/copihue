@@ -1,4 +1,4 @@
-# Copihue Language Reference (v0.44.4)
+# Copihue Language Reference (v0.44.5)
 
 This document describes the language that `copihue` accepts today. Anything not listed here is not supported.
 Planned features are in the README roadmap.
@@ -425,6 +425,28 @@ fn fill() -> i64 {
 Where it is accepted: wherever an expression is, and in an array length (`[T; N]`, `[T; N * 2 + 1]`, also `[u8; 0x10]`) in a `let`, a struct field or a cast. A constant is declared before it is used, in the file order (a module-level constant is not visible above its line). A constant at module level lasts to the end of the file; in a file with `module m;` it is `m`'s, and `pub const SIZE = 6;` makes it reachable as `m::SIZE` from other files (without `pub`: `constant 'm::SIZE' is private to its module`). A constant inside a function lasts to the end of its block. A flat file's constants are in the flat namespace, like its functions and globals.
 
 Errors, all at compile time: `the value of a constant must be a constant integer expression` (a variable or a call in the value), `the value of a constant divides by zero`, `constant 'N' is already declared` (same scope, or a function-level one that would hide a module-level one: there is no shadowing), `'N' is a constant; a variable cannot reuse its name` (a `let`, global or local, or a parameter with that name), `cannot assign to a constant` (`N = 3;`, `N += 1;`, `N++;`), `an array length must be a constant integer expression` and `an array length must be from 0 to 2147483647`, and `align() does not apply to a constant`. `const` is a contextual word: `const NAME =` starts a declaration, and a variable that happens to be called `const` still works. Tests: `tests/lang/const.lap` and `const_mod.lap` (expected output written by hand and **not run**: this Mac does not execute Linux ELF; the assembly was read, and the CI runs them), `tests/errors/const_bad.lap`, `const_private.lap` and `const_align.lap`.
+
+### Initializers of globals
+
+A global `let` lives in `.data` (initialized) or `.bss` (not), so its initial value is a number fixed when the program is built. Since 0.44.5 the initializer may be any constant integer expression, and the compiler folds it:
+
+```copihue
+const N = 4;
+let ahci_port: i64 = 0 - 1;          // dq -1
+let flags: u32 = 1 << 31;            // dq 2147483648
+let k: i64 = N * 4 + 2;              // dq 18
+let low: u8 = 300 as u8;             // dq 44
+let tbl: [i64; 3] = [N, N * 2, 1 << 40];
+let vga: *u8 = 0xB8000 + 160;
+```
+
+What folds: integer and character literals, `const` names, parentheses, `+ - * / %`, `& | ^ << >>`, unary `-`, `~` and `!`, the comparisons and `&&`/`||` (0 or 1), `as` between integer types (it wraps to the width of the target, as at run time) and `as *T` on an integer, `sizeof(T)` and `offsetof(S, f)`. The arithmetic is done at 64 bits, wrapping, and the result is then checked against the declared type: `let m: u32 = 1 << 31` is fine (2147483648), `let a: u32 = 0 - 1` is `expected u32, found constant value -1`, `let b: u8 = 200 + 100` is `expected u8, found constant value 300`. A plain literal keeps the rule of a local `let` (`let d: u64 = -1` is `expected u64, found integer literal -1`). An `i64` or `u64` accepts any 64-bit result (`let big: u64 = 1 as u64 << 63`, `let all: u64 = 0 - 1`); a pointer takes an address computed from integers. `x as T` with `T` as wide as the global is a reinterpretation (`let s: i8 = 200 as u8` is -56). A sum of two `u8` values is not cut to 8 bits before the check, so `(200 as u8) + (100 as u8)` is 300 and is refused for a `u8` global; write `as u8` around the whole sum to wrap it. The result is the same at `-O0` and `-O2`.
+
+An array initializer folds each element the same way, against the element type (`let t: [u8; 3] = [1, 2, 256]` is `expected u8, found integer literal 256` on the element's column). A string initializes a `[u8; N]` array (the bytes and a 0), a `*u8` pointer, or an untyped global (the address of the string).
+
+What does not fold is an error on the `let`, with the file, line and column of the expression, and no output file. The message is `the initializer of global 'x' is not a constant expression: <what>`, where `<what>` is `a call`, `the name 'g', which is not a const` (another global or any variable), `an address (&x)`, `a string literal` (in an integer slot or an array element), `a struct literal`, `a field access`, `an index expression`, `a pointer dereference`. An array element says `element 1 of the initializer of global 'a' is not a constant expression: a call`. Division or remainder by zero is `the initializer of global 'x' divides by zero`, and an array global initialized with something that is not an array literal or a string is `the initializer of global 'x' must be an array literal or a string`. A global that needs run-time code is set in a function (`fn init() { g = f(); }`). Before 0.44.5 these compiled, left the symbol undefined, and failed in nasm (``symbol `x' not defined``) or, in an array, put a 0 in its place without a word. It holds for every way of building: hosted (native and `--nasm`), `-c`, `--freestanding`, `--flat`, `--axe1`, `--axe2`, `--elf` and `--boot`.
+
+Not part of this: a global of an `enum` type cannot be initialized (it "starts at zero"; assign it in a function), a struct global takes no literal (`a struct literal` above; assign its fields in a function), and `[]T` slices keep their own rule (an array, a slice or a string). A global whose name is a NASM keyword (`word` is one) still fails in nasm.
 
 ### Alignment
 

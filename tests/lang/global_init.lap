@@ -1,0 +1,85 @@
+// 0.44.5: the initializer of a global is a constant integer expression, folded at compile time.
+// Literals, consts, + - * / % & | ^ << >>, - ~ !, comparisons, parentheses, `as` between
+// integers, sizeof and offsetof. Each global is read back and compared with the same value
+// computed at run time, so the big ones print 1 and not a number the golden file masks.
+
+const N = 4;
+const SHIFT = 3;
+
+struct Pair { a: i64, b: u32 }
+
+let neg: i64 = 0 - 1;
+let neg2: i64 = -N;
+let notv: i64 = ~5;
+let k: i64 = N * 4 + 2;
+let m: u32 = 1 << 31;
+let mask: u8 = 0xF0 | 0x0F;
+let wrapped: u8 = 300 as u8;
+let sext: i8 = 200 as u8;
+let big: u64 = 1 as u64 << 63;
+let allones: u64 = 0 - 1;
+let wide: i64 = (1 << 40) + 5;
+let wmax: i64 = 0x7FFFFFFFFFFFFFFF;
+let sz: i64 = sizeof(i64) * 2 + 1;
+let off: i64 = offsetof(Pair, b);
+let lt: i64 = N < 5;
+let shr: i64 = 256 >> SHIFT;
+let rem: i64 = 100 % 7;
+let div: i64 = 0 - 7 / 2;
+let mixed: i64 = (N + 1) * (SHIFT - 1) ^ 3;
+let tbl: [i64; 4] = [N, N * 2, 0 - N, 1 << 40];
+let bytes: [u8; 3] = [0x7F + 1, 255 & 0x3C, N];
+let dwords: [u32; 2] = [1 << 31, 7 * 7];
+let vga: *u8 = 0xB8000 + 160;
+let msg: *u8 = "global string";
+let sum: i64 = 5;
+
+fn show(v: i64) {
+    print_int(v);
+    println("");
+}
+
+fn main() -> i64 {
+    let r: u64 = 1;
+    let s: i64 = 1;
+    show(neg);                      // -1
+    show(neg2);                     // -4
+    show(notv);                     // -6
+    show(k);                        // 18
+    show(m == 2147483648);          // 1
+    show(mask);                     // 255
+    show(wrapped);                  // 44
+    show(sext);                     // -56
+    r = r << 63;
+    show(big == r);                 // 1
+    r = 0;
+    r = r - 1;
+    show(allones == r);             // 1
+    s = s << 40;
+    show(wide == s + 5);            // 1
+    s = 0x7FFFFFFFFFFFFFFF;
+    show(wmax == s);                // 1
+    show(sz);                       // 17
+    show(off);                      // 8
+    show(lt);                       // 1
+    show(shr);                      // 32
+    show(rem);                      // 2
+    show(div);                      // -3
+    show(mixed);                    // 9
+    show(tbl[0]);                   // 4
+    show(tbl[1]);                   // 8
+    show(tbl[2]);                   // -4
+    s = 1;
+    s = s << 40;
+    show(tbl[3] == s);              // 1
+    show(bytes[0]);                 // 128
+    show(bytes[1]);                 // 60
+    show(bytes[2]);                 // 4
+    show(dwords[0] == 2147483648);    // 1
+    show(dwords[1]);                  // 49
+    show((vga as i64) == 753824);   // 1
+    println(msg);                   // global string
+    sum = sum + k;
+    show(sum);                      // 23
+    return 0;
+}
