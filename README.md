@@ -48,7 +48,7 @@ copihue [-O0|-O1|-O2] [-o out] [-S] [-c] [--native] [--freestanding | --flat ADD
 
 `-S` writes NASM assembly only. `-c` writes one ELF64 relocatable object (link with `ld`). `--freestanding`, `--flat` and `--boot` are for kernels (see [docs/KERNELS.md](docs/KERNELS.md)). The value returned by `main` is the exit code.
 
-`--native` (experimental) writes the hosted ELF64 executable with the compiler's own assembler and ELF writer (`compiler/native`), with no `nasm` and no `ld`. It takes hosted 64-bit programs only; with `-S`, `-c`, `--freestanding`, `--flat`, `--boot`, or a program that has `asm("...")` or a `naked`, `interrupt` or `syscall` function it stops with an error instead of falling back to `nasm` and `ld`. The default path is unchanged. Status and what is verified: [docs/DESIGN_NATIVE.md](docs/DESIGN_NATIVE.md).
+`--native` (experimental) writes the hosted ELF64 executable with the compiler's own assembler and ELF writer (`compiler/native`), with no `nasm` and no `ld`. It takes hosted 64-bit programs only; with `-S`, `-c`, `--freestanding`, `--flat`, `--boot`, or a program that has `asm("...")` or a `naked`, `interrupt` or `syscall` function it stops with an error instead of falling back to `nasm` and `ld`. The file carries `.symtab`, `.strtab` and `.shstrtab` with minimal section headers, so `readelf -S -s` and `objdump -d` show the functions and data labels by name. The default path is unchanged. Status and what is verified: [docs/DESIGN_NATIVE.md](docs/DESIGN_NATIVE.md).
 
 ## What the language has
 

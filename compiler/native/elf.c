@@ -74,7 +74,71 @@ int elf_layout(const AsmOut* a, ElfLayout* L, char* err, size_t errsz) {
         L->s2_memsz = end - va;
     }
     L->entry = L->base[ASM_SEC_TEXT] + (uint64_t)st->off;
+    L->load_end = L->file_size;
     return 0;
+}
+
+enum { SYM_SIZE = 24, SHDR_SIZE = 64 };
+
+typedef struct { uint8_t* b; size_t n, cap; } ElfBuf;
+
+static int elf_buf_put(ElfBuf* b, const void* p, size_t n) {
+    if (b->n + n > b->cap) {
+        size_t c = b->cap ? b->cap * 2 : 256;
+        while (c < b->n + n) c *= 2;
+        uint8_t* q = realloc(b->b, c);
+        if (!q) return -1;
+        b->b = q; b->cap = c;
+    }
+    if (n) memcpy(b->b + b->n, p, n);
+    b->n += n;
+    return 0;
+}
+
+// Appends a NUL-terminated string; returns its offset (or -1).
+static long elf_str(ElfBuf* b, const char* s) {
+    long at = (long)b->n;
+    return elf_buf_put(b, s, strlen(s) + 1) ? -1 : at;
+}
+
+static int elf_is_symbol(const AsmOut* a, const AsmSym* y) {
+    return !strchr(y->name, '.') && a->sec[y->sec].size > 0;
+}
+
+// .symtab and .strtab for the final layout. Returns 0 or -1 (out of memory).
+// *first_global is the index of the first GLOBAL symbol (sh_info of .symtab).
+static int elf_symtab(const AsmOut* a, const ElfLayout* L, const int* shndx, ElfBuf* sy, ElfBuf* st, uint32_t* first_global) {
+    uint8_t zero[SYM_SIZE] = {0};
+    if (elf_buf_put(sy, zero, SYM_SIZE) || elf_str(st, "") < 0) return -1;
+    uint32_t count = 1;
+    for (int pass = 0; pass < 2; pass++) {      // locals, then globals
+        if (pass == 1) *first_global = count;
+        for (size_t i = 0; i < a->nsym; i++) {
+            const AsmSym* y = &a->sym[i];
+            if (!elf_is_symbol(a, y) || (y->global != 0) != (pass == 1)) continue;
+            // Size: up to the next symbol of the section at a higher offset, else the section's end.
+            uint64_t end = a->sec[y->sec].size;
+            for (size_t j = i + 1; j < a->nsym && a->sym[j].sec == y->sec; j++)
+                if (elf_is_symbol(a, &a->sym[j]) && a->sym[j].off > y->off) { end = (uint64_t)a->sym[j].off; break; }
+            uint8_t e[SYM_SIZE] = {0};
+            long nm = elf_str(st, y->name);
+            if (nm < 0) return -1;
+            elf_w(e, (uint64_t)nm, 4);
+            e[4] = (uint8_t)(((y->global ? 1 : 0) << 4) | (y->sec == ASM_SEC_TEXT ? 2 : 1));   // GLOBAL/LOCAL, FUNC/OBJECT
+            elf_w(e + 6, (uint64_t)shndx[y->sec], 2);
+            elf_w(e + 8, L->base[y->sec] + (uint64_t)y->off, 8);
+            elf_w(e + 16, end - (uint64_t)y->off, 8);
+            if (elf_buf_put(sy, e, SYM_SIZE)) return -1;
+            count++;
+        }
+    }
+    return 0;
+}
+
+static void elf_shdr(uint8_t* p, uint32_t name, uint32_t type, uint64_t flags, uint64_t addr, uint64_t off, uint64_t size, uint32_t link, uint32_t info, uint64_t align, uint64_t entsize) {
+    elf_w(p, name, 4); elf_w(p + 4, type, 4); elf_w(p + 8, flags, 8); elf_w(p + 16, addr, 8);
+    elf_w(p + 24, off, 8); elf_w(p + 32, size, 8); elf_w(p + 40, link, 4); elf_w(p + 44, info, 4);
+    elf_w(p + 48, align, 8); elf_w(p + 56, entsize, 8);
 }
 
 // Patch one relocation with the final addresses (no relocation is kept).
@@ -104,8 +168,56 @@ int elf_build(const AsmOut* a, uint8_t** img, size_t* n, ElfLayout* L, char* err
     ElfLayout loc;
     if (!L) L = &loc;
     if (elf_layout(a, L, err, errsz)) return -1;
+
+    // Tail: section header numbers, .symtab, .strtab, .shstrtab, section header table.
+    static const char* const NAME[ASM_NSEC] = {".text", ".data", ".bss", ".rodata"};
+    static const uint64_t FLAGS[ASM_NSEC] = {6, 3, 3, 2};     // AX, WA, WA, A
+    static const int ORDER[ASM_NSEC] = {ASM_SEC_TEXT, ASM_SEC_RODATA, ASM_SEC_DATA, ASM_SEC_BSS};
+    int shndx[ASM_NSEC] = {0};
+    long shname[ASM_NSEC] = {0};
+    int nsh = 1;
+    ElfBuf sy = {0}, st = {0}, hs = {0};
+    uint32_t first_global = 1;
+    if (elf_str(&hs, "") < 0) goto oom;
+    long n_symtab = elf_str(&hs, ".symtab"), n_strtab = elf_str(&hs, ".strtab"), n_shstr = elf_str(&hs, ".shstrtab");
+    if (n_symtab < 0 || n_strtab < 0 || n_shstr < 0) goto oom;
+    for (int i = 0; i < ASM_NSEC; i++) {
+        int k = ORDER[i];
+        if (!a->sec[k].size) continue;
+        shndx[k] = nsh++;
+        if ((shname[k] = elf_str(&hs, NAME[k])) < 0) goto oom;
+    }
+    if (elf_symtab(a, L, shndx, &sy, &st, &first_global)) goto oom;
+    int i_symtab = nsh, i_strtab = nsh + 1, i_shstr = nsh + 2;
+    nsh += 3;
+    L->file_size = elf_up(L->load_end, 8);
+    uint64_t o_symtab = L->file_size;
+    uint64_t o_strtab = o_symtab + sy.n;
+    uint64_t o_shstr = o_strtab + st.n;
+    uint64_t o_sh = elf_up(o_shstr + hs.n, 8);
+    L->file_size = o_sh + (uint64_t)nsh * SHDR_SIZE;
+
     uint8_t* f = calloc((size_t)L->file_size, 1);
-    if (!f) return elf_fail(err, errsz, "out of memory");
+    if (!f) goto oom;
+    memcpy(f + o_symtab, sy.b, sy.n);
+    memcpy(f + o_strtab, st.b, st.n);
+    memcpy(f + o_shstr, hs.b, hs.n);
+    uint8_t* sh = f + o_sh;                         // entry 0 stays all zero
+    for (int i = 0; i < ASM_NSEC; i++) {
+        int k = ORDER[i];
+        if (!shndx[k]) continue;
+        const AsmSection* s = &a->sec[k];
+        // .bss takes no file bytes; its offset is where the loaded part of the file ends.
+        uint64_t off = k == ASM_SEC_BSS ? L->load_end : L->off[k];
+        elf_shdr(sh + (size_t)shndx[k] * SHDR_SIZE, (uint32_t)shname[k], k == ASM_SEC_BSS ? 8 : 1, FLAGS[k], L->base[k], off, s->size, 0, 0, (uint64_t)s->align, 0);
+    }
+    elf_shdr(sh + (size_t)i_symtab * SHDR_SIZE, (uint32_t)n_symtab, 2, 0, 0, o_symtab, sy.n, (uint32_t)i_strtab, first_global, 8, SYM_SIZE);
+    elf_shdr(sh + (size_t)i_strtab * SHDR_SIZE, (uint32_t)n_strtab, 3, 0, 0, o_strtab, st.n, 0, 0, 1, 0);
+    elf_shdr(sh + (size_t)i_shstr * SHDR_SIZE, (uint32_t)n_shstr, 3, 0, 0, o_shstr, hs.n, 0, 0, 1, 0);
+    free(sy.b); free(st.b); free(hs.b);
+    elf_w(f + 40, o_sh, 8);                         // e_shoff
+    elf_w(f + 60, (uint64_t)nsh, 2);                // e_shnum
+    elf_w(f + 62, (uint64_t)i_shstr, 2);            // e_shstrndx
 
     // ELF header.
     memcpy(f, "\x7f" "ELF\2\1\1", 7);              // 64-bit, little endian, version 1, System V ABI
@@ -117,7 +229,7 @@ int elf_build(const AsmOut* a, uint8_t** img, size_t* n, ElfLayout* L, char* err
     elf_w(f + 52, EHDR_SIZE, 2);                   // e_ehsize
     elf_w(f + 54, PHDR_SIZE, 2);
     elf_w(f + 56, (uint64_t)L->nphdr, 2);
-    elf_w(f + 58, 64, 2);                          // e_shentsize (no section headers: e_shnum 0)
+    elf_w(f + 58, SHDR_SIZE, 2);                   // e_shentsize
 
     // Program headers: PT_LOAD R+X, then PT_LOAD R+W.
     uint8_t* p = f + EHDR_SIZE;
@@ -149,6 +261,9 @@ int elf_build(const AsmOut* a, uint8_t** img, size_t* n, ElfLayout* L, char* err
     *img = f;
     *n = (size_t)L->file_size;
     return 0;
+oom:
+    free(sy.b); free(st.b); free(hs.b);
+    return elf_fail(err, errsz, "out of memory");
 }
 
 int elf_write_exec(const AsmOut* a, const char* path, char* err, size_t errsz) {

@@ -9,9 +9,13 @@
 // What is checked, with a reader written for the purpose and the object that
 // `nasm -f elf64` makes from the same text as the oracle:
 //   - the ELF header and each program header, field by field (ET_EXEC, EM_X86_64,
-//     no section headers, PT_LOAD R+X then R+W, vaddr == offset mod 0x1000,
-//     p_align 0x1000, filesz <= memsz, the segments in different pages, the file
-//     size, zero padding everywhere between pieces);
+//     PT_LOAD R+X then R+W, vaddr == offset mod 0x1000, p_align 0x1000,
+//     filesz <= memsz, the segments in different pages, zero padding everywhere
+//     between pieces);
+//   - (M5) the section headers (null, .text, .rodata, .data, .bss as the program
+//     has them, .symtab, .strtab, .shstrtab), e_shoff/e_shnum/e_shstrndx, the
+//     tables contiguous at the end of the file, and the symbols against those of
+//     nasm's object (see verify_tail);
 //   - e_entry == address of _start;
 //   - the address of every section is read off the program headers (not from the
 //     writer's layout) and is aligned as the program asked;
@@ -47,6 +51,121 @@ static int zeros(const uint8_t* f, uint64_t a, uint64_t b) {
     return 1;
 }
 
+typedef struct { uint32_t name, type, link, info; uint64_t flags, addr, off, size, align, entsize; } Sh;
+
+// NUL-terminated string at `at` inside the table [tab, tab + tabn), or NULL.
+static const char* str_at(const uint8_t* tab, uint64_t tabn, uint64_t at) {
+    if (at >= tabn) return NULL;
+    for (uint64_t i = at; i < tabn; i++) if (!tab[i]) return (const char*)tab + at;
+    return NULL;
+}
+
+// The tail the writer adds after the mapped bytes (M5): .symtab, .strtab,
+// .shstrtab (8-aligned) and the section header table, which ends the file.
+// `base`/`off` are the addresses and offsets read off the program headers.
+// The symbols are compared with those of nasm's object: every label without a
+// dot in its name, in a section that has bytes, with its name, bind (GLOBAL only
+// if nasm made it global), section and address; type FUNC in .text and OBJECT
+// elsewhere; size up to the next such label at a higher offset or the section's end.
+static int verify_tail(const char* name, const uint8_t* f, size_t n, const NObj* o, const uint64_t* base, const uint64_t* off, uint64_t end) {
+    uint64_t shoff = nobj_rd(f + 40, 8);
+    int shnum = (int)nobj_rd(f + 60, 2), shstrndx = (int)nobj_rd(f + 62, 2);
+    if (nobj_rd(f + 58, 2) != 64) FAILF("e_shentsize is not 64");
+    if (shoff % 8 || shoff < end || shoff + 64 * (uint64_t)shnum != n) FAILF("section header table at %llu (%d entries) does not end the %zu-byte file", (unsigned long long)shoff, shnum, n);
+    int want = 4;                                   // null, .symtab, .strtab, .shstrtab
+    for (int k = 0; k < ASM_NSEC; k++) if (o->s[k].present && o->s[k].n) want++;
+    if (shnum != want) FAILF("e_shnum is %d, expected %d", shnum, want);
+    if (shstrndx != shnum - 1) FAILF("e_shstrndx is %d, expected %d", shstrndx, shnum - 1);
+    Sh* sh = calloc((size_t)shnum, sizeof *sh);
+    for (int i = 0; i < shnum; i++) {
+        const uint8_t* p = f + shoff + 64 * (uint64_t)i;
+        sh[i] = (Sh){(uint32_t)nobj_rd(p, 4), (uint32_t)nobj_rd(p + 4, 4), (uint32_t)nobj_rd(p + 40, 4), (uint32_t)nobj_rd(p + 44, 4),
+                     nobj_rd(p + 8, 8), nobj_rd(p + 16, 8), nobj_rd(p + 24, 8), nobj_rd(p + 32, 8), nobj_rd(p + 48, 8), nobj_rd(p + 56, 8)};
+    }
+#define TFAIL(...) do { free(sh); FAILF(__VA_ARGS__); } while (0)
+    if (!zeros(f, shoff, shoff + 64)) TFAIL("section 0 is not the null section");
+    const Sh* ss = &sh[shstrndx];
+    if (ss->type != 3 || ss->off + ss->size > shoff) TFAIL(".shstrtab is not a string table inside the file");
+    const uint8_t* shs = f + ss->off;
+    // The mapped sections, in the order .text, .rodata, .data, .bss.
+    static const int ORDER[ASM_NSEC] = {ASM_SEC_TEXT, ASM_SEC_RODATA, ASM_SEC_DATA, ASM_SEC_BSS};
+    static const uint64_t FL[ASM_NSEC] = {6, 3, 3, 2};
+    int shidx[ASM_NSEC] = {0}, at = 1;
+    for (int i = 0; i < ASM_NSEC; i++) {
+        int k = ORDER[i];
+        const NSec* s = &o->s[k];
+        if (!s->present || !s->n) continue;
+        const Sh* h = &sh[at];
+        const char* nm = str_at(shs, ss->size, h->name);
+        if (!nm || strcmp(nm, SEC_NAME[k])) TFAIL("section %d is not named %s", at, SEC_NAME[k]);
+        if (h->type != (k == ASM_SEC_BSS ? 8u : 1u)) TFAIL("%s: sh_type %u", SEC_NAME[k], h->type);
+        if (h->flags != FL[k]) TFAIL("%s: sh_flags %llx", SEC_NAME[k], (unsigned long long)h->flags);
+        if (h->addr != base[k] || h->size != s->n) TFAIL("%s: addr %llx size %llu, expected %llx and %zu", SEC_NAME[k], (unsigned long long)h->addr, (unsigned long long)h->size, (unsigned long long)base[k], s->n);
+        if (k != ASM_SEC_BSS && h->off != off[k]) TFAIL("%s: sh_offset %llx, the program headers put it at %llx", SEC_NAME[k], (unsigned long long)h->off, (unsigned long long)off[k]);
+        if (k == ASM_SEC_BSS && h->off != end) TFAIL(".bss: sh_offset %llx, expected the end of the mapped bytes %llx", (unsigned long long)h->off, (unsigned long long)end);
+        if (h->align != (s->align ? s->align : 1)) TFAIL("%s: sh_addralign %llu, expected %llu", SEC_NAME[k], (unsigned long long)h->align, (unsigned long long)s->align);
+        shidx[k] = at++;
+    }
+    const Sh* sy = &sh[at];
+    const Sh* sr = &sh[at + 1];
+    const char* n1 = str_at(shs, ss->size, sy->name);
+    const char* n2 = str_at(shs, ss->size, sr->name);
+    const char* n3 = str_at(shs, ss->size, ss->name);
+    if (!n1 || strcmp(n1, ".symtab") || !n2 || strcmp(n2, ".strtab") || !n3 || strcmp(n3, ".shstrtab")) TFAIL("the last three sections are not .symtab, .strtab, .shstrtab");
+    if (sy->type != 2 || sy->entsize != 24 || sy->align != 8 || sy->size % 24 || sy->link != (uint32_t)(at + 1)) TFAIL(".symtab header: type %u entsize %llu align %llu size %llu link %u", sy->type, (unsigned long long)sy->entsize, (unsigned long long)sy->align, (unsigned long long)sy->size, sy->link);
+    if (sr->type != 3) TFAIL(".strtab: sh_type %u", sr->type);
+    if (sy->off != ((end + 7) & ~7ULL) || sr->off != sy->off + sy->size || ss->off != sr->off + sr->size) TFAIL("tables are not contiguous after the mapped bytes (symtab %llu, strtab %llu, shstrtab %llu, mapped end %llu)", (unsigned long long)sy->off, (unsigned long long)sr->off, (unsigned long long)ss->off, (unsigned long long)end);
+    if (!zeros(f, end, sy->off)) TFAIL("padding before .symtab is not zero");
+    if (!zeros(f, ss->off + ss->size, shoff)) TFAIL("padding before the section headers is not zero");
+    if (shs[0] || ss->size == 0 || shs[ss->size - 1]) TFAIL(".shstrtab does not start and end with NUL");
+    if (sr->size == 0 || f[sr->off] || f[sr->off + sr->size - 1]) TFAIL(".strtab does not start and end with NUL");
+
+    // Symbols.
+    size_t ns = (size_t)(sy->size / 24);
+    if (ns == 0 || !zeros(f, sy->off, sy->off + 24)) TFAIL("symbol 0 is not the null symbol");
+    if (sy->info < 1 || sy->info > ns) TFAIL(".symtab sh_info %u out of range", sy->info);
+    int* seen = calloc(o->nsym ? o->nsym : 1, sizeof *seen);
+    size_t expected = 0, nglob = 0;
+    for (size_t j = 0; j < o->nsym; j++) {
+        const NSym* y = &o->sym[j];
+        if (!y->name[0] || y->shndx <= 0 || y->shndx >= 64 || o->sec_of_index[y->shndx] < 0 || strchr(y->name, '.') || !shidx[o->sec_of_index[y->shndx]]) continue;
+        expected++;
+    }
+    for (size_t i = 1; i < ns; i++) {
+        const uint8_t* p = f + sy->off + 24 * i;
+        const char* nm = str_at(f + sr->off, sr->size, nobj_rd(p, 4));
+        int info = (int)nobj_rd(p + 4, 1), shi = (int)nobj_rd(p + 6, 2);
+        uint64_t val = nobj_rd(p + 8, 8), size = nobj_rd(p + 16, 8);
+        if (!nm || !nm[0]) { free(seen); TFAIL("symbol %zu has no name", i); }
+        if (nobj_rd(p + 5, 1) != 0) { free(seen); TFAIL("symbol %s: st_other", nm); }
+        if ((i < sy->info) != ((info >> 4) == 0)) { free(seen); TFAIL("symbol %s (bind %d) is on the wrong side of sh_info %u", nm, info >> 4, sy->info); }
+        if ((info >> 4) == 1) nglob++;
+        const NSym* y = NULL;
+        size_t jy = 0;
+        for (size_t j = 0; j < o->nsym; j++) if (!strcmp(o->sym[j].name, nm) && o->sym[j].shndx > 0 && o->sym[j].shndx < 64) { y = &o->sym[j]; jy = j; break; }
+        if (!y || o->sec_of_index[y->shndx] < 0) { free(seen); TFAIL("symbol %s is not a label of nasm's object", nm); }
+        if (seen[jy]++) { free(seen); TFAIL("symbol %s appears twice", nm); }
+        int k = o->sec_of_index[y->shndx];
+        if (strchr(nm, '.')) { free(seen); TFAIL("symbol %s has a dot: it is a branch label", nm); }
+        if (shi != shidx[k]) { free(seen); TFAIL("symbol %s: section index %d, expected %d (%s)", nm, shi, shidx[k], SEC_NAME[k]); }
+        if (val != base[k] + y->value) { free(seen); TFAIL("symbol %s at %llx, nasm's label puts it at %llx", nm, (unsigned long long)val, (unsigned long long)(base[k] + y->value)); }
+        if ((info >> 4) != (y->bind == 1 ? 1 : 0)) { free(seen); TFAIL("symbol %s: bind %d, nasm has %d", nm, info >> 4, y->bind); }
+        if ((info & 15) != (k == ASM_SEC_TEXT ? 2 : 1)) { free(seen); TFAIL("symbol %s: type %d", nm, info & 15); }
+        uint64_t next = o->s[k].n;
+        for (size_t j = 0; j < o->nsym; j++) {
+            const NSym* z = &o->sym[j];
+            if (z->name[0] && z->shndx == y->shndx && !strchr(z->name, '.') && z->value > y->value && z->value < next) next = z->value;
+        }
+        if (size != next - y->value) { free(seen); TFAIL("symbol %s: size %llu, expected %llu", nm, (unsigned long long)size, (unsigned long long)(next - y->value)); }
+    }
+    if (ns - 1 != expected) { free(seen); TFAIL(".symtab has %zu symbols, nasm's object has %zu labels without a dot", ns - 1, expected); }
+    if (nglob == 0) { free(seen); TFAIL("no global symbol (_start)"); }
+    free(seen);
+    free(sh);
+#undef TFAIL
+    return 0;
+}
+
 static int verify(const char* name, const uint8_t* f, size_t n, const NObj* o) {
     if (n < 64) FAILF("file of %zu bytes", n);
     if (memcmp(f, "\x7f" "ELF", 4) || f[4] != 2 || f[5] != 1 || f[6] != 1) FAILF("e_ident is not ELF64, little endian, version 1");
@@ -55,10 +174,8 @@ static int verify(const char* name, const uint8_t* f, size_t n, const NObj* o) {
     if (nobj_rd(f + 18, 2) != 62) FAILF("e_machine is not EM_X86_64");
     if (nobj_rd(f + 20, 4) != 1) FAILF("e_version");
     if (nobj_rd(f + 32, 8) != 64) FAILF("e_phoff is not 64");
-    if (nobj_rd(f + 40, 8) != 0) FAILF("e_shoff is not 0 (no section headers in this version)");
     if (nobj_rd(f + 48, 4) != 0) FAILF("e_flags");
     if (nobj_rd(f + 52, 2) != 64 || nobj_rd(f + 54, 2) != 56) FAILF("e_ehsize / e_phentsize");
-    if (nobj_rd(f + 60, 2) != 0 || nobj_rd(f + 62, 2) != 0) FAILF("e_shnum / e_shstrndx are not 0");
     int nph = (int)nobj_rd(f + 56, 2);
     const NSec* tx = &o->s[ASM_SEC_TEXT];
     const NSec* da = &o->s[ASM_SEC_DATA];
@@ -121,7 +238,9 @@ static int verify(const char* name, const uint8_t* f, size_t n, const NObj* o) {
         end = ph[1].off + ph[1].filesz;
         n_two_seg++;
     }
-    if (n != end) FAILF("file is %zu bytes, expected %llu", n, (unsigned long long)end);
+    if (n <= end) FAILF("file is %zu bytes: no room after the mapped bytes (%llu) for the symbol and section tables", n, (unsigned long long)end);
+    int tail = verify_tail(name, f, n, o, base, off, end);
+    if (tail) return tail;
 
     // Entry point.
     const NSym* st = NULL;
@@ -165,7 +284,7 @@ static int verify(const char* name, const uint8_t* f, size_t n, const NObj* o) {
             FAILF("%s differs from nasm's (patched) bytes at offset %zu", SEC_NAME[k], d);
         }
         free(want);
-        if (k == ASM_SEC_DATA && !zeros(f, off[k] + s->n, n)) FAILF("bytes after .data are not zero");
+        if (k == ASM_SEC_DATA && off[k] + s->n != end) FAILF("the mapped bytes end at %llu, .data ends at %llu", (unsigned long long)end, (unsigned long long)(off[k] + s->n));
     }
     tot_file += (long)n;
     return 0;

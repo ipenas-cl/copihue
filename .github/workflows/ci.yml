@@ -19,6 +19,10 @@ jobs:
         run: make native-run-test
       - name: x86-64 encoder x64.c, assembler asm.c and ELF writer elf.c (labels, jumps, call, sections, executable structure) against nasm -f elf64
         run: make native-test
+      - name: The --native ELF read by readelf and objdump (section headers, .symtab, FUNC/OBJECT symbols)
+        run: CMP_REQUIRE=1 make native-readelf-test
+      - name: .text of --native against nasm + ld (objcopy -O binary -j .text, cmp)
+        run: CMP_REQUIRE=1 make native-text-test
       - name: Network test (simple_api_server + curl + Copihue HTTP clients)
         run: make net-test
       - name: Install instructions work

@@ -1,9 +1,10 @@
 // ELF64 executable writer for the native back end (docs/DESIGN_NATIVE.md, M4).
 //
 // Takes what asm.c returns for a hosted program (section bytes, relocations,
-// symbol table) and writes a static ET_EXEC for x86-64 Linux: no section
-// headers, no dynamic linking. Relocations are not kept; each field is patched
-// with the final address (2.5).
+// symbol table) and writes a static ET_EXEC for x86-64 Linux: no dynamic
+// linking. Relocations are not kept; each field is patched with the final
+// address (2.5). Since M5 the file also carries .symtab, .strtab, .shstrtab and
+// minimal section headers, after the bytes the segments map.
 #ifndef COPIHUE_ELF_H
 #define COPIHUE_ELF_H
 
@@ -27,8 +28,21 @@ typedef struct {
     int nphdr;
     uint64_t s1_filesz;         // segment 1: offset 0, address ELF_BASE, filesz == memsz
     uint64_t s2_off, s2_va, s2_filesz, s2_memsz;
-    uint64_t file_size;
+    uint64_t load_end;          // end of the bytes the segments map (nothing after it is loaded)
+    uint64_t file_size;         // load_end, plus the symbol and section tables of elf_build (elf_layout: = load_end)
 } ElfLayout;
+
+// What follows load_end in the file (filled by elf_build): .symtab, .strtab,
+// .shstrtab (each 8-aligned), then the section header table. See elf_build.
+//
+// Symbols: every label of the program without a dot in its name (the
+// `parent.child` labels are branch targets, not functions or data): in .text a
+// FUNC, in .data/.rodata/.bss an OBJECT; GLOBAL if named by a `global` line
+// (always `_start`), LOCAL otherwise (locals first, as the format requires).
+// st_value is the final address; st_size runs to the next such label of the
+// same section (or the section's end), so it includes any alignment padding.
+// Sections with headers: null, .text, .rodata, .data, .bss (those the program
+// has), .symtab, .strtab, .shstrtab.
 
 // Computes the layout. Returns 0, or -1 with the reason in err.
 int elf_layout(const AsmOut* a, ElfLayout* lay, char* err, size_t errsz);
