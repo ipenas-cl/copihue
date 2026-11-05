@@ -17,6 +17,8 @@
 # 4. Flat binaries: tests/flat/*.lap at --flat 0x10000.
 # 4b. Absolute constant addresses outside disp32 (tests/*/abs64.lap): the asm
 #    holds the full address in a register and nasm gives no "exceeds bounds".
+# 4d. Stack probing: a frame of 4096 bytes or more touches every page (assembly in every mode, nasm,
+#    golden), and QEMU must take the page fault on a guard page under the stack (tests/stackprobe).
 # 5. Boot sectors: tests/boot/*.lap, and QEMU must print COPIHUE.
 # 6. User mode: tests/usermode, and QEMU must print USER.
 # 7. Context switch: tests/ctx, and QEMU must print COPIHUE.
@@ -417,6 +419,92 @@ else
     fail=$((fail+1)); failed+=("tests/align qemu (missing tool)"); echo "FAIL tests/align: CMP_REQUIRE=1 and qemu-system-x86_64 or perl is missing"
   else
     echo "skip tests/align QEMU run: qemu-system-x86_64 or perl is not installed (CMP_REQUIRE=1 makes this an error)"
+  fi
+fi
+
+# 4d. Stack probing (0.44.2). A frame of 4096 bytes or more allocates with a loop that touches every
+# page; a smaller one keeps the single `sub rsp, __frame_F`. The assembly is read in every mode that
+# has a prologue (hosted, --freestanding, --flat, --flat --axe2 including the interrupt and syscall
+# functions), at -O0 and -O2, and the result must assemble. probe_check <label> <src> <probed fns>
+# <plain fns> <compiler flags...>
+probe_check() {
+  local label=$1 src=$2 probed=$3 plain=$4; shift 4
+  local asm="$WORK/probe.asm" bad="" f n=0
+  if ! ( cd "$WORK" && "$CC" "$@" -S -o probe.asm "$ROOT/$src" 2>err.txt && "$CC" "$@" -o probe.out "$ROOT/$src" 2>>err.txt ); then
+    fail=$((fail+1)); failed+=("$label"); echo "FAIL $label:"; cat "$WORK/err.txt"; return
+  fi
+  for f in $probed; do
+    n=$((n+1))
+    grep -qxF ".Lprobe_$f:" "$asm" || bad="$bad $f has no probe loop;"
+    grep -qxF "    ja .Lprobe_$f" "$asm" || bad="$bad $f has no ja .Lprobe_$f;"
+    grep -qxF "    sub rsp, __frame_$f" "$asm" && bad="$bad $f still has the single sub rsp;"
+  done
+  for f in $plain; do
+    grep -qF ".Lprobe_$f" "$asm" && bad="$bad $f (under 4096) has a probe loop;"
+    grep -qxF "    sub rsp, __frame_$f" "$asm" || bad="$bad $f lost its single sub rsp;"
+  done
+  [ "$(grep -cxF '    sub rsp, 4096' "$asm")" = $n ] || bad="$bad expected $n page steps (sub rsp, 4096);"
+  [ "$(grep -cxF '    or qword [rsp], 0' "$asm")" = $((2*n)) ] || bad="$bad expected $((2*n)) touches (or qword [rsp], 0);"
+  [ "$(grep -cxF '    cmp r11, 4096' "$asm")" = $n ] || bad="$bad expected $n cmp r11, 4096;"
+  [ "$(grep -cxF '    sub rsp, r11' "$asm")" = $n ] || bad="$bad expected $n sub rsp, r11;"
+  if [ -n "$bad" ]; then fail=$((fail+1)); failed+=("$label"); echo "FAIL $label:$bad"; else pass=$((pass+1)); fi
+}
+for opt in -O0 -O2; do
+  probe_check "tests/stackprobe/frames.lap $opt (hosted)" tests/stackprobe/frames.lap "big" "small" $opt
+  probe_check "tests/stackprobe/frames.lap $opt (--freestanding)" tests/stackprobe/frames.lap "big" "small" $opt --freestanding
+  probe_check "tests/stackprobe/flat/frames.lap $opt (--flat)" tests/stackprobe/flat/frames.lap "big big_int big_sys" "small" $opt --flat 0x10000
+  probe_check "tests/stackprobe/flat/frames.lap $opt (--flat --axe2)" tests/stackprobe/flat/frames.lap "big big_int big_sys" "small" $opt --flat 0x400000 --axe2
+done
+# The same assembly with nasm, which is the reference for the built-in assembler.
+for mode in hosted freestanding flat; do
+  case $mode in
+    hosted)       src=tests/stackprobe/frames.lap; flags=""; fmt=elf64 ;;
+    freestanding) src=tests/stackprobe/frames.lap; flags="--freestanding"; fmt=elf64 ;;
+    flat)         src=tests/stackprobe/flat/frames.lap; flags="--flat 0x10000"; fmt=bin ;;
+  esac
+  label="$src (stack probe assembles with nasm, $mode)"
+  if ( cd "$WORK" && "$CC" $flags -S -o sp.asm "$ROOT/$src" 2>err.txt && nasm -f $fmt -o sp.o sp.asm 2>>err.txt ); then pass=$((pass+1))
+  else fail=$((fail+1)); failed+=("$label"); echo "FAIL $label:"; cat "$WORK/err.txt"; fi
+done
+# Golden assembly of the flat file at -O0: the whole prologue sequence, byte for byte as text.
+if ( cd "$WORK" && "$CC" --flat 0x10000 -S -o spf.asm "$ROOT/tests/stackprobe/flat/frames.lap" 2>err.txt ); then
+  grep -vE '^\s*(;|$)' "$WORK/spf.asm" | grep -v '^; Generated' > "$WORK/spf.norm"
+  check "tests/stackprobe/flat/frames.lap (assembly)" tests/expected/stackprobe/frames.asm.txt "$WORK/spf.norm"
+else fail=$((fail+1)); failed+=("tests/stackprobe/flat/frames.lap (assembly)"); echo "FAIL golden:"; cat "$WORK/err.txt"; fi
+
+# 4e. QEMU: tests/stackprobe/flat/kernel.lap has a guard page (not present) 32KB under the stack and
+# calls a function whose frame is 64KB. The sector is tests/usermode/boot.lap. COM1 must show S (the
+# small frame is fine) and then PFG (page fault, CR2 inside the guard page); NOPF means the frame
+# stepped over the guard. Needs qemu-system-x86_64 and perl; without them it is skipped with a notice,
+# and CMP_REQUIRE=1 (the CI) makes that a failure. Nothing is claimed here that QEMU did not print.
+if command -v qemu-system-x86_64 >/dev/null 2>&1 && command -v perl >/dev/null 2>&1; then
+  if ! ( cd "$WORK" && "$CC" --boot -o sboot.bin "$ROOT/tests/usermode/boot.lap" 2>err.txt &&
+         "$CC" --flat 0x8000 -o skern0.bin "$ROOT/tests/stackprobe/flat/kernel.lap" 2>>err.txt &&
+         "$CC" -O2 --flat 0x8000 -o skern2.bin "$ROOT/tests/stackprobe/flat/kernel.lap" 2>>err.txt ); then
+    fail=$((fail+1)); failed+=("tests/stackprobe/flat/kernel.lap"); echo "FAIL tests/stackprobe/flat/kernel.lap:"; cat "$WORK/err.txt"
+  else
+    for kern in skern0.bin skern2.bin; do
+      if [ "$(wc -c < "$WORK/$kern" | tr -d ' ')" -gt 8192 ]; then
+        fail=$((fail+1)); failed+=("tests/stackprobe $kern (size)"); echo "FAIL tests/stackprobe $kern: larger than the 16 sectors the boot sector reads"; continue
+      fi
+      dd if=/dev/zero of="$WORK/spad.bin" bs=8192 count=1 2>/dev/null
+      dd if="$WORK/$kern" of="$WORK/spad.bin" conv=notrunc 2>/dev/null
+      cat "$WORK/sboot.bin" "$WORK/spad.bin" > "$WORK/sdisk.img"
+      rm -f "$WORK/sserial.txt"
+      timeout 8 qemu-system-x86_64 -display none -boot a \
+        -drive file="$WORK/sdisk.img",format=raw,if=floppy,index=0 \
+        -serial file:"$WORK/sserial.txt" </dev/null >/dev/null 2>&1 || true
+      if [ "$(cat "$WORK/sserial.txt" 2>/dev/null)" != SPFG ]; then
+        fail=$((fail+1)); failed+=("tests/stackprobe $kern qemu"); echo "FAIL tests/stackprobe $kern: COM1 should be SPFG, got:"; od -An -c "$WORK/sserial.txt" 2>&1 | head -3; continue
+      fi
+      pass=$((pass+1))
+    done
+  fi
+else
+  if [ "${CMP_REQUIRE:-0}" = 1 ]; then
+    fail=$((fail+1)); failed+=("tests/stackprobe qemu (missing tool)"); echo "FAIL tests/stackprobe: CMP_REQUIRE=1 and qemu-system-x86_64 or perl is missing"
+  else
+    echo "skip tests/stackprobe QEMU run: qemu-system-x86_64 or perl is not installed (CMP_REQUIRE=1 makes this an error)"
   fi
 fi
 

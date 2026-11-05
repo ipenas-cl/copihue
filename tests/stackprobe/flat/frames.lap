@@ -1,0 +1,33 @@
+// Stack probing (0.44.2) in --flat (and --axe2 at 0x400000): the same two frames as frames.lap,
+// plus an interrupt handler and a syscall entry with a big local array, which allocate their
+// frames with the same `sub rsp, __frame_F` line. tests/run_tests.sh reads the assembly.
+fn big(n: i64) -> i64 {
+    let b: [u8; 8192];
+    b[0] = 1;
+    b[8191] = 2;
+    return b[0] + b[8191] + n;
+}
+
+fn small(n: i64) -> i64 {
+    let b: [u8; 256];
+    b[0] = 1;
+    return b[0] + n;
+}
+
+interrupt fn big_int() {
+    let b: [u8; 1024];
+    b[0] = 1;
+    outb(0x3F8, b[0]);
+}
+
+syscall fn big_sys(nr: i64) -> i64 {
+    let b: [u8; 1024];
+    b[0] = 3;
+    return b[0] + nr;
+}
+
+fn _start() {
+    big(1);
+    small(1);
+    while (1) { }
+}
