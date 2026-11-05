@@ -2,6 +2,24 @@
 
 Todos los cambios importantes del proyecto.
 
+## [0.44.3] - 2026-11-05
+
+Tres pedidos abiertos de LapageriaOS / AtomicOS (EX-05, EX-04, RD-03).
+
+### Added
+- `--flat 0x400000 --axe1`: escribe el archivo AXE1 de una página, el que hoy arma `scripts/mkaxe.sh`. Cabecera de 16 bytes, little-endian: `41 58 45 31` (`AXE1`), tamaño del payload (u32), entrada (u64, la dirección virtual de `_start`, `0x400000` en un programa simple); luego el payload, que es la imagen plana de `--flat 0x400000` sin cambios (texto, datos inicializados detrás; no se aplica el layout de datos en la página siguiente de `--axe2`). Exige `--flat 0x400000`; no se combina con `--elf`, `--boot` ni `--axe2`; `-S` sigue entregando el ensamblado. Errores, sin archivo de salida ni archivos temporales: payload de más de 4080 bytes, imagen más bss de más de una página (4096), `_start` fuera del texto o ausente, texto vacío, sección con nombre distinta de `.text`/`.data`/`.bss` o con `@`. `--sizes` con `--axe1` agrega `image=`, `memsize=` y `entry=0x...` después de `text=`, `data=`, `bss=`.
+- `--sizes` con `--axe2` agrega al final `data_at=` y `bss_at=` (dirección donde parten `.data` y `.bss`). Las siete líneas anteriores no cambian.
+- `const NAME = expr;` a nivel de módulo y dentro de una función (hasta el fin del bloque). Entero sin tipo, plegado por el parser en cada uso: `-S` muestra el número, nunca el nombre. Sirve en `[T; N]` (también `[T; N * 2 + 1]`), en inicializadores y en otras constantes. La expresión admite literales, otras constantes, paréntesis, `+ - * / % << >> & | ^`, unarios `- ~ !`, comparaciones y `&& ||`. `pub const` en un módulo se usa como `mod::NAME`. Errores: valor no constante, división por cero, redeclaración (sin shadowing, tampoco de una constante de módulo desde una función), un `let` o parámetro con el mismo nombre, asignación (`N = 1`, `N += 1`, `N++`), largo de arreglo no constante o negativo, `align()` sobre una constante. Una declaración debe ir antes del uso.
+- `align(N) let` en `--flat` (y por tanto `--axe1`/`--axe2`): si hay un global con `align(N)` (o de tipo más estricto que 8) en `.data` o `.bss`, la sección se emite con `align=N`. Antes `align N` se contaba desde el inicio de la sección, que partía donde terminaba la anterior, y el `let` caía en frontera solo si la sección ya partía en una. Con un `align(4096) let` primero entre los no inicializados el `.bss` ocupa una página propia, sin arreglos de relleno de 4084/8172 bytes. Costo: el `.data` alineado parte en la primera frontera de `N` tras el texto y ese hueco son bytes cero en la imagen; el `.bss` no cuesta nada en el archivo. Si el org no es múltiplo de `N`, avisa (`warning: align(4096) on a let, but --flat ... is not a multiple of 4096`) y alinea desde el inicio de la imagen. Un programa hospedado y un objeto `-c` no cambian.
+
+### Changed
+- `LANG_VERSION` y `--version` son 0.44.3. `docs/REFERENCE.md`: secciones «AXE1 images» y «Constants», párrafo nuevo en «Alignment», líneas `data_at`/`bss_at` en AXE2. README: línea de uso con `--axe1`, y una viñeta de `const`. `--help` lista `--axe1`.
+
+### Tests (qué se corrió, y dónde)
+- Nuevos: `tests/axe1/page.lap` (cabecera campo por campo con `od`: magic, tamaño 144, entrada `0x400000`; el payload es la imagen plana de `--flat`; archivo completo contra `tests/expected/axe1/page.hex`; `-O0` = `-O2`; `-S`; `--sizes`), cinco errores `tests/axe1/err_{big,bss,entry,section,nostart}.lap` (mensaje, nada en stdout, sin archivo, sin temporales) y las combinaciones de opciones rechazadas; `tests/align/let.lap` (las direcciones `0x401000`, `0x402000`, `0x402020`, `0x403000`, `0x403010` leídas de los `lea` del código, los bytes de la página de datos, `data_at`/`bss_at`, tamaño del archivo, `-O0` = `-O2`, `--axe1` lo rechaza, el aviso con org no alineado); `tests/lang/const.lap` y `const_mod.lap` (módulo importado, `pub`) y `tests/errors/const_bad.lap`, `const_private.lap`, `const_align.lap`.
+- Corrido en el Mac de desarrollo (nasm 3.02, sin Linux): `make test` dio 352 pasan, 2 fallan, 2 omitidas; las 2 que fallan son las mismas de 0.44.1 y 0.44.2 (`tests/flat/generic.lap`, `tests/boot/edx_keep.lap`, codificaciones de nasm 3.02). Compilado con `gcc -O2 -Wall -Werror` sin advertencias.
+- **No** corrido aquí: este Mac no ejecuta ELF de Linux, así que la salida de `tests/lang/const.lap` y `const_mod.lap` está escrita a mano (los valores se comprobaron leyendo el ensamblado: tamaños de arreglo 8 y 17, números plegados) y la valida el CI; tampoco se cargó ningún archivo AXE1 en LapageriaOS, ni se probó que el cargador entregue una página en cero para el bss. `make nasm-test`, `native-run-test` y la parte de enlace de `native-obj-test` quedan para Linux.
+
 ## [0.44.2] - 2026-11-05
 
 ### Added

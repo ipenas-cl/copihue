@@ -1,4 +1,4 @@
-# Copihue Language Reference (v0.44.2)
+# Copihue Language Reference (v0.44.3)
 
 This document describes the language that `copihue` accepts today. Anything not listed here is not supported.
 Planned features are in the README roadmap.
@@ -363,6 +363,27 @@ packed struct FsEnt {
 is 56 bytes: `name` at 0, `size` at 16, `nblocks` at 20, `blocks` at 24. The same fields without `packed` are also 56, because 16 is already a multiple of 4. A count that is not a positive integer, an unknown element type, a struct that is not defined yet, or a size that overflows is `cannot lay out field 'name' of type '[Missing; 4]'`. The compiler exits with status 1. It does not pick a smaller size and succeed.
 
 `sizeof(FsEnt)` and `sizeof(e)` are that size. `sizeof(u32)` is 4. `offsetof(FsEnt, size)` is 16. Both are integers known at compile time. `sizeof()` takes one argument; anything it cannot size is `sizeof() has no size for this type`. `offsetof(Struct, field)` takes a struct name and a field name. `offsetof() unknown struct 'Nope'` and `struct 'FsEnt' has no field 'nope'` are the errors. A scalar local is still an 8-byte slot; `sizeof` of its type is the type width.
+
+### Constants
+
+```copihue
+const N = 8;                     // module level
+const WORDS = N * 2 + 1;         // an expression of constants
+let table: [i64; N];             // N is a length
+let wide: [i64; WORDS];
+
+fn fill() -> i64 {
+    const HALF = N / 2;          // function level: to the end of its block
+    let local: [i64; HALF];
+    return HALF;
+}
+```
+
+`const NAME = expr;` names an integer known at compile time. It is not a variable: it has no address, no storage and no type of its own (it is an untyped integer, like a literal). The parser folds it into a number at every use, so `-S` shows `mov rax, 8`, never the name, and `-O0` and `-O2` agree. The value is an expression of integer literals, character literals, other constants, parentheses, `+ - * / %`, `<< >>`, `& | ^`, unary `- ~ !`, comparisons and `&&` `||` (comparisons and logic give 0 or 1). Arithmetic wraps in 64 bits. Calls, variables, `sizeof` and casts are not constant expressions.
+
+Where it is accepted: wherever an expression is, and in an array length (`[T; N]`, `[T; N * 2 + 1]`, also `[u8; 0x10]`) in a `let`, a struct field or a cast. A constant is declared before it is used, in the file order (a module-level constant is not visible above its line). A constant at module level lasts to the end of the file; in a file with `module m;` it is `m`'s, and `pub const SIZE = 6;` makes it reachable as `m::SIZE` from other files (without `pub`: `constant 'm::SIZE' is private to its module`). A constant inside a function lasts to the end of its block. A flat file's constants are in the flat namespace, like its functions and globals.
+
+Errors, all at compile time: `the value of a constant must be a constant integer expression` (a variable or a call in the value), `the value of a constant divides by zero`, `constant 'N' is already declared` (same scope, or a function-level one that would hide a module-level one: there is no shadowing), `'N' is a constant; a variable cannot reuse its name` (a `let`, global or local, or a parameter with that name), `cannot assign to a constant` (`N = 3;`, `N += 1;`, `N++;`), `an array length must be a constant integer expression` and `an array length must be from 0 to 2147483647`, and `align() does not apply to a constant`. `const` is a contextual word: `const NAME =` starts a declaration, and a variable that happens to be called `const` still works. Tests: `tests/lang/const.lap` and `const_mod.lap` (expected output written by hand and **not run**: this Mac does not execute Linux ELF; the assembly was read, and the CI runs them), `tests/errors/const_bad.lap`, `const_private.lap` and `const_align.lap`.
 
 ### Alignment
 
