@@ -1,0 +1,17 @@
+// 0.44.4: a store through a pointer that is a call result is emitted, at the width of the
+// pointee, and `*volatile T` keeps its mark. Checked on the assembly (and on the object),
+// not run: the address is a fixed one. tests/assign/kernel.lap runs the same stores.
+fn mem(off: i64) -> *volatile u32 {
+    return (0x100000 + off) as *volatile u32;
+}
+
+fn half(off: i64) -> *u16 {
+    return (0x100000 + off) as *u16;
+}
+
+fn main() -> i64 {
+    mem(8)[0] = 5;
+    *mem(16) = 7;
+    half(2)[1] = 9;
+    return mem(8)[0];
+}

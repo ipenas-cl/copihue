@@ -1,4 +1,4 @@
-# Copihue Language Reference (v0.44.3)
+# Copihue Language Reference (v0.44.4)
 
 This document describes the language that `copihue` accepts today. Anything not listed here is not supported.
 Planned features are in the README roadmap.
@@ -344,6 +344,47 @@ packed struct IdtEntry {
 Scalar fields use 1, 2, 4, or 8 bytes and the next field starts immediately after. A pointer field is 8 bytes. A nested struct is embedded at its own size. An x86-64 interrupt gate written this way is 16 bytes. A 64-bit TSS stays packed: natural alignment would put `rsp0` at offset 8, and the CPU reads it at offset 4.
 
 A global array of structs can be indexed and its fields assigned (`idt[n].sel = 8`). Packed stores use the field's width, so a `u8` store does not overwrite the next field. Uninitialized global structs and arrays of structs are reserved with `resb` for their real size.
+
+### Assignment targets
+
+The left side of `=` must be a place: memory or a variable that holds the value. A store is never dropped in silence (before 0.44.4 some were).
+
+A place is:
+
+- a variable, local or global (`x = v`). `x = v` assigns only where an expression begins, or between parentheses (`a + (x = v)`);
+- an element of an array, a slice or a pointer: `a[i]`, `s[i]`, `p[i]`, and `*p`;
+- a field: `s.f`, `p.f`, `p->f`, `a[i].f`, `r.b.x`, and an element of an array field (`e.blocks[i]`);
+- **a pointer that is a value, indexed or dereferenced**: `f(x)[i]`, `*f(x)`, `f(x).field` (when `f` returns a pointer to a struct), `(p + 8)[0]`, `(addr as *u32)[i]`, `ps[i][j]` (when `ps[i]` is a pointer). The pointer designates the memory it points to exactly as a pointer variable does.
+
+For that last case the pointer's type decides everything. With `fn mem(off: i64) -> *volatile u32`, `mem(8)[0] = 5;` calls `mem(8)`, adds `0 * 4`, and writes four bytes (`mov dword [rbx], eax  ; volatile`); `mem(8)[2]` is the address 8 bytes further; `*mem(8) = 5` is the store at index 0. The store has the width of the pointee (a `*u16` result writes two bytes, a `*i64` result eight) and never touches its neighbours. `*volatile T` keeps its mark: the store (and a read through it) is emitted and is never folded. The value is evaluated first, then the index, then the pointer expression, as for a store through a name. Reads (`let v = mem(8)[2]`) use the same address and width; an element that is a struct is its address. A pointer is not bounds-checked. A call result that is not `volatile` is a plain pointer: `*cell(0) = 11` writes a `*u32` result with a 4-byte store.
+
+An expression whose type is not a pointer is not indexed. A pointer whose pointee is unknown (`malloc(16)[0] = 1`) asks for a cast (`(malloc(16) as *u8)[0] = 1`). Storing a whole struct through a pointer expression is an error too (`*getp() = s`); assign the fields.
+
+A store is a compile error, with `file:line:col` and no output file, in any mode (native, `--nasm`, `-c`, `--freestanding`, `--flat`, `-O0`, `-O2`), when the target is not a place:
+
+| Target | Message |
+| --- | --- |
+| `f(x) = v`, `f(x) += v`, `f(x)++` | `the assignment target is not assignable: the result of a call` |
+| `3 = v` | `...: a number literal` |
+| `(a + b) = v`, `-x = v`, `a + b = v`, `&x = v`, `(a < b) = v` | `...: the result of an operator expression` |
+| `(x as T) = v` | `...: the result of a cast` |
+| `(x) = v` | `...: a parenthesized name; write the name without parentheses` |
+| `"abc"[0] = v` | `...: an element of a string literal (read-only text)` |
+| `f(x)[0] = v`, `3[0] = v` with an integer `f` | `...: the expression has type i64, not a pointer` |
+| `malloc(16)[0] = v` | `...: the pointee type of this expression is unknown (cast it, e.g. 'as *u8')` |
+| `f(x).field = v` with `f` returning an integer | `...: field 'field' of an expression that is not a struct or a pointer to one` |
+| `n.field = v` with a scalar `n` | `...: 'n' is not a struct or a pointer to one` |
+| `s.nope = v` | `struct 'S' has no field 'nope'` |
+| `g[0] = v` with a scalar global, `zz[0] = v` undeclared | `cannot index 'g': it is not an array or a pointer`, `assignment to undeclared variable 'zz'` |
+| `N = v` with a constant | `cannot assign to a constant` |
+
+Reading through an expression that cannot be indexed is an error as well (`cannot index this expression: ...`, `cannot index 'g'...`, `use of undeclared variable 'zz'`); before 0.44.4 it read 0.
+
+Compound assignment (`+= -= *= /= %=`) and `++`, `--` apply to a variable. On an element, a field or a dereference they are `the assignment target is not assignable: compound assignment and ++/-- apply to a variable, not to an element, a field or a dereference; write it out (x[i] = x[i] + v)`: that is not implemented yet. `getp()->x = v` (a call result before `->`) is `'->x' needs a variable of pointer-to-struct type on the left`; `getp().x = v` stores.
+
+**Width of the arithmetic in a store.** `let w: i64 = a + b` and `w = a + b` with `u32` operands compute the sum at 64 bits (0.42.5). Since 0.44.4 a store into a field, an element (array, pointer, slice, array field), `*p`, or a pointer expression does the same: `w.x = a + b`, `arr[i] = a - b`, `p[3] = a * 3` and `f(x)[0] = a + b` take the arithmetic at the width of the destination when it is wider than the operands, signed or not. Before, the sum was cut to 32 bits first (`mov eax, eax`) and the high bits were lost. A destination as narrow as the operands still wraps (`w.u8field = c + d` with `u8` operands is `(c + d) & 255`). Call arguments and `return a + b` are not part of this: the operator keeps its operands' width there (pending).
+
+Tests: `tests/errors/assign_*.lap` (every message above, with its line), `tests/assign/run.sh` (each refusal in every mode with no output file; the stores in the assembly and in the native and nasm objects; and `tests/assign/kernel.lap`, which QEMU runs at `-O0` and `-O2`: stores through call results, neighbours intact, and sums past 32 bits through a field, an element, a pointer and an array field), `tests/lang/assign_ptr_expr.lap` and `tests/lang/assign_wide.lap` (output written by hand and **not run** on the Mac that wrote them: it does not execute Linux ELF; the CI runs them).
 
 ### Struct assignment
 

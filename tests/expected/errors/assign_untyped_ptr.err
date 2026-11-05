@@ -1,0 +1,4 @@
+tests/errors/assign_untyped_ptr.lap:2:5: error: the assignment target is not assignable: the pointee type of this expression is unknown (cast it, e.g. 'as *u8')
+      2 |     malloc(16)[0] = 1;
+        |     ^
+1 error, compilation failed

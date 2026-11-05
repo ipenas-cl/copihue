@@ -1,0 +1,4 @@
+tests/errors/assign_string_elem.lap:2:5: error: the assignment target is not assignable: an element of a string literal (read-only text)
+      2 |     "abc"[0] = 65;
+        |     ^
+1 error, compilation failed

@@ -16,7 +16,7 @@
 
 // ==== NAMING (single place to change when the language is renamed) ====
 #define LANG_NAME     "Copihue"
-#define LANG_VERSION  "0.44.3"
+#define LANG_VERSION  "0.44.4"
 #define COMPILER_BIN  "copihue"
 #define SRC_EXT       ".lap"   /* Lapageria rosea, the copihue */
 #define OLD_SRC_EXT   ".cph"   /* v0.18.x extension, still accepted with a warning */
@@ -29,6 +29,7 @@ int g_cur_line = 0, g_cur_col = 0;   // position of the last consumed token
 int g_error_count = 0;
 static int g_no_semi = 0;  // >0 while parsing a for(...) increment (no ';')
 static int g_no_eq = 0;    // deref operand must not swallow '=' (*p = v)
+static int g_expr_start = -1;  // token index where the innermost parse_expr began: `x = v` assigns only there
 static int g_no_brace = 0; // for-in operand must not swallow the body '{'
 #define MAX_LOOP_DEPTH 64
 static int g_loop_break[MAX_LOOP_DEPTH], g_loop_cont[MAX_LOOP_DEPTH], g_loop_depth = 0;
@@ -309,6 +310,7 @@ typedef struct AstNode {
     int flags;            // AF_PACKED, AF_VOLATILE, AF_INTERRUPT, AF_SYSCALL, AF_NAKED
     int bits;             // 0 = default 64 (no directive); else 16, 32, or 64
     int line, col;        // Source position (for diagnostics)
+    int sline, scol;      // Start of the statement, on a store. 0 when unknown (0.44.4)
     const char* file;     // Source file (several files share one program)
     char* section;        // Named section this item is placed in. NULL is the default
     int align;            // align(N) on a struct, a field, a function, or a global. 0 means none
@@ -323,6 +325,9 @@ typedef struct AstNode {
     int widen_bits;       // 0.42.5: arithmetic node computed at this wider width (see widen_arith)
     int widen_sg;
 } AstNode;
+
+// Line and column of a store statement's first token, else of the node.
+#define STMT_POS(n) ((n)->sline ? (n)->sline : (n)->line), ((n)->sline ? (n)->scol : (n)->col)
 
 #define AF_PACKED     1
 #define AF_VOLATILE   2
@@ -2552,6 +2557,7 @@ AstNode* parse_primary(Parser* p) {
         return arr;
     }
     if (check_tok(p, T_IDENT)) {
+        int start_pos = p->pos;
         Tok t = advance_tok(p);
         char* qual = NULL;
         char* gargs[MAX_TPARAMS];
@@ -2684,6 +2690,12 @@ AstNode* parse_primary(Parser* p) {
         // Assignment. Suppressed while parsing a dereference operand so
         // `*p = v` is a store through p, not `*(p = v)`.
         if (!g_no_eq && check_tok(p, T_EQ)) {
+            // `x = v` assigns x only where an expression begins. After an operator
+            // (`-x = v`, `a + b = v`, `&x = v`) the target would be the operator's
+            // result, and x would be assigned in silence.
+            if (start_pos != g_expr_start)
+                diag_error(t.line, t.col,
+                           "the assignment target is not assignable: the result of an operator expression");
             advance_tok(p);
             AstNode* assign = ast_new(AST_ASSIGN);
             assign->name = strndup(t.s, t.len);
@@ -3028,7 +3040,11 @@ AstNode* parse_logical_or(Parser* p) {
 }
 
 AstNode* parse_expr(Parser* p) {
-    return parse_logical_or(p);
+    int saved = g_expr_start;
+    g_expr_start = p->pos;
+    AstNode* e = parse_logical_or(p);
+    g_expr_start = saved;
+    return e;
 }
 
 AstNode* parse_block(Parser* p);
@@ -3181,6 +3197,25 @@ static AstNode* parse_for_in(Parser* p) {
     ast_add(block, wh);
     free(xname);
     return block;
+}
+
+// Why an expression cannot be the left side of an assignment, for the shapes whose
+// answer does not depend on types. NULL: it may be a place (the code generator checks).
+static const char* not_place_reason(AstNode* e) {
+    switch (e->type) {
+    case AST_CALL:           return "the result of a call";
+    case AST_NUMBER:         return "a number literal";
+    case AST_STRING:         return "a string literal";
+    case AST_ARRAY_LITERAL:
+    case AST_STRUCT_LITERAL: return "a literal";
+    case AST_BINOP:
+    case AST_UNARY:
+    case AST_COMPARE:
+    case AST_LOGICAL:        return "the result of an operator expression";
+    case AST_CAST:           return "the result of a cast";
+    case AST_ADDR_OF:        return "an address (&x is a value, not a place)";
+    default:                 return "an expression that is not a place";
+    }
 }
 
 AstNode* parse_stmt(Parser* p) {
@@ -3377,7 +3412,34 @@ AstNode* parse_stmt(Parser* p) {
             return jp;
         }
     }
+    Tok stmt_tok = peek_tok(p);
     AstNode* expr = parse_expr(p);
+
+    // A statement that assigns something that is not a place. Which index, field or
+    // dereference is a place depends on types, so the code generator checks those.
+    if (expr && (check_tok(p, T_EQ) || check_tok(p, T_PLUSEQ) || check_tok(p, T_MINUSEQ) ||
+                 check_tok(p, T_STAREQ) || check_tok(p, T_SLASHEQ) || check_tok(p, T_MODEQ) ||
+                 check_tok(p, T_PLUSPLUS) || check_tok(p, T_MINUSMINUS))) {
+        int plain = check_tok(p, T_EQ);
+        int placeish = expr->type == AST_INDEX || expr->type == AST_DEREF ||
+                       expr->type == AST_FIELD_ACCESS;
+        const char* why = NULL;
+        if (expr->type == AST_IDENT) {
+            if (plain) why = "a parenthesized name; write the name without parentheses";
+        } else if (placeish) {
+            if (!plain)
+                why = "compound assignment and ++/-- apply to a variable, not to an element, "
+                      "a field or a dereference; write it out (x[i] = x[i] + v)";
+        } else why = not_place_reason(expr);
+        if (why) {
+            int incdec = check_tok(p, T_PLUSPLUS) || check_tok(p, T_MINUSMINUS);
+            diag_error(stmt_tok.line, stmt_tok.col, "the assignment target is not assignable: %s", why);
+            advance_tok(p);
+            if (!incdec) parse_expr(p);
+            end_simple_stmt(p);
+            return ast_new(AST_BLOCK);
+        }
+    }
 
     // Check for increment/decrement operators: x++ or x--
     if (expr && expr->type == AST_IDENT) {
@@ -3472,6 +3534,8 @@ AstNode* parse_stmt(Parser* p) {
         }
         advance_tok(p);  // Consume '='
         AstNode* array_assign = ast_new(AST_ARRAY_ASSIGN);
+        array_assign->sline = stmt_tok.line;
+        array_assign->scol = stmt_tok.col;
         // children[0] = array base (from INDEX)
         // children[1] = index expression (from INDEX)
         // children[2] = value expression
@@ -3489,6 +3553,8 @@ AstNode* parse_stmt(Parser* p) {
         expr->children[0] && expr->children[0]->type == AST_IDENT && check_tok(p, T_EQ)) {
         advance_tok(p);
         AstNode* array_assign = ast_new(AST_ARRAY_ASSIGN);
+        array_assign->sline = stmt_tok.line;
+        array_assign->scol = stmt_tok.col;
         AstNode* zero = ast_new(AST_NUMBER);
         zero->value = strdup("0");
         ast_add(array_assign, expr->children[0]);
@@ -3502,6 +3568,8 @@ AstNode* parse_stmt(Parser* p) {
     if (expr && expr->type == AST_DEREF && expr->child_count == 1 && check_tok(p, T_EQ)) {
         advance_tok(p);
         AstNode* st = ast_new(AST_MEM_STORE);
+        st->sline = stmt_tok.line;
+        st->scol = stmt_tok.col;
         ast_add(st, expr);
         ast_add(st, parse_expr(p));
         end_simple_stmt(p);
@@ -3512,6 +3580,8 @@ AstNode* parse_stmt(Parser* p) {
     if (expr && expr->type == AST_FIELD_ACCESS && check_tok(p, T_EQ)) {
         advance_tok(p);  // Consume '='
         AstNode* field_assign = ast_new(AST_FIELD_ASSIGN);
+        field_assign->sline = stmt_tok.line;
+        field_assign->scol = stmt_tok.col;
         // name = field name
         // children[0] = struct object
         // children[1] = value expression
@@ -10743,6 +10813,160 @@ void gen_addr_of(Codegen* cg, AstNode* n) {
     }
 }
 
+// ---- 0.44.4: a pointer value that is not a name ----
+// `mem(8)[0]`, `(x as *u32)[i]`, `ps[i][j]`: indexing a pointer designates the
+// memory it points to, exactly as it does for a pointer variable, whether the
+// pointer came from a name or from an expression. The pointee type comes from the
+// type of the expression; `*volatile T` keeps its mark. An expression without a
+// pointer type (an integer, an untyped address from `p + 8`) is not indexed in
+// silence: the compiler asks for a cast.
+typedef struct { int sz; int vol; int rec; char tn[160]; } PtrAcc;
+
+static int ptr_expr_access(Codegen* cg, AstNode* base, PtrAcc* a) {
+    VTy t = expr_ty(cg, base);
+    if (t.kind != VK_PTR || t.disp[0] != '*') return 0;
+    snprintf(a->tn, sizeof a->tn, "%s", after_star(t.disp));
+    a->vol = !strncmp(t.disp + 1, "volatile ", 9);
+    StructType* rec = typetab_lookup(cg->types, a->tn);
+    a->rec = rec != NULL;
+    a->sz = rec ? rec->size : (a->tn[0] == '*' ? 8 : type_size(a->tn));
+    return a->sz > 0;
+}
+
+static void diag_not_pointer(Codegen* cg, AstNode* at, AstNode* base, const char* what) {
+    VTy t = expr_ty(cg, base);
+    if (t.kind == VK_INT || t.kind == VK_STRUCT || t.kind == VK_ENUM)
+        diag_error(STMT_POS(at),
+                   "%s: the expression has type %s, not a pointer", what, t.disp[0] ? t.disp : "i64");
+    else
+        diag_error(STMT_POS(at),
+                   "%s: the pointee type of this expression is unknown (cast it, e.g. 'as *u8')", what);
+}
+
+// Address of base[index] in rbx. index NULL is base[0]. Clobbers rax.
+static void gen_ptr_expr_addr(Codegen* cg, AstNode* base, AstNode* index, const PtrAcc* a) {
+    if (index) {
+        gen_expr(cg, index);
+        if (a->sz > 1) emit_scale_reg(cg, "rax", a->sz);
+        emit(cg, "    push rax\n");
+    }
+    gen_expr(cg, base);
+    if (index) {
+        emit(cg, "    pop rbx\n");
+        emit(cg, "    add rax, rbx\n");
+    }
+    emit(cg, "    mov rbx, rax\n");
+}
+
+// base[index] = value, or *base = value when index is NULL. Value first, then the
+// index, then the base, as the stores through a name evaluate them.
+static void gen_ptr_expr_store(Codegen* cg, AstNode* at, AstNode* base, AstNode* index, AstNode* value) {
+    PtrAcc a;
+    if (base->type == AST_STRING) {
+        diag_error(STMT_POS(at),
+                   "the assignment target is not assignable: an element of a string literal (read-only text)");
+        return;
+    }
+    if (!ptr_expr_access(cg, base, &a)) {
+        diag_not_pointer(cg, at, base, "the assignment target is not assignable");
+        return;
+    }
+    if (a.rec) {
+        diag_error(STMT_POS(at),
+                   "cannot assign a whole struct '%s' through a pointer expression; assign its fields", a.tn);
+        return;
+    }
+    widen_to_dest(cg, value, a.tn);
+    check_types(value, "", ty_from_spelled(cg, a.tn), expr_ty(cg, value));
+    {
+        int bits = 64, sg = 1;
+        if (!int_name(a.tn, &bits, &sg)) bits = 64;
+        gen_expr(cg, peel_store_cast(value, bits));
+    }
+    emit(cg, "    push rax\n");
+    gen_ptr_expr_addr(cg, base, index, &a);
+    emit(cg, "    pop rax\n");
+    emit_sized_store_mark(cg, "rbx", a.sz, 0, a.vol);
+}
+
+// base[index] as a value. A struct element is its address, as through a name.
+static void gen_ptr_expr_load(Codegen* cg, AstNode* at, AstNode* base, AstNode* index) {
+    PtrAcc a;
+    if (!ptr_expr_access(cg, base, &a)) {
+        diag_not_pointer(cg, at, base, "cannot index this expression");
+        emit(cg, "    xor rax, rax\n");
+        return;
+    }
+    gen_ptr_expr_addr(cg, base, index, &a);
+    if (a.rec) emit(cg, "    mov rax, rbx\n");
+    else emit_sized_load_mark(cg, "rbx", a.sz, 0, a.vol);
+}
+
+// obj.field = value where obj is an expression with no name: `getp().x = v`,
+// `getp()[i].x = v`. Through a pointer to a struct it is a store into that struct.
+// A struct returned by value is a temporary, and anything else has no fields.
+static void gen_field_store_expr(Codegen* cg, AstNode* n, AstNode* obj, const char* field, AstNode* value) {
+    PtrAcc a;
+    AstNode* base = obj;
+    AstNode* index = NULL;
+    const char* stype = NULL;
+    if (obj->type == AST_INDEX && obj->child_count >= 2) {
+        base = obj->children[0];
+        index = obj->children[1];
+        if (!ptr_expr_access(cg, base, &a)) {
+            diag_not_pointer(cg, n, base, "the assignment target is not assignable");
+            return;
+        }
+        if (a.rec) stype = a.tn;
+    } else {
+        VTy t = expr_ty(cg, obj);
+        if (t.kind == VK_STRUCT) {
+            diag_error(STMT_POS(n),
+                       "the assignment target is not assignable: a field of a struct value (a copy, not a place)");
+            return;
+        }
+        if (t.kind == VK_PTR && ptr_expr_access(cg, obj, &a) && a.rec) stype = a.tn;
+        else a.sz = 8;
+    }
+    if (!stype) {
+        diag_error(STMT_POS(n),
+                   "the assignment target is not assignable: field '%s' of an expression that is not a struct or a pointer to one",
+                   field);
+        return;
+    }
+    if (typetab_field_offset(cg->types, (char*)stype, (char*)field) < 0) {
+        diag_error(STMT_POS(n), "struct '%s' has no field '%s'", stype, field);
+        return;
+    }
+    {
+        char* ft = typetab_field_type(cg->types, (char*)stype, (char*)field);
+        int bits = 64, sg = 1;
+        if (ft && ft[0] != '*') widen_to_dest(cg, value, ft);
+        if (ft && (ft[0] == '*' || !typetab_lookup(cg->types, ft)))
+            check_types(value, "", ty_from_spelled(cg, ft), expr_ty(cg, value));
+        if (!ft || !int_name(ft, &bits, &sg)) bits = 64;
+        gen_expr(cg, peel_store_cast(value, bits));
+    }
+    emit(cg, "    push rax\n");
+    if (index) gen_ptr_expr_addr(cg, base, index, &a);
+    else {
+        gen_expr(cg, obj);
+        emit(cg, "    mov rbx, rax\n");
+    }
+    emit(cg, "    pop rax\n");
+    {
+        int psz = 8, psg = 0, poff = typetab_field_offset(cg->types, (char*)stype, (char*)field), pvol = 0;
+        char mem[64];
+        int packed = field_mem_info(cg, stype, field, &poff, &psz, &psg, &pvol);
+        mem_base_disp(mem, sizeof mem, "rbx", poff);
+        if (packed) emit_sized_store_mark(cg, mem, psz, 0, pvol);
+        else {
+            trunc_rax_field(cg, stype, field);
+            emit(cg, "    mov [%s], rax\n", mem);
+        }
+    }
+}
+
 // Helper: Generate array indexing with bounds checking
 // Indexing x[i] requires x to be an array or a pointer. A plain scalar
 // (e.g. a parameter declared `buf: i32`) would otherwise index the stack slot.
@@ -10910,6 +11134,11 @@ void gen_array_index(Codegen* cg, AstNode* n) {
         emit(cg, "    lea rbx, [%s]\n", label);
         emit(cg, "    add rbx, rax\n");
         emit(cg, "    movzx rax, byte [rbx]\n");
+        return;
+    }
+
+    if (arr->type != AST_IDENT) {
+        gen_ptr_expr_load(cg, n, arr, ixn);
         return;
     }
 
@@ -11177,7 +11406,14 @@ void gen_array_index(Codegen* cg, AstNode* n) {
                 else emit(cg, "    mov rax, [rbx]%s\n", mark);
             }
         } else {
-            emit(cg, "    mov rax, 0  ; array not found\n");
+            // Not a local, not an array or pointer global: a 0 here would be a silent wrong value.
+            if (gvar)
+                diag_error(arr->line, arr->col,
+                           "cannot index '%s': it is not an array or a pointer (declare it as e.g. '%s: *i8')",
+                           arr->name, arr->name);
+            else
+                diag_error(arr->line, arr->col, "use of undeclared variable '%s'", arr->name);
+            emit(cg, "    xor rax, rax\n");
         }
     }
 }
@@ -11532,6 +11768,7 @@ static int gen_embedded_array(Codegen* cg, AstNode* field, AstNode* index, AstNo
         return 1;
     }
     if (value) {
+        if (f->type_name && f->type_name[0] != '*') widen_to_dest(cg, value, f->type_name);
         gen_expr(cg, peel_store_cast(value, elem * 8));
         emit(cg, "    push rax\n");
     }
@@ -11600,6 +11837,15 @@ static int gen_struct_assign(Codegen* cg, AstNode* dst, AstNode* src) {
 
 // *volatile T: width and signedness of one pointee access. 0 if not volatile.
 static int volatile_pointee_info(Codegen* cg, AstNode* p, int* sz, int* sg) {
+    if (p && p->type == AST_CALL) {
+        // `*mem(8)`: a call that returns `*volatile T` reads T, volatile.
+        PtrAcc a;
+        if (!ptr_expr_access(cg, p, &a) || !a.vol) return 0;
+        if (a.rec) { *sz = a.sz > 8 ? 8 : a.sz; *sg = 0; return 1; }
+        *sz = a.sz;
+        *sg = (a.tn[0] == 'i');
+        return 1;
+    }
     if (!p || p->type != AST_IDENT || !p->name) return 0;
     const char* tn = NULL;
     int vp = 0;
@@ -12545,7 +12791,25 @@ static void gen_mem_store(Codegen* cg, AstNode* n) {
         // The cast type is the pointer (`*u8`). The store is checked against
         // the pointee, so `*(0x1000 as *u8) = 300` is the usual literal error.
         VTy dst = ty_from_spelled(cg, addr->value);
+        if (val) widen_to_dest(cg, val, addr->value);
         if (val) check_types(val, "", dst, expr_ty(cg, val));
+    }
+    int mvol = 0;
+    if (addr && addr->type == AST_CALL) {
+        // `*mem(8) = v`: a call that returns a typed pointer stores the pointee's width,
+        // and `*volatile T` keeps its mark. A call that returns an integer is an address.
+        PtrAcc pa;
+        if (ptr_expr_access(cg, addr, &pa)) {
+            if (pa.rec) {
+                diag_error(STMT_POS(n),
+                           "cannot assign a whole struct '%s' through a pointer expression; assign its fields", pa.tn);
+                return;
+            }
+            sz = pa.sz;
+            mvol = pa.vol;
+            widen_to_dest(cg, val, pa.tn);
+            if (val) check_types(val, "", ty_from_spelled(cg, pa.tn), expr_ty(cg, val));
+        }
     }
     char mem[80];
     long long wide_v = 0;
@@ -12589,7 +12853,8 @@ static void gen_mem_store(Codegen* cg, AstNode* n) {
         emit(cg, "    pop ebx\n");
     } else {
         emit(cg, "    pop rbx\n");
-        emit_acc_store(cg, "rbx", sz, n->line, n->col);
+        if (mvol) emit_sized_store_mark(cg, "rbx", sz, 0, 1);
+        else emit_acc_store(cg, "rbx", sz, n->line, n->col);
     }
 }
 
@@ -14245,6 +14510,11 @@ void gen_expr(Codegen* cg, AstNode* n) {
         // children[0] = array base
         // children[1] = index expression
         // children[2] = value expression
+        // A wider element takes the arithmetic at its width (see widen_arith), as `x = e` does.
+        if (n->children && n->child_count >= 3 && n->children[0]) {
+            char* we = array_elem_type_name(cg, n->children[0]);
+            if (we && we[0] != '*') widen_to_dest(cg, n->children[2], we);
+        }
         if (gen_slice_store(cg, n)) return;
 
         if (!n->children || n->child_count < 3) return;
@@ -14256,7 +14526,12 @@ void gen_expr(Codegen* cg, AstNode* n) {
             return;
         check_indexable(cg, arr);
 
-        if (!arr || !arr->name) return;
+        if (!arr) return;
+        if (arr->type != AST_IDENT) {
+            gen_ptr_expr_store(cg, n, arr, index_expr, value_expr);
+            return;
+        }
+        if (!arr->name) return;
 
         // Whole-element copy when the element is a struct. Exact size, so the
         // next element is left alone (packed records included).
@@ -14609,6 +14884,15 @@ void gen_expr(Codegen* cg, AstNode* n) {
                     else if (elem_size == 4) emit(cg, "    mov dword [rbx], eax%s\n", mark);
                     else emit(cg, "    mov qword [rbx], rax%s\n", mark);
                 }
+            } else {
+                // Neither a local nor an array or pointer global: nothing was stored.
+                emit(cg, "    pop rax\n");
+                if (gvar)
+                    diag_error(STMT_POS(n),
+                               "cannot index '%s': it is not an array or a pointer (declare it as e.g. '%s: *i8')",
+                               arr->name, arr->name);
+                else
+                    diag_error(STMT_POS(n), "assignment to undeclared variable '%s'", arr->name);
             }
         }
     } else if (n->type == AST_FIELD_ASSIGN) {
@@ -14623,6 +14907,12 @@ void gen_expr(Codegen* cg, AstNode* n) {
         char* field_name = n->name;
 
         if (!obj || !field_name) return;
+
+        {
+            char* wrec = obj_record_type(cg, obj);
+            char* wft = wrec ? typetab_field_type(cg->types, wrec, field_name) : NULL;
+            if (wft && wft[0] != '*') widen_to_dest(cg, value_expr, wft);
+        }
 
         if (obj->type == AST_IDENT && (!strcmp(field_name, "ptr") || !strcmp(field_name, "len") ||
                                        !strcmp(field_name, "cap"))) {
@@ -14679,6 +14969,14 @@ void gen_expr(Codegen* cg, AstNode* n) {
                 gen_struct_assign(cg, &fld, value_expr);
                 return;
             }
+        }
+
+        // An object that is an expression without a name (`getp().x = v`): handled apart.
+        if (obj->type != AST_IDENT && obj->type != AST_DEREF && obj->type != AST_FIELD_ACCESS &&
+            !(obj->type == AST_INDEX && obj->child_count >= 2 && obj->children[0] &&
+              obj->children[0]->type == AST_IDENT)) {
+            gen_field_store_expr(cg, n, obj, field_name, value_expr);
+            return;
         }
 
         if (try_ptr_field_store(cg, obj, field_name, value_expr)) return;
@@ -14869,6 +15167,14 @@ void gen_expr(Codegen* cg, AstNode* n) {
                         trunc_rcx_named(cg, typetab_field_type(cg->types, struct_type, field_name));
                         emit(cg, "    mov [rbp%d], rcx\n", sym->offset + field_off);
                     }
+                } else {
+                    emit(cg, "    pop rax\n");
+                    if (typetab_lookup(cg->types, struct_type))
+                        diag_error(STMT_POS(n), "struct '%s' has no field '%s'", struct_type, field_name);
+                    else
+                        diag_error(STMT_POS(n),
+                                   "the assignment target is not assignable: '%s' is not a struct or a pointer to one",
+                                   obj->name);
                 }
             } else {
                 GlobalVar* gvar = global_symtab_lookup(cg->global_symtab, obj->name);
@@ -14889,7 +15195,36 @@ void gen_expr(Codegen* cg, AstNode* n) {
                         }
                     } else {
                         emit(cg, "    pop rax\n");
+                        diag_error(STMT_POS(n), "struct '%s' has no field '%s'", gvar->type_name, field_name);
                     }
+                } else if (gvar && gvar->is_pointer && gvar->pointee_type &&
+                           typetab_lookup(cg->types, gvar->pointee_type)) {
+                    // A global `*Struct`: load the pointer, store at the field.
+                    int field_off = typetab_field_offset(cg->types, gvar->pointee_type, field_name);
+                    if (field_off >= 0) {
+                        int psz = 8, psg = 0, poff = field_off, pvol = 0;
+                        int packed = field_mem_info(cg, gvar->pointee_type, field_name, &poff, &psz, &psg, &pvol);
+                        char mem[96];
+                        emit(cg, "    pop rcx\n");
+                        emit(cg, "    mov rbx, [%s]\n", gvar->name);
+                        mem_base_disp(mem, sizeof(mem), "rbx", packed ? poff : field_off);
+                        if (packed) emit_sized_store_mark(cg, mem, psz, 1, pvol);
+                        else {
+                            trunc_rcx_named(cg, typetab_field_type(cg->types, gvar->pointee_type, field_name));
+                            emit(cg, "    mov [%s], rcx\n", mem);
+                        }
+                    } else {
+                        emit(cg, "    pop rax\n");
+                        diag_error(STMT_POS(n), "struct '%s' has no field '%s'", gvar->pointee_type, field_name);
+                    }
+                } else {
+                    emit(cg, "    pop rax\n");
+                    if (gvar)
+                        diag_error(STMT_POS(n),
+                                   "the assignment target is not assignable: '%s' is not a struct or a pointer to one",
+                                   obj->name);
+                    else
+                        diag_error(STMT_POS(n), "assignment to undeclared variable '%s'", obj->name);
                 }
             }
         }

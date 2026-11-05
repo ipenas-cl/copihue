@@ -1,0 +1,4 @@
+tests/errors/assign_scalar_field.lap:3:5: error: the assignment target is not assignable: 'a' is not a struct or a pointer to one
+      3 |     a.x = 5;
+        |     ^
+1 error, compilation failed
