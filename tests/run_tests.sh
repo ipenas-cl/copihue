@@ -22,6 +22,9 @@
 # 4g. Assignment targets (0.44.4): tests/errors/assign_*.lap are refused (native, --nasm, -c, --freestanding,
 #    --flat) with no output; a store through a call result is in the assembly and in both objects; QEMU runs
 #    tests/assign/kernel.lap. All of it in tests/assign/run.sh.
+# 4h. Initializers of globals (0.44.5): tests/errors/ginit_*.lap are refused in every way the compiler builds;
+#    the constant expressions are in .data (assembly of tests/lang/global_init.lap and tests/ginit/kernel.lap);
+#    QEMU runs tests/ginit/kernel.lap. All of it in tests/ginit/run.sh.
 # 5. Boot sectors: tests/boot/*.lap, and QEMU must print COPIHUE.
 # 6. User mode: tests/usermode, and QEMU must print USER.
 # 7. Context switch: tests/ctx, and QEMU must print COPIHUE.
@@ -103,7 +106,7 @@ check() {  # $1 = name, $2 = golden file, $3 = actual file
   else fail=$((fail+1)); failed+=("$1"); echo "FAIL $1"; [ -f "$2" ] && diff "$2" "$3" | head -10; fi
 }
 
-for src in $(ls tests/*.lap tests/*/*.lap examples/*.lap examples/*/*.lap examples/*/*/*.lap | grep -v -e '^tests/errors/' -e '^tests/freestanding/' -e "^tests/flat/" -e "^tests/boot/" -e '^tests/usermode/' -e '^tests/ctx/' -e '^tests/native/' -e '^tests/align/' -e '^tests/assign/' -e '^tests/axe1/' -e '^tests/axe2/' -e '^tests/tools/'); do
+for src in $(ls tests/*.lap tests/*/*.lap examples/*.lap examples/*/*.lap examples/*/*/*.lap | grep -v -e '^tests/errors/' -e '^tests/freestanding/' -e "^tests/flat/" -e "^tests/boot/" -e '^tests/usermode/' -e '^tests/ctx/' -e '^tests/native/' -e '^tests/align/' -e '^tests/assign/' -e '^tests/axe1/' -e '^tests/ginit/' -e '^tests/axe2/' -e '^tests/tools/'); do
   case "$SKIP" in *" $src "*) continue ;; esac
   golden=tests/expected/${src%.lap}.out
   FELL=0
@@ -1140,6 +1143,15 @@ if asg=$(bash "$ROOT/tests/assign/run.sh" "$CC" 2>&1); then
   pass=$((pass+1)); echo "$asg" | grep -E '^skip|^tests/assign:'
 else
   fail=$((fail+1)); failed+=("tests/assign"); echo "$asg" | head -40
+fi
+
+# 4h. Initializers of globals (0.44.5): a constant integer expression is folded into .data; anything else
+# is refused on the let in every way the compiler builds, and a kernel reads the values back under QEMU.
+# The details are in tests/ginit/run.sh.
+if gin=$(bash "$ROOT/tests/ginit/run.sh" "$CC" 2>&1); then
+  pass=$((pass+1)); echo "$gin" | grep -E '^skip|^tests/ginit:'
+else
+  fail=$((fail+1)); failed+=("tests/ginit"); echo "$gin" | head -40
 fi
 
 rm -f "$CC"

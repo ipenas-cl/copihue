@@ -1,0 +1,7 @@
+fn seed() -> i64 { return 7; }
+
+let ahci_port: i64 = seed();
+
+fn main() -> i64 {
+    return ahci_port;
+}

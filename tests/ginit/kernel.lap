@@ -1,0 +1,144 @@
+// Flat kernel at 0x8000 for QEMU, loaded by tests/usermode/boot.lap (see tests/align/kernel.lap
+// for the mode switch). It reads back, for real, globals whose initializer is a constant
+// expression (0.44.5) and reports on COM1: GINIT when every check holds, FAIL and the number of
+// the first check that does not otherwise.
+
+const N = 4;
+const SHIFT = 3;
+
+struct Pair { a: i64, b: u32 }
+
+let neg: i64 = 0 - 1;
+let neg2: i64 = -N;
+let k: i64 = N * 4 + 2;
+let m: u32 = 1 << 31;
+let mask: u8 = 0xF0 | 0x0F;
+let wrapped: u8 = 300 as u8;
+let sext: i8 = 200 as u8;
+let big: u64 = 1 as u64 << 63;
+let allones: u64 = 0 - 1;
+let wide: i64 = (1 << 40) + 5;
+let wmax: i64 = 0x7FFFFFFFFFFFFFFF;
+let sz: i64 = sizeof(i64) * 2 + 1;
+let off: i64 = offsetof(Pair, b);
+let shr: i64 = 256 >> SHIFT;
+let div: i64 = 0 - 7 / 2;
+let tbl: [i64; 3] = [N, 0 - N, 1 << 40];
+let bytes: [u8; 3] = [0x7F + 1, 255 & 0x3C, N];
+let dwords: [u32; 2] = [1 << 31, 7 * 7];
+let vga: *u8 = 0xB8000 + 160;
+let bad: i64 = 0;
+
+data gdt {
+    dq 0;
+    dw 0;
+    dw 0;
+    db 0;
+    db 0x9A;
+    db 0x20;
+    db 0;
+    dw 0xFFFF;
+    dw 0;
+    db 0;
+    db 0x92;
+    db 0xCF;
+    db 0;
+}
+
+data gdtr {
+    dw 23;
+    dd gdt;
+}
+
+fn serial_putc(c: i64) -> i64 {
+    let tries = 0;
+    while ((inb(0x3FD) & 0x20) == 0 && tries < 1000) { tries = tries + 1; }
+    outb(0x3F8, c);
+    return 0;
+}
+
+fn check(n: i64, ok: i64) -> i64 {
+    if (ok == 0 && bad == 0) { bad = n; }
+    return 0;
+}
+
+fn kmain() -> i64 {
+    let one: i64 = 1;
+    let s40: i64 = one << 40;
+    let s63: u64 = 1;
+    let ones: u64 = 0;
+    s63 = s63 << 63;
+    ones = ones - 1;
+    check(1, neg == 0 - 1);
+    check(2, neg2 == 0 - 4);
+    check(3, k == 18);
+    check(4, m == 2147483648);
+    check(5, mask == 255);
+    check(6, wrapped == 44);
+    check(7, sext == 0 - 56);
+    check(8, big == s63);
+    check(9, allones == ones);
+    check(10, wide == s40 + 5);
+    check(11, wmax > 0 && wmax + 1 < 0);
+    check(12, sz == 17);
+    check(13, off == 8);
+    check(14, shr == 32);
+    check(15, div == 0 - 3);
+    check(16, tbl[0] == 4);
+    check(17, tbl[1] == 0 - 4);
+    check(18, tbl[2] == s40);
+    check(19, bytes[0] == 128);
+    check(20, bytes[1] == 60);
+    check(21, bytes[2] == 4);
+    check(22, dwords[0] == 2147483648);
+    check(23, dwords[1] == 49);
+    check(24, (vga as i64) == 753824);
+
+    if (bad == 0) {
+        serial_putc(71);
+        serial_putc(73);
+        serial_putc(78);
+        serial_putc(73);
+        serial_putc(84);
+    } else {
+        serial_putc(70);
+        serial_putc(65);
+        serial_putc(73);
+        serial_putc(76);
+        serial_putc(48 + bad / 10);
+        serial_putc(48 + bad % 10);
+    }
+    while (1) { hlt(); }
+    return 0;
+}
+
+bits 32 naked fn _start() {
+    cli();
+    asm("lgdt [gdtr]");
+    asm("mov ax, 0x10");
+    asm("mov ds, ax");
+    asm("mov es, ax");
+    asm("mov ss, ax");
+    asm("mov esp, 0x6000");
+    asm("cld");
+    asm("xor eax, eax");
+    asm("mov edi, 0x1000");
+    asm("mov ecx, 3072");
+    asm("rep stosd");
+    asm("mov dword [0x1000], 0x2007");
+    asm("mov dword [0x2000], 0x3007");
+    asm("mov dword [0x3000], 0x87");
+    asm("mov eax, cr4");
+    asm("or eax, 0x20");
+    asm("mov cr4, eax");
+    asm("mov eax, 0x1000");
+    asm("mov cr3, eax");
+    asm("mov ecx, 0xC0000080");
+    asm("rdmsr");
+    asm("or eax, 0x100");
+    asm("wrmsr");
+    asm("mov eax, cr0");
+    asm("or eax, 0x80000000");
+    asm("mov cr0, eax");
+    asm("jmp 0x08:kmain");
+}

@@ -1,0 +1,6 @@
+let base: i64 = 100;
+let limit: i64 = base + 28;
+
+fn main() -> i64 {
+    return limit;
+}

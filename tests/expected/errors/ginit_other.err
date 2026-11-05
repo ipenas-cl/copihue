@@ -1,0 +1,28 @@
+tests/errors/ginit_other.lap:6:23: error: element 1 of the initializer of global 'a' is not a constant expression: a call
+      6 | let a: [i64; 3] = [1, id(2), 3];
+        |                       ^
+tests/errors/ginit_other.lap:7:15: error: the initializer of global 'b' is not a constant expression: an address (&x)
+      7 | let b: *i64 = &n;
+        |               ^
+tests/errors/ginit_other.lap:8:14: error: the initializer of global 'c' is not a constant expression: a struct literal
+      8 | let c: P = P { x: 1, y: 2 };
+        |              ^
+tests/errors/ginit_other.lap:9:14: error: the initializer of global 'd' is not a constant expression: the name 'true', which is not a const
+      9 | let d: i64 = true;
+        |              ^
+tests/errors/ginit_other.lap:10:14: error: the initializer of global 'e' is not a constant expression: a call
+     10 | let e: *u8 = id(0) as *u8;
+        |              ^
+tests/errors/ginit_other.lap:11:19: error: the initializer of global 'f' must be an array literal or a string
+     11 | let f: [i64; 2] = 5;
+        |                   ^
+tests/errors/ginit_other.lap:12:14: error: expected i64, found *u8
+     12 | let g: i64 = "text";
+        |              ^
+tests/errors/ginit_other.lap:13:20: error: element 0 of the initializer of global 'h' is not a constant expression: the name 'n', which is not a const
+     13 | let h: [i64; 2] = [n, 0];
+        |                    ^
+tests/errors/ginit_other.lap:14:14: error: the initializer of global 'i' is not a constant expression: the name 'n', which is not a const
+     14 | let i: i64 = n as u8;
+        |              ^
+9 errors, compilation failed

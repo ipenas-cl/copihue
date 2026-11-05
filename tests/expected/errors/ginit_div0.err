@@ -1,0 +1,7 @@
+tests/errors/ginit_div0.lap:3:14: error: the initializer of global 'a' divides by zero
+      3 | let a: i64 = 10 / ZERO;
+        |              ^
+tests/errors/ginit_div0.lap:4:14: error: the initializer of global 'b' divides by zero
+      4 | let b: i64 = 10 % (3 - 3);
+        |              ^
+2 errors, compilation failed
