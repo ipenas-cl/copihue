@@ -1,0 +1,52 @@
+// const: module-level and function-level integer constants, folded where they
+// are used. [T; N] takes a constant, and so does an expression of constants.
+const N = 8;
+const WORDS = N * 2 + 1;
+const MASK = (1 << 4) - 1;
+const NEG = -N;
+
+let table: [i64; N];
+let wide: [i64; WORDS];
+
+fn fill() -> i64 {
+    const HALF = N / 2;
+    let local: [i64; HALF];
+    let i = 0;
+    while (i < HALF) {
+        local[i] = i * 10;
+        i = i + 1;
+    }
+    return local[HALF - 1];
+}
+
+fn other() -> i64 {
+    // The block of fill() is over: HALF is free to be declared again.
+    const HALF = 3;
+    return HALF;
+}
+
+fn show(v: i64) {
+    print_int(v);
+    println("");
+}
+
+fn main() -> i64 {
+    let i = 0;
+    while (i < N) {
+        table[i] = i;
+        i = i + 1;
+    }
+    wide[WORDS - 1] = 5;
+    show(table[N - 1]);          // 7
+    show(wide[WORDS - 1]);       // 5
+    show(WORDS);                 // 17
+    show(MASK);                  // 15
+    show(NEG);                   // -8
+    show(fill());                // 30
+    show(other());               // 3
+    {
+        const INNER = 9;
+        show(INNER + N);         // 17
+    }
+    return 0;
+}

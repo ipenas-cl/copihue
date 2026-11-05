@@ -16,7 +16,7 @@
 
 // ==== NAMING (single place to change when the language is renamed) ====
 #define LANG_NAME     "Copihue"
-#define LANG_VERSION  "0.44.2"
+#define LANG_VERSION  "0.44.3"
 #define COMPILER_BIN  "copihue"
 #define SRC_EXT       ".lap"   /* Lapageria rosea, the copihue */
 #define OLD_SRC_EXT   ".cph"   /* v0.18.x extension, still accepted with a warning */
@@ -38,6 +38,7 @@ int g_checked = 0;                   // --checked: slice and local-array traps i
 const char* g_flat_org = NULL;       // --flat ADDR: freestanding flat binary loaded at ADDR, entry _start
 int g_flat_elf = 0;                  // --elf with --flat: ELF64 ET_EXEC of that image, named sections kept
 int g_axe2 = 0;                      // --axe2 with --flat 0x400000: AXE2 header + image, data on its own page
+int g_axe1 = 0;                      // --axe1 with --flat 0x400000: AXE1 header + one-page image
 int g_sizes = 0;                     // --sizes with --flat: text, data and bss sizes on stdout
 int g_boot = 0;                      // --boot: flat sector at 0x7C00, padded to 512, signature 0xAA55
 int g_reloc = 0;                     // -c: one ELF64 relocatable object (nasm -f elf64), no ld
@@ -1798,6 +1799,107 @@ static void take_qual(Parser* p, Tok* name, char** qual) {
     }
 }
 
+// const NAME = <integer expression>; The parser folds a constant into a number
+// at every use, so the back end never sees the name. A module-level constant
+// lives for the file (a module's, under its link name); a function-level one
+// lasts to the end of its block. Both are declared before use.
+#define MAX_CONSTS 1024
+typedef struct {
+    char* key;            // source name (local) or link name (file level)
+    long long val;
+    int local;
+    int pub;
+    const char* mod;
+} ConstDef;
+static ConstDef g_consts[MAX_CONSTS];
+static int g_nconsts = 0;
+static AstNode* parse_const_decl(Parser* p, int local);
+
+// qualified: the name is already a link name (mod::NAME).
+static ConstDef* const_find(const char* name, int qualified) {
+    if (!name) return NULL;
+    if (!qualified) {
+        for (int i = g_nconsts - 1; i >= 0; i--)
+            if (g_consts[i].local && !strcmp(g_consts[i].key, name)) return &g_consts[i];
+    }
+    {
+        const char* key = qualified ? name : link_sym(g_file_mod, name);
+        for (int i = 0; i < g_nconsts; i++)
+            if (!g_consts[i].local && !strcmp(g_consts[i].key, key)) return &g_consts[i];
+    }
+    return NULL;
+}
+
+// A let, a parameter or a loop variable may not reuse a constant's name.
+static void const_clash(Tok name) {
+    char* s = strndup(name.s, name.len);
+    if (const_find(s, 0))
+        diag_error(name.line, name.col, "'%s' is a constant; a variable cannot reuse its name", s);
+    free(s);
+}
+
+// 1 = constant (value in *out), 0 = not a constant expression, -1 = division by zero.
+static int const_eval(AstNode* n, long long* out) {
+    long long a, b;
+    int r;
+    if (!n) return 0;
+    if (n->type == AST_NUMBER && n->value) { *out = atoll(n->value); return 1; }
+    if (n->type == AST_UNARY && n->op && n->child_count == 1) {
+        if ((r = const_eval(n->children[0], &a)) != 1) return r;
+        switch (n->op[0]) {
+        case '-': *out = (long long)(0ULL - (unsigned long long)a); return 1;
+        case '~': *out = ~a; return 1;
+        case '!': *out = !a; return 1;
+        }
+        return 0;
+    }
+    if ((n->type == AST_BINOP || n->type == AST_COMPARE || n->type == AST_LOGICAL) &&
+        n->op && n->child_count == 2) {
+        const char* o = n->op;
+        unsigned long long ua, ub;
+        if ((r = const_eval(n->children[0], &a)) != 1) return r;
+        if ((r = const_eval(n->children[1], &b)) != 1) return r;
+        ua = (unsigned long long)a;
+        ub = (unsigned long long)b;
+        if (!strcmp(o, "+")) { *out = (long long)(ua + ub); return 1; }
+        if (!strcmp(o, "-")) { *out = (long long)(ua - ub); return 1; }
+        if (!strcmp(o, "*")) { *out = (long long)(ua * ub); return 1; }
+        if (!strcmp(o, "/") || !strcmp(o, "%")) {
+            if (b == 0) return -1;
+            if (a == LLONG_MIN && b == -1) { *out = o[0] == '/' ? a : 0; return 1; }
+            *out = o[0] == '/' ? a / b : a % b;
+            return 1;
+        }
+        if (!strcmp(o, "<<")) { *out = (b >= 0 && b < 64) ? (long long)(ua << b) : 0; return 1; }
+        if (!strcmp(o, ">>")) { *out = (b >= 0 && b < 64) ? (a >> b) : (a < 0 ? -1 : 0); return 1; }
+        if (!strcmp(o, "&")) { *out = a & b; return 1; }
+        if (!strcmp(o, "|")) { *out = a | b; return 1; }
+        if (!strcmp(o, "^")) { *out = a ^ b; return 1; }
+        if (!strcmp(o, "==")) { *out = a == b; return 1; }
+        if (!strcmp(o, "!=")) { *out = a != b; return 1; }
+        if (!strcmp(o, "<")) { *out = a < b; return 1; }
+        if (!strcmp(o, "<=")) { *out = a <= b; return 1; }
+        if (!strcmp(o, ">")) { *out = a > b; return 1; }
+        if (!strcmp(o, ">=")) { *out = a >= b; return 1; }
+        if (!strcmp(o, "&&")) { *out = a && b; return 1; }
+        if (!strcmp(o, "||")) { *out = a || b; return 1; }
+    }
+    return 0;
+}
+
+// A constant integer in the source: array lengths and const initializers.
+// Reports the error itself and returns `fallback` after one.
+static long long parse_const_int(Parser* p, const char* what, long long fallback) {
+    Tok at = peek_tok(p);
+    AstNode* e = parse_expr(p);
+    long long v = 0;
+    int r = const_eval(e, &v);
+    if (r == 1) return v;
+    if (r < 0) diag_error(at.line, at.col, "%s divides by zero", what);
+    else diag_error(at.line, at.col, "%s must be a constant integer expression", what);
+    return fallback;
+}
+
 #define MAX_TPARAMS 8
 static char* g_tparse_names[MAX_TPARAMS];
 static int g_ntparse = 0;
@@ -2468,6 +2570,34 @@ AstNode* parse_primary(Parser* p) {
             t.len = (int)strlen(app);
         }
         take_qual(p, &t, &qual);
+        if (!check_tok(p, T_LPAREN) && g_nconsts > 0) {
+            char* cname = strndup(t.s, t.len);
+            ConstDef* cd = const_find(cname, qual != NULL);
+            free(cname);
+            if (cd) {
+                AstNode* num = ast_new(AST_NUMBER);
+                char nb[32];
+                if (qual && !cd->pub && !same_mod(cd->mod, g_file_mod))
+                    diag_error(t.line, t.col, "constant '%s::%.*s' is private to its module", qual,
+                               (int)(t.len - strlen(qual) - 2), t.s + strlen(qual) + 2);
+                if ((!g_no_eq && check_tok(p, T_EQ)) || check_tok(p, T_PLUSEQ) ||
+                    check_tok(p, T_MINUSEQ) || check_tok(p, T_STAREQ) || check_tok(p, T_SLASHEQ) ||
+                    check_tok(p, T_MODEQ) || check_tok(p, T_PLUSPLUS) || check_tok(p, T_MINUSMINUS))
+                {
+                    // Report it and read the rest of the statement, so one mistake is one error.
+                    int incdec = check_tok(p, T_PLUSPLUS) || check_tok(p, T_MINUSMINUS);
+                    diag_error(t.line, t.col, "cannot assign to a constant");
+                    advance_tok(p);
+                    if (!incdec) parse_expr(p);
+                }
+                snprintf(nb, sizeof nb, "%lld", cd->val);
+                num->value = strdup(nb);
+                num->line = t.line;
+                num->col = t.col;
+                free(qual);
+                return num;
+            }
+        }
         // `<...>` is a type-argument list only when a real `>` closes it and
         // the next token is `(` (a call) or `{` (a struct literal). `a < b` stays a comparison.
         as_call = check_tok(p, T_LT) && type_arg_follow(p, T_LPAREN);
@@ -3072,6 +3202,8 @@ AstNode* parse_stmt(Parser* p) {
         expect(p, T_SEMI);
         return ret;
     }
+    if (peek_word(p, "const") && peek_tok_at(p, 1, T_IDENT) && peek_tok_at(p, 2, T_EQ))
+        return parse_const_decl(p, 1);
     if (match_tok(p, T_LET)) {
         int is_volatile = 0;
         if (peek_word(p, "volatile")) {
@@ -3079,6 +3211,7 @@ AstNode* parse_stmt(Parser* p) {
             is_volatile = 1;
         }
         Tok name = advance_tok(p);
+        const_clash(name);
         AstNode* let = ast_new(AST_LET);
         let->name = strndup(name.s, name.len);
         if (is_volatile) let->flags |= AF_VOLATILE;
@@ -3396,10 +3529,12 @@ AstNode* parse_stmt(Parser* p) {
 AstNode* parse_block(Parser* p) {
     expect(p, T_LBRACE);
     AstNode* block = ast_new(AST_BLOCK);
+    int consts_at_entry = g_nconsts;
     while (!check_tok(p, T_RBRACE) && !check_tok(p, T_EOF)) {
         ast_add(block, parse_stmt(p));
     }
     expect(p, T_RBRACE);
+    g_nconsts = consts_at_entry;   // function-level constants end with their block
     return block;
 }
 
@@ -3695,8 +3830,15 @@ TypeSpec parse_type(Parser* p) {
         }
         spec.base_type = pointee_name(inner);
         expect(p, T_SEMI);
-        Tok count = advance_tok(p);
-        spec.array_count = atoi(count.s);
+        {
+            Tok at = peek_tok(p);
+            long long n = parse_const_int(p, "an array length", 0);
+            if (n < 0 || n > INT_MAX) {
+                diag_error(at.line, at.col, "an array length must be from 0 to %d", INT_MAX);
+                n = 0;
+            }
+            spec.array_count = (int)n;
+        }
         expect(p, T_RBRACKET);
         return spec;
     }
@@ -3744,6 +3886,7 @@ AstNode* parse_global_var(Parser* p) {
         is_volatile = 1;
     }
     Tok name = advance_tok(p);
+    const_clash(name);
 
     AstNode* global_var = ast_new(AST_GLOBAL_VAR);
     global_var->name = strndup(name.s, name.len);
@@ -3798,6 +3941,7 @@ AstNode* parse_func(Parser* p) {
     expect(p, T_LPAREN);
     while (!check_tok(p, T_RPAREN)) {
         Tok param = advance_tok(p);
+        const_clash(param);
         AstNode* par = ast_new(AST_IDENT);
         par->name = strndup(param.s, param.len);
         ast_add(func, par);
@@ -4527,6 +4671,7 @@ static int pub_follows(Parser* p) {
     if (peek_tok_at(p, 1, T_FN) || peek_tok_at(p, 1, T_LET) || peek_tok_at(p, 1, T_STRUCT))
         return 1;
     if (peek_word_at(p, 1, "enum") && peek_tok_at(p, 2, T_IDENT)) return 1;
+    if (peek_word_at(p, 1, "const") && peek_tok_at(p, 2, T_IDENT)) return 1;
     if (peek_word_at(p, 1, "extern") || peek_word_at(p, 1, "data") ||
         peek_word_at(p, 1, "packed") || peek_word_at(p, 1, "interrupt") ||
         peek_word_at(p, 1, "syscall") || peek_word_at(p, 1, "bits") ||
@@ -4917,6 +5062,35 @@ static void set_fn_align(AstNode* fn, int align) {
         fn->align = align;
 }
 
+// `const NAME = expr;` at module level (local = 0) or in a block (local = 1).
+// Nothing reaches the tree; a statement gets an empty block.
+static AstNode* parse_const_decl(Parser* p, int local) {
+    Tok kw = advance_tok(p);
+    Tok name = advance_tok(p);
+    char* raw = strndup(name.s, name.len);
+    const char* key = local ? raw : link_sym(g_file_mod, raw);
+    int pub = g_item_pub;
+    long long v;
+    g_item_pub = 0;
+    expect(p, T_EQ);
+    v = parse_const_int(p, "the value of a constant", 0);
+    expect(p, T_SEMI);
+    if (const_find(raw, 0))
+        diag_error(name.line, name.col, "constant '%s' is already declared", raw);
+    else if (g_nconsts >= MAX_CONSTS)
+        diag_error(kw.line, kw.col, "too many constants (maximum %d)", MAX_CONSTS);
+    else {
+        ConstDef* cd = &g_consts[g_nconsts++];
+        cd->key = strdup(key);
+        cd->val = v;
+        cd->local = local;
+        cd->pub = pub;
+        cd->mod = g_file_mod;
+    }
+    free(raw);
+    return local ? ast_new(AST_BLOCK) : NULL;
+}
+
 static void parse_top_item(Parser* p, AstNode* prog) {
     int item_align = 0;
     g_item_pub = 0;
@@ -4939,6 +5113,12 @@ static void parse_top_item(Parser* p, AstNode* prog) {
     g_file_started = 1;
     if (peek_word(p, "align") && peek_tok_at(p, 1, T_LPAREN))
         item_align = parse_align_prefix(p);
+    if (peek_word(p, "const") && peek_tok_at(p, 1, T_IDENT) && peek_tok_at(p, 2, T_EQ)) {
+        if (item_align)
+            diag_error(peek_tok(p).line, peek_tok(p).col, "align() does not apply to a constant");
+        parse_const_decl(p, 0);
+        return;
+    }
     if (item_align && ((peek_word(p, "section") && peek_tok_at(p, 1, T_STR)) ||
                        (peek_word(p, "import") && peek_tok_at(p, 1, T_STR)) ||
                        (peek_word(p, "data") && peek_tok_at(p, 1, T_IDENT)) ||
@@ -20359,21 +20539,41 @@ static void put_outf(Codegen* cg, FILE* out, const char* fmt, ...) {
 // Same bytes the .data/.bss file pass has always written. `out` NULL appends
 // to the code buffer, which is where a named section other than .data/.bss
 // (and every section of a boot image) has to live.
-static void write_global_align(Codegen* cg, FILE* out, GlobalVar* gv) {
+// The alignment a global asks for, or 0 when it takes none. Ordinary scalars
+// and structs are already at most 8; emitting align 8 in front of every global
+// would pad flat images. align(N) and a type stricter than 8 (a cache line)
+// are the ones that move the counter.
+static int global_align_want(Codegen* cg, GlobalVar* gv) {
     int want = gv->align;
     StructType* st = NULL;
     if (!gv->is_pointer && gv->type_name)
         st = typetab_lookup(cg->types, gv->is_array && gv->elem_type ? gv->elem_type : gv->type_name);
     if (st && st->align > want) want = st->align;
-    // Ordinary scalars and structs are already at most 8. Emitting align 8
-    // in front of every global would pad flat images. align(N) and a type
-    // stricter than 8 (a cache line) are the ones that move the counter.
-    if (gv->align > 1 || want > 8) {
-        int bss = !gv->is_initialized && (!gv->section || !strcmp(gv->section, ".bss"));
-        // `align N` in a nobits section warns: the default fill initializes.
-        // resb is the uninitialized pad. A progbits section uses a zero byte.
-        if (want > 1) put_outf(cg, out, bss ? "align %d, resb 1\n" : "align %d, db 0\n", want);
+    return (gv->align > 1 || want > 8) && want > 1 ? want : 0;
+}
+
+static void write_global_align(Codegen* cg, FILE* out, GlobalVar* gv) {
+    int want = global_align_want(cg, gv);
+    int bss = !gv->is_initialized && (!gv->section || !strcmp(gv->section, ".bss"));
+    // `align N` in a nobits section warns: the default fill initializes.
+    // resb is the uninitialized pad. A progbits section uses a zero byte.
+    if (want) put_outf(cg, out, bss ? "align %d, resb 1\n" : "align %d, db 0\n", want);
+}
+
+// The strictest alignment among the globals the file pass puts in .data
+// (want_init) or in .bss (not). In a flat image the section itself must start on
+// that boundary, or `align N` inside it only aligns relative to the section.
+static int section_align_need(Codegen* cg, int want_init) {
+    int need = 0;
+    for (int i = 0; i < cg->global_symtab->count; i++) {
+        GlobalVar* gv = &cg->global_symtab->vars[i];
+        int w;
+        if (gv->is_extern || !gv->is_initialized != !want_init) continue;
+        if (gv->section && strcmp(gv->section, want_init ? ".data" : ".bss")) continue;
+        w = global_align_want(cg, gv);
+        if (w > need) need = w;
     }
+    return need;
 }
 
 static void write_global_def(Codegen* cg, FILE* out, GlobalVar* gv) {
@@ -20869,6 +21069,16 @@ void codegen(AstNode* ast, const char* file, StringTable* strtab, TypeTable* typ
         return;
     }
     if (g_flat_org) fprintf(cg.out, "bits 64\norg %s\n\n", g_flat_org);
+    if (g_flat_org) {
+        // nasm counts an alignment from the start of the image, which is the
+        // load address: a let is at a multiple of N only if the org is.
+        int need = section_align_need(&cg, 1);
+        int bneed = section_align_need(&cg, 0);
+        if (bneed > need) need = bneed;
+        if (need > 1 && strtoull(g_flat_org, NULL, 0) % (unsigned long long)need)
+            fprintf(stderr, COMPILER_BIN ": warning: align(%d) on a let, but --flat %s is not a multiple of %d: "
+                    "the let is aligned from the start of the image\n", need, g_flat_org, need);
+    }
     NamedSection* data_sec = section_find(".data");
     if (section_bin_addr(data_sec))
         fprintf(cg.out, "section .data vstart=0x%llx align=1\n", data_sec->addr);
@@ -20876,6 +21086,10 @@ void codegen(AstNode* ast, const char* file, StringTable* strtab, TypeTable* typ
         // The text pages are read-only and executable, the rest is not: the
         // data starts on the page after the text. An empty .data adds no bytes.
         fprintf(cg.out, "section .data align=4096\n");
+    else if (g_flat_org && section_align_need(&cg, 1) > 0)
+        // An align(N) let in a flat image: the section starts on that boundary
+        // (counted from the org), so the let inside it does too.
+        fprintf(cg.out, "section .data align=%d\n", section_align_need(&cg, 1));
     else
         fprintf(cg.out, "section .data\n");
     if (data_sec && data_sec->need_start && !data_sec->started) {
@@ -20916,6 +21130,8 @@ void codegen(AstNode* ast, const char* file, StringTable* strtab, TypeTable* typ
     if (g_flat_org) {
         if (section_bin_addr(bss_sec))
             fprintf(cg.out, "\nsection .bss vstart=0x%llx align=1\n__bss_start:\n", bss_sec->addr);
+        else if (section_align_need(&cg, 0) > 0)
+            fprintf(cg.out, "\nsection .bss align=%d\n__bss_start:\n", section_align_need(&cg, 0));
         else
             fprintf(cg.out, "\nsection .bss\n__bss_start:\n");
         has_bss = 1;
@@ -20991,6 +21207,8 @@ static void usage(FILE* o) {
         "  --checked           bounds-check []T and local arrays in --freestanding, --flat, and --boot\n"
         "  --flat <addr>       freestanding flat binary (nasm -f bin) loaded at <addr>;\n"
         "                      execution starts at fn _start, bss_start()/bss_end() give .bss bounds\n"
+        "  --axe1              with --flat 0x400000: the AXE1 file (16-byte header + image), one page,\n"
+        "                      at most 4080 bytes of image, _start inside the text\n"
         "  --axe2              with --flat 0x400000: the AXE2 file (32-byte header + image), data on\n"
         "                      the page after the text; 1 to 16 pages, _start inside the text\n"
         "  --sizes             with --flat: print text=, data=, bss= (bytes) on stdout\n"
@@ -21525,8 +21743,11 @@ static void check_traits(AstNode* prog, TypeTable* tt) {
 #define AXE2_PAGE 4096ULL
 #define AXE2_LIMIT 65536ULL
 #define AXE2_BASE 0x400000ULL
+#define AXE1_HEADER 16ULL
+#define AXE1_PAYLOAD_MAX (4096ULL - AXE1_HEADER)
 
-static int emit_flat_measured(const char* asm_path, const char* out_path, int axe2, int sizes) {
+static int emit_flat_measured(const char* asm_path, const char* out_path, int axe, int sizes) {
+    int axe1 = axe == 1, axe2 = axe == 2;
     const char* map_asm = "output.axe2.asm";
     const char* map_path = "output.axe2.map";
     const char* raw_path = "output.axe2.bin";
@@ -21535,6 +21756,7 @@ static int emit_flat_measured(const char* asm_path, const char* out_path, int ax
     unsigned char* raw = NULL;
     unsigned long long origin = 0, entry = 0;
     unsigned long long text_len = 0, data_len = 0, bss_len = 0, text_bytes = 0, mem_size = 0;
+    unsigned long long data_at = 0, bss_at = 0;
     int nsec = 0, nsym = 0, has_entry = 0, rc = 1;
     size_t raw_len = 0;
     char buf[8192];
@@ -21562,8 +21784,8 @@ static int emit_flat_measured(const char* asm_path, const char* out_path, int ax
         int d = flat_sec_index(secs, nsec, ".data");
         int b = flat_sec_index(secs, nsec, ".bss");
         if (t >= 0) text_len = secs[t].length;
-        if (d >= 0) data_len = secs[d].length;
-        if (b >= 0) bss_len = secs[b].length;
+        if (d >= 0) { data_len = secs[d].length; data_at = secs[d].vstart; }
+        if (b >= 0) { bss_len = secs[b].length; bss_at = secs[b].vstart; }
         text_bytes = (text_len + AXE2_PAGE - 1) & ~(AXE2_PAGE - 1);
         mem_size = (b >= 0 ? secs[b].vstart + secs[b].length : origin + text_len) - origin;
     }
@@ -21608,11 +21830,34 @@ static int emit_flat_measured(const char* asm_path, const char* out_path, int ax
             goto done;
         }
     }
+    if (axe1) {
+        if (text_len == 0) {
+            fprintf(stderr, COMPILER_BIN ": error: --axe1: the text is empty\n");
+            goto done;
+        }
+        if (raw_len > AXE1_PAYLOAD_MAX) {
+            fprintf(stderr, COMPILER_BIN ": error: --axe1: the image is %zu bytes; an AXE1 program is one page, at most %llu bytes after the 16-byte header (text %llu, data %llu); use --axe2 for more\n",
+                    raw_len, AXE1_PAYLOAD_MAX, text_len, data_len);
+            goto done;
+        }
+        if (mem_size > AXE2_PAGE) {
+            fprintf(stderr, COMPILER_BIN ": error: --axe1: the image with its bss is %llu bytes; an AXE1 program is one page of %llu bytes; use --axe2 for more\n",
+                    mem_size, AXE2_PAGE);
+            goto done;
+        }
+        if (!has_entry || entry < origin || entry >= origin + text_len) {
+            fprintf(stderr, COMPILER_BIN ": error: --axe1: the entry point _start (0x%llx) is outside the text (0x%llx to 0x%llx)\n",
+                    entry, origin, origin + text_len);
+            goto done;
+        }
+    }
     if (sizes) {
         printf("text=%llu\ndata=%llu\nbss=%llu\n", text_len, data_len, bss_len);
         if (axe2)
-            printf("text_bytes=%llu\nimage=%zu\nmemsize=%llu\nentry=0x%llx\n",
-                   text_bytes, raw_len, mem_size, entry);
+            printf("text_bytes=%llu\nimage=%zu\nmemsize=%llu\nentry=0x%llx\ndata_at=0x%llx\nbss_at=0x%llx\n",
+                   text_bytes, raw_len, mem_size, entry, data_at, bss_at);
+        else if (axe1)
+            printf("image=%zu\nmemsize=%llu\nentry=0x%llx\n", raw_len, mem_size, entry);
         fflush(stdout);
     }
     {
@@ -21632,6 +21877,12 @@ static int emit_flat_measured(const char* asm_path, const char* out_path, int ax
             wr_u32(hdr + 16, (unsigned)text_bytes);
             wr_u32(hdr + 20, (unsigned)mem_size);
             ok = fwrite(hdr, 1, sizeof hdr, of) == sizeof hdr;
+        } else if (axe1) {
+            memset(hdr, 0, 16);
+            memcpy(hdr, "AXE1", 4);
+            wr_u32(hdr + 4, (unsigned)raw_len);
+            wr_u64(hdr + 8, entry);
+            ok = fwrite(hdr, 1, 16, of) == 16;
         }
         if (ok && raw_len) ok = fwrite(raw, 1, raw_len, of) == raw_len;
         if (fclose(of) != 0 || !ok) {
@@ -21719,6 +21970,7 @@ int main(int argc, char** argv) {
         else if (!strcmp(a, "--checked")) g_checked = 1;
         else if (!strcmp(a, "--elf")) g_flat_elf = 1;
         else if (!strcmp(a, "--axe2")) g_axe2 = 1;
+        else if (!strcmp(a, "--axe1")) g_axe1 = 1;
         else if (!strcmp(a, "--sizes")) g_sizes = 1;
         else if (!strcmp(a, "--flat")) {
             if (i + 1 >= argc) { fprintf(stderr, COMPILER_BIN ": error: --flat needs a load address\n"); return 2; }
@@ -21754,17 +22006,22 @@ int main(int argc, char** argv) {
         fprintf(stderr, COMPILER_BIN ": error: -c cannot be combined with --flat or --boot\n");
         return 2;
     }
-    if ((g_axe2 || g_sizes) && (!g_flat_org || g_boot)) {
-        fprintf(stderr, COMPILER_BIN ": error: %s requires --flat%s\n", g_axe2 ? "--axe2" : "--sizes",
-                g_axe2 ? " 0x400000" : " (not --boot)");
+    if (g_axe1 && g_axe2) {
+        fprintf(stderr, COMPILER_BIN ": error: --axe1 and --axe2 cannot be combined\n");
         return 2;
     }
-    if ((g_axe2 || g_sizes) && g_flat_elf) {
-        fprintf(stderr, COMPILER_BIN ": error: %s cannot be combined with --elf\n", g_axe2 ? "--axe2" : "--sizes");
+    const char* axe_opt = g_axe1 ? "--axe1" : g_axe2 ? "--axe2" : NULL;
+    if ((axe_opt || g_sizes) && (!g_flat_org || g_boot)) {
+        fprintf(stderr, COMPILER_BIN ": error: %s requires --flat%s\n", axe_opt ? axe_opt : "--sizes",
+                axe_opt ? " 0x400000" : " (not --boot)");
         return 2;
     }
-    if (g_axe2 && strtoull(g_flat_org, NULL, 0) != AXE2_BASE) {
-        fprintf(stderr, COMPILER_BIN ": error: --axe2 images load at 0x400000; use --flat 0x400000 (got --flat %s)\n", g_flat_org);
+    if ((axe_opt || g_sizes) && g_flat_elf) {
+        fprintf(stderr, COMPILER_BIN ": error: %s cannot be combined with --elf\n", axe_opt ? axe_opt : "--sizes");
+        return 2;
+    }
+    if (axe_opt && strtoull(g_flat_org, NULL, 0) != AXE2_BASE) {
+        fprintf(stderr, COMPILER_BIN ": error: %s images load at 0x400000; use --flat 0x400000 (got --flat %s)\n", axe_opt, g_flat_org);
         return 2;
     }
     if (g_native && g_nasm) {
@@ -21826,13 +22083,14 @@ int main(int argc, char** argv) {
 
     // An AXE2 image is text, data and bss in that order. A named section or a
     // load address would move bytes the header does not describe.
-    if (g_axe2) {
+    if (axe_opt) {
         for (int i = 0; i < g_nnamed; i++) {
             const char* sn = g_named_secs[i].name;
             if (strcmp(sn, ".text") && strcmp(sn, ".data") && strcmp(sn, ".bss"))
-                diag_error(1, 1, "--axe2: section '%s' is not allowed; an AXE2 image is .text, .data and .bss", sn);
+                diag_error(1, 1, "%s: section '%s' is not allowed; an %s image is .text, .data and .bss",
+                           axe_opt, sn, g_axe1 ? "AXE1" : "AXE2");
             else if (g_named_secs[i].has_addr)
-                diag_error(1, 1, "--axe2: section '%s' cannot have a load address", sn);
+                diag_error(1, 1, "%s: section '%s' cannot have a load address", axe_opt, sn);
         }
     }
 
@@ -21851,16 +22109,16 @@ int main(int argc, char** argv) {
     if (only_asm) return 0;
     if (g_flat_org) {
         int rc = g_flat_elf ? emit_flat_elf(asm_out, exe_out)
-               : (g_axe2 || g_sizes) ? emit_flat_measured(asm_out, exe_out, g_axe2, g_sizes)
+               : (g_axe1 || g_axe2 || g_sizes) ? emit_flat_measured(asm_out, exe_out, g_axe1 ? 1 : g_axe2 ? 2 : 0, g_sizes)
                             : run_cmd("nasm -f bin '%s' -o '%s'", asm_out, exe_out);
         if (rc != 0) {
-            if (!g_flat_elf && !g_axe2 && !g_sizes)
+            if (!g_flat_elf && !g_axe1 && !g_axe2 && !g_sizes)
                 fprintf(stderr, COMPILER_BIN ": error: assembler (nasm) failed\n");
             return 1;
         }
         remove(asm_out);
         if (verbose) fprintf(stderr, "  wrote %s (%s, org %s)\n", exe_out,
-                             g_flat_elf ? "flat elf" : g_axe2 ? "axe2 image" : "flat binary", g_flat_org);
+                             g_flat_elf ? "flat elf" : g_axe1 ? "axe1 image" : g_axe2 ? "axe2 image" : "flat binary", g_flat_org);
         return 0;
     }
     if (via_mem) {

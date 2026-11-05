@@ -1,0 +1,18 @@
+// --flat 0x400000 --axe1: one page, 16-byte header. Initialized data follows
+// the text in the same page; the bss takes no bytes in the file.
+const SLOTS = 4;
+
+let magic: i64 = 0x1122334455667788;
+let slots: [u8; SLOTS];
+let hits: i64;
+
+fn bump(n: i64) -> i64 {
+    hits = hits + n;
+    return hits;
+}
+
+fn _start() {
+    slots[0] = 1;
+    bump(magic & 255);
+    while (1) { }
+}

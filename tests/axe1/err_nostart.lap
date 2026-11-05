@@ -1,0 +1,4 @@
+// No _start: there is no entry point to put in the header.
+fn helper() -> i64 {
+    return 1;
+}

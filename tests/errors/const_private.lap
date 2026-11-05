@@ -1,0 +1,5 @@
+import "parts/const_priv.lap";
+
+fn main() -> i64 {
+    return cfg::HIDDEN + cfg::SIZE;
+}

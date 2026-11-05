@@ -10,7 +10,7 @@
 
 A systems programming language with its own compiler, written in C with an x86-64 NASM back end. It produces Linux x86-64 ELF executables **with no libc and no runtime**, and it can also produce freestanding code for kernels and boot sectors. *Formerly Chronos.*
 
-Current version: **0.44.2** (`compiler/bootstrap-c/copihue.c`, `LANG_VERSION`). Release notes are in [CHANGELOG.md](CHANGELOG.md).
+Current version: **0.44.3** (`compiler/bootstrap-c/copihue.c`, `LANG_VERSION`). Release notes are in [CHANGELOG.md](CHANGELOG.md).
 
 > **Status: not production-ready.** It is a tested compiler for a small but real language. Memory safety is partial (checked slices and indexes, `own *T` moves) and there is no borrow checker: a `vec` slice can dangle after a push. Linux x86-64 only. The goal is a language that beats C++, Rust and OCaml; today it does not, and the numbers below say where it stands.
 
@@ -43,10 +43,10 @@ copihue hello.lap -o hello && ./hello
 ```
 
 ```
-copihue [-O0|-O1|-O2] [-o out] [-S] [-c] [--nasm | --native] [--freestanding | --flat ADDR [--axe2] [--sizes] | --boot] [-v] file.lap [more.lap ...]
+copihue [-O0|-O1|-O2] [-o out] [-S] [-c] [--nasm | --native] [--freestanding | --flat ADDR [--axe1 | --axe2] [--sizes] | --boot] [-v] file.lap [more.lap ...]
 ```
 
-`-S` writes NASM assembly only. `-c` writes one ELF64 relocatable object (link with `ld` or `gcc`). `--freestanding`, `--flat` and `--boot` are for kernels (see [docs/KERNELS.md](docs/KERNELS.md)). `--flat 0x400000 --axe2` writes the AXE2 file (32-byte header plus image, data on the page after the text) and `--sizes` prints the text, data and bss sizes; `align(4096) fn f() { ... }` puts a function on a page boundary (see [docs/REFERENCE.md](docs/REFERENCE.md), "AXE2 images" and "Alignment"). The value returned by `main` is the exit code.
+`-S` writes NASM assembly only. `-c` writes one ELF64 relocatable object (link with `ld` or `gcc`). `--freestanding`, `--flat` and `--boot` are for kernels (see [docs/KERNELS.md](docs/KERNELS.md)). `--flat 0x400000 --axe1` writes the one-page AXE1 file (16-byte header plus image) and `--flat 0x400000 --axe2` the AXE2 file (32-byte header plus image, data on the page after the text) and `--sizes` prints the text, data and bss sizes; `align(4096) fn f() { ... }` puts a function on a page boundary (see [docs/REFERENCE.md](docs/REFERENCE.md), "AXE2 images" and "Alignment"). The value returned by `main` is the exit code.
 
 **The compiler writes the ELF itself.** A hosted program, and a `-c` object, is assembled by the compiler's own assembler and ELF writer (`compiler/native`): no `nasm`, no `ld`, and no `output.asm` or `output.o` left on disk (the assembly goes from memory to the assembler; `-S` is still the way to see it). The executable carries `.symtab`, `.strtab` and `.shstrtab` with minimal section headers, so `readelf -S -s` and `objdump -d` show the functions and data labels by name. A program the built-in assembler does not take (`asm("...")`, a `naked`, `interrupt` or `syscall` function, a function with `bits 16` or `bits 32`) is built with `nasm` and `ld` instead, and the compiler says so on stderr: `copihue: warning: the built-in assembler does not take this program (line 5: asm("...") (user assembly)); falling back to nasm and ld`. `--freestanding -c` is `nasm`'s too, without a warning.
 
@@ -61,6 +61,7 @@ The `-c` object is `ET_REL` with `.text`, `.rodata`, `.data`, `.bss` (those it h
 Two levels of syntax. The **easy level** lets the compiler decide: an omitted parameter type or `->` is `i64`, `let x = e` infers the type, `vec T` grows by itself and frees at the end of the block, `own *T` is an owning pointer that moves on `return` or when passed on. The **explicit level** gives the developer the width of every integer, `*volatile T`, `align(N)`, `packed struct`, atomics, `naked` and `interrupt` functions, and named sections (`section "name" @ addr`). Design: [docs/DESIGN_TWO_LEVELS.md](docs/DESIGN_TWO_LEVELS.md).
 
 - Integers `i8` to `i64` and `u8` to `u64`, with arithmetic at the width of the type, and checked assignments (a wider value needs `as`).
+- Named integer constants: `const N = 8;` at module or function level, usable in `[T; N]` and in any expression, folded at compile time ([REFERENCE](docs/REFERENCE.md), Constants).
 - Slices `[]T` with bounds-checked indexing in hosted code, `for x in s`, `unsafe { }`, and `str` as a `[]u8` ([DESIGN_SLICES](docs/DESIGN_SLICES.md), [DESIGN_STRINGS](docs/DESIGN_STRINGS.md)).
 - Modules with `pub` and `name::item`, several files per command, `import`, and `-c` objects ([DESIGN_MODULES](docs/DESIGN_MODULES.md)).
 - Enums with data and exhaustive `match`, `Option<T>`, `Result<T, E>` and `?` ([DESIGN_ENUMS](docs/DESIGN_ENUMS.md), [DESIGN_ERRORS](docs/DESIGN_ERRORS.md)).

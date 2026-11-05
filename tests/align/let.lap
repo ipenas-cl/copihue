@@ -1,0 +1,20 @@
+// align(N) before a global let, in --flat 0x400000 (and --axe2): the let lands
+// on a multiple of N from the load address, with no hand-made padding array.
+// page sits on the first 4096 boundary after head; zbuf is the first thing in
+// the bss, so the bss starts on a page of its own.
+const SLOTS = 4;
+
+let head: i64 = 5;
+align(4096) let page: [i64; SLOTS] = [1, 2, 3, 4];
+let tail: i64 = 6;
+align(4096) let zbuf: [u8; 16];
+let mark: i64;
+
+fn _start() {
+    let a: *i64 = &head;
+    let b: *i64 = &page;
+    let c: *i64 = &tail;
+    let d: *u8 = &zbuf;
+    let e: *i64 = &mark;
+    while (1) { }
+}

@@ -1,4 +1,4 @@
-# Copihue Language Reference (v0.44.2)
+# Copihue Language Reference (v0.44.3)
 
 This document describes the language that `copihue` accepts today. Anything not listed here is not supported.
 Planned features are in the README roadmap.
@@ -364,6 +364,27 @@ is 56 bytes: `name` at 0, `size` at 16, `nblocks` at 20, `blocks` at 24. The sam
 
 `sizeof(FsEnt)` and `sizeof(e)` are that size. `sizeof(u32)` is 4. `offsetof(FsEnt, size)` is 16. Both are integers known at compile time. `sizeof()` takes one argument; anything it cannot size is `sizeof() has no size for this type`. `offsetof(Struct, field)` takes a struct name and a field name. `offsetof() unknown struct 'Nope'` and `struct 'FsEnt' has no field 'nope'` are the errors. A scalar local is still an 8-byte slot; `sizeof` of its type is the type width.
 
+### Constants
+
+```copihue
+const N = 8;                     // module level
+const WORDS = N * 2 + 1;         // an expression of constants
+let table: [i64; N];             // N is a length
+let wide: [i64; WORDS];
+
+fn fill() -> i64 {
+    const HALF = N / 2;          // function level: to the end of its block
+    let local: [i64; HALF];
+    return HALF;
+}
+```
+
+`const NAME = expr;` names an integer known at compile time. It is not a variable: it has no address, no storage and no type of its own (it is an untyped integer, like a literal). The parser folds it into a number at every use, so `-S` shows `mov rax, 8`, never the name, and `-O0` and `-O2` agree. The value is an expression of integer literals, character literals, other constants, parentheses, `+ - * / %`, `<< >>`, `& | ^`, unary `- ~ !`, comparisons and `&&` `||` (comparisons and logic give 0 or 1). Arithmetic wraps in 64 bits. Calls, variables, `sizeof` and casts are not constant expressions.
+
+Where it is accepted: wherever an expression is, and in an array length (`[T; N]`, `[T; N * 2 + 1]`, also `[u8; 0x10]`) in a `let`, a struct field or a cast. A constant is declared before it is used, in the file order (a module-level constant is not visible above its line). A constant at module level lasts to the end of the file; in a file with `module m;` it is `m`'s, and `pub const SIZE = 6;` makes it reachable as `m::SIZE` from other files (without `pub`: `constant 'm::SIZE' is private to its module`). A constant inside a function lasts to the end of its block. A flat file's constants are in the flat namespace, like its functions and globals.
+
+Errors, all at compile time: `the value of a constant must be a constant integer expression` (a variable or a call in the value), `the value of a constant divides by zero`, `constant 'N' is already declared` (same scope, or a function-level one that would hide a module-level one: there is no shadowing), `'N' is a constant; a variable cannot reuse its name` (a `let`, global or local, or a parameter with that name), `cannot assign to a constant` (`N = 3;`, `N += 1;`, `N++;`), `an array length must be a constant integer expression` and `an array length must be from 0 to 2147483647`, and `align() does not apply to a constant`. `const` is a contextual word: `const NAME =` starts a declaration, and a variable that happens to be called `const` still works. Tests: `tests/lang/const.lap` and `const_mod.lap` (expected output written by hand and **not run**: this Mac does not execute Linux ELF; the assembly was read, and the CI runs them), `tests/errors/const_bad.lap`, `const_private.lap` and `const_align.lap`.
+
 ### Alignment
 
 `align(N)` before `struct`, `packed struct`, a field, a global `let`, or a function sets that alignment. `N` is a power of two from 1 to 4096. Anything else is `align() takes a power of two from 1 to 4096`. `align(64) let` inside a function is `align() applies to a struct, a field, or a global`.
@@ -373,6 +394,18 @@ is 56 bytes: `name` at 0, `size` at 16, `nblocks` at 20, `blocks` at 24. The sam
 A field's `align(N)` replaces its natural alignment, including inside `packed struct`. The struct's alignment becomes the strictest of its fields and of `align(N)` on the struct itself. The size is rounded up to that alignment, so `sizeof` and `offsetof` count the padding. `struct Lines { align(64) a: u64, align(64) b: u64 }` is 128 bytes, with `b` at 64. `align(64) struct One { x: u64 }` is 64 bytes. A packed struct with no `align` stays contiguous.
 
 A global is placed with NASM `align` when it says `align(N)` or when its type's alignment is stricter than 8. In `.bss` the pad is `resb`. Two `align(64)` globals do not share a 64-byte line: their addresses differ by at least 64 and each is 0 mod 64. A local stays an 8-byte slot. `tests/lang/align64.lap` prints the offsets, the sizes, the gap, and the low 6 bits of the addresses.
+
+In a `--flat` image (and so `--axe1` and `--axe2`) nasm counts `align N` from the start of the section, so before 0.44.3 an `align(4096) let` was aligned only relative to its section, and the section started wherever the previous one ended (4 bytes granularity for `.data`, right after the data for `.bss`): the let was on a multiple of 4096 in memory only when its section happened to start on one. Now, when a `--flat` program has an `align(N)` global (or a type stricter than 8) in `.data` or in `.bss`, the compiler starts that section on an `N` boundary too (`section .data align=N`, `section .bss align=N`), counted from the load address. The first aligned global of a section is therefore on a multiple of `N`, and so is every later one that asks for it. No hand padding is needed to get the `.bss` on a page of its own: make an `align(4096) let` the first uninitialized global.
+
+```copihue
+let head: i64 = 5;                          // .data: 0x401000
+align(4096) let page: [i64; 4] = [1, 2, 3, 4]; // 0x402000
+let tail: i64 = 6;                          // 0x402020
+align(4096) let zbuf: [u8; 16];             // .bss starts here: 0x403000
+let mark: i64;                              // 0x403010
+```
+
+That is `tests/align/let.lap` built with `--flat 0x400000`. The cost of an aligned `.data` is in the file: the section starts at the first `N` boundary after the text, so the gap (here from `0x400055` to `0x401000`) is zero bytes in the image; `.bss` is nobits, so an aligned `.bss` costs nothing in the file. With `--axe2` the `.data` is already on the page after the text, and `--sizes` prints `data_at=` and `bss_at=` so the addresses can be read without running the image. With `--axe1` an `align(4096) let` in `.data` does not fit in the one page (`--axe1: the image is ...`). If the load address is not a multiple of `N` (`--flat 0x400800` with `align(4096)`) the build still works and says `warning: align(4096) on a let, but --flat 0x400800 is not a multiple of 4096: the let is aligned from the start of the image`. A global in a named section other than `.data` and `.bss` keeps the old behavior (`align N` inside that section). A hosted program and a `-c` object are unchanged: the linker places their sections on pages. The suite checks the `lea` immediates, the bytes of the data page, `--sizes`, and `-O0` against `-O2`; it does not run the image.
 
 `a = b` copies one struct value onto another of the same type. The copy is exactly the struct's size: whole qwords, then a byte tail, so a packed record does not spill into the next field or array element. It works for locals, globals, array elements (`table[i] = other`), and nested fields (`box.point = p`). A different struct type is a compile error. Nested scalar access (`box.point.x`) addresses that field, not the first eight bytes of the parent.
 
@@ -829,6 +862,31 @@ bss=72
 
 `text` is the whole `.text` section, `align` padding included. It is an error with `--boot` or without `--flat`, and it cannot be combined with `--elf`.
 
+### AXE1 images
+
+`copihue --flat 0x400000 --axe1 -o prog.axe prog.lap` writes the one-page file that `scripts/mkaxe.sh` of AtomicOS builds by hand: a 16-byte header, then the flat image unchanged. Like `--axe2` it needs `--flat 0x400000` exactly (`--axe1 images load at 0x400000`), is not combined with `--elf`, `--boot` or `--axe2`, and `-S` still stops at the assembly. All numbers are little-endian:
+
+| offset | size | field |
+|---|---|---|
+| 0 | 4 | magic `AXE1` (`41 58 45 31`) |
+| 4 | 4 | bytes of payload: the image after the header, 1 to 4080 |
+| 8 | 8 | entry point: the virtual address of `_start` (`0x400000` for a plain program) |
+
+The payload is byte for byte what `--flat 0x400000` writes: the text first, then the initialized data right behind it (no page of its own: AXE1 is one page, and the layout of `--axe2` is not applied), and the bss, which takes no bytes in the file. The program is loaded at `0x400000`; a one-page program finds its I/O at `0x401000`. The header has no memory size, so a bss relies on the loader giving a zeroed page, the same assumption a raw `--flat` image under `mkaxe.sh` already made; this is the loader's, not something the compiler checks.
+
+Limits: the payload at most 4080 bytes (4096 minus the header), and the image plus its bss at most one page of 4096 bytes. Over either is an error and no output file is written: `--axe1: the image is 4116 bytes; an AXE1 program is one page, at most 4080 bytes after the 16-byte header (text 4116, data 0); use --axe2 for more` (this is what an `align(4096) fn` or an `align(4096) let` produces), or `--axe1: the image with its bss is 5052 bytes; an AXE1 program is one page of 4096 bytes; ...`. `_start` must be inside the text and exist (`--flat needs a function named _start` otherwise), the text cannot be empty, and a named section other than `.text`, `.data` and `.bss`, or one with an `@` address, is refused as in `--axe2`. With `--sizes` the AXE1 build prints, after `text=`, `data=` and `bss=`, the payload, the memory size and the entry:
+
+```
+text=133
+data=8
+bss=12
+image=144
+memsize=156
+entry=0x400000
+```
+
+`tests/axe1/page.lap` is that program (a `const`-sized array, an initialized and an uninitialized global). The suite checks the header field by field, that the payload is the raw `--flat` image, the full file against `tests/expected/axe1/page.hex`, `-O0` against `-O2`, and the five error cases (`err_big`, `err_bss`, `err_entry`, `err_section`, `err_nostart`). Nothing here loads the file in LapageriaOS; that was not tried.
+
 ### AXE2 images
 
 `copihue --flat 0x400000 --axe2 -o prog.axe prog.lap` writes the file LapageriaOS loads: a 32-byte header, then the image. `--axe2` needs `--flat 0x400000` exactly (any other address is `--axe2 images load at 0x400000`), is not combined with `--elf` or `--boot`, and `-S` still stops at the assembly (with `.data` already on its own page). All numbers are little-endian:
@@ -854,7 +912,11 @@ text_bytes=8192
 image=8204
 memsize=8276
 entry=0x400000
+data_at=0x402000
+bss_at=0x40200c
 ```
+
+`data_at` and `bss_at` are the addresses where the `.data` and `.bss` sections start (the lines were added in 0.44.3; the first seven are unchanged). With them an `align(4096) let` can be checked without running the image (see Alignment).
 
 `tests/axe2/layout.lap` is that program: `_start` at byte 0, `second()` aligned to the second page, a `let` array and scalar in the data, and a bss. The suite checks each header field, the page positions, and the full file against `tests/expected/axe2/layout.hex`, and the four error cases (`err_pages`, `err_bss`, `err_entry`, `err_section`).
 

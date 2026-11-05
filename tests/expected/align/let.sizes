@@ -1,0 +1,9 @@
+text=85
+data=4136
+bss=24
+text_bytes=4096
+image=8232
+memsize=12312
+entry=0x400000
+data_at=0x401000
+bss_at=0x403000

@@ -1,0 +1,4 @@
+tests/errors/const_private.lap:4:12: error: constant 'cfg::HIDDEN' is private to its module
+      4 |     return cfg::HIDDEN + cfg::SIZE;
+        |            ^
+1 error, compilation failed
