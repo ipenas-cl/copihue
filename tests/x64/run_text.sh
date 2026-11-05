@@ -42,7 +42,7 @@ SKIP=" examples/simple_api_server.lap examples/realtime_api_monitor.lap tests/te
 if [ $# -gt 0 ]; then
   list=$*
 else
-  list=$(ls tests/*.lap tests/*/*.lap examples/*.lap examples/*/*.lap examples/*/*/*.lap | grep -v -e '^tests/errors/' -e '^tests/freestanding/' -e '^tests/flat/' -e '^tests/boot/' -e '^tests/usermode/' -e '^tests/ctx/' -e '^tests/native/')
+  list=$(ls tests/*.lap tests/*/*.lap examples/*.lap examples/*/*.lap examples/*/*/*.lap | grep -v -e '^tests/errors/' -e '^tests/freestanding/' -e '^tests/flat/' -e '^tests/boot/' -e '^tests/usermode/' -e '^tests/ctx/' -e '^tests/native/' -e '^tests/align/' -e '^tests/axe2/')
 fi
 
 # Address of a section in an executable (objdump -h: Idx Name Size VMA ...), or nothing.
