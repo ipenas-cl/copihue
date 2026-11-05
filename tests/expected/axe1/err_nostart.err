@@ -1,0 +1,1 @@
+tests/axe1/err_nostart.lap:1:1: error: --flat needs a function named _start (the entry point)

@@ -100,7 +100,7 @@ check() {  # $1 = name, $2 = golden file, $3 = actual file
   else fail=$((fail+1)); failed+=("$1"); echo "FAIL $1"; [ -f "$2" ] && diff "$2" "$3" | head -10; fi
 }
 
-for src in $(ls tests/*.lap tests/*/*.lap examples/*.lap examples/*/*.lap examples/*/*/*.lap | grep -v -e '^tests/errors/' -e '^tests/freestanding/' -e "^tests/flat/" -e "^tests/boot/" -e '^tests/usermode/' -e '^tests/ctx/' -e '^tests/native/' -e '^tests/align/' -e '^tests/axe2/' -e '^tests/tools/'); do
+for src in $(ls tests/*.lap tests/*/*.lap examples/*.lap examples/*/*.lap examples/*/*/*.lap | grep -v -e '^tests/errors/' -e '^tests/freestanding/' -e "^tests/flat/" -e "^tests/boot/" -e '^tests/usermode/' -e '^tests/ctx/' -e '^tests/native/' -e '^tests/align/' -e '^tests/axe1/' -e '^tests/axe2/' -e '^tests/tools/'); do
   case "$SKIP" in *" $src "*) continue ;; esac
   golden=tests/expected/${src%.lap}.out
   FELL=0
@@ -385,7 +385,56 @@ done <<'EOF'
 --sizes|--sizes requires --flat
 --sizes --boot|--sizes requires --flat
 --sizes --flat 0x10000 --elf|--sizes cannot be combined with --elf
+--axe1|--axe1 requires --flat 0x400000
+--axe1 --boot|--axe1 requires --flat 0x400000
+--axe1 --flat 0x10000|--axe1 images load at 0x400000
+--axe1 --flat 0x400000 --elf|--axe1 cannot be combined with --elf
+--axe1 --axe2 --flat 0x400000|--axe1 and --axe2 cannot be combined
 EOF
+
+# AXE1: --flat 0x400000 --axe1 writes a 16-byte header (magic, payload size, entry) and the image, one page at most.
+src=tests/axe1/page.lap
+if ! ( cd "$WORK" && rm -f output.axe2.* &&
+       "$CC" --flat 0x400000 --axe1 --sizes -o p0.axe "$ROOT/$src" >sizes0.txt 2>err.txt &&
+       "$CC" -O2 --flat 0x400000 --axe1 --sizes -o p2.axe "$ROOT/$src" >sizes2.txt 2>>err.txt &&
+       "$CC" --flat 0x400000 --axe1 -S -o p.asm "$ROOT/$src" 2>>err.txt &&
+       "$CC" --flat 0x400000 -o pp.bin "$ROOT/$src" 2>>err.txt ); then
+  fail=$((fail+1)); failed+=("$src (axe1)"); echo "FAIL $src (axe1):"; cat "$WORK/err.txt"
+elif ! cmp -s "$WORK/p0.axe" "$WORK/p2.axe" || ! cmp -s "$WORK/sizes0.txt" "$WORK/sizes2.txt"; then
+  fail=$((fail+1)); failed+=("$src (axe1 -O0 vs -O2)"); echo "FAIL $src: -O0 and -O2 differ"
+elif ls "$WORK"/output.axe2.* >/dev/null 2>&1; then
+  fail=$((fail+1)); failed+=("$src (axe1 temp files)"); echo "FAIL $src: output.axe2.* left behind"
+else
+  grep -vE '^\s*(;|$)' "$WORK/p.asm" | grep -v '^; Generated' > "$WORK/p.norm"
+  check "$src (assembly)" tests/expected/axe1/page.asm.txt "$WORK/p.norm"
+  check "$src (sizes)" tests/expected/axe1/page.sizes "$WORK/sizes0.txt"
+  hexall "$WORK/p0.axe" > "$WORK/p.hex"
+  check "$src (file)" tests/expected/axe1/page.hex "$WORK/p.hex"
+  # The header, field by field: magic, payload bytes, entry. The payload is the flat image, unchanged.
+  bad=""
+  [ "$(hexat "$WORK/p0.axe" 0 4)" = 41584531 ] || bad="$bad magic;"
+  [ "$(hexat "$WORK/p0.axe" 4 4)" = "$(le32 144)" ] || bad="$bad payload bytes;"
+  [ "$(hexat "$WORK/p0.axe" 8 8)" = 0000400000000000 ] || bad="$bad entry;"
+  [ "$(hexat "$WORK/p0.axe" 16 1)" = 55 ] || bad="$bad _start at payload byte 0;"
+  [ "$(hexat "$WORK/p0.axe" 152 8)" = 8877665544332211 ] || bad="$bad data after the text;"
+  [ "$(wc -c < "$WORK/p0.axe" | tr -d ' ')" = 160 ] || bad="$bad file size;"
+  [ "$(tail -c 144 "$WORK/p0.axe" | od -An -v -tx1 | tr -d ' \n')" = "$(od -An -v -tx1 "$WORK/pp.bin" | tr -d ' \n')" ] || bad="$bad payload is not the flat image;"
+  if [ -n "$bad" ]; then fail=$((fail+1)); failed+=("$src (axe1 header)"); echo "FAIL $src (axe1):$bad"; else pass=$((pass+1)); fi
+fi
+# More than one page, a bss that does not fit, the entry outside the text, no _start, a section the header
+# cannot describe: an error, nothing on stdout, no output file, no temporary file.
+for n in big bss entry section nostart; do
+  src=tests/axe1/err_$n.lap
+  rm -f "$WORK/e.axe" "$WORK"/output.axe2.*
+  if ( cd "$WORK" && "$CC" --flat 0x400000 --axe1 --sizes -o e.axe "$ROOT/$src" >out.txt 2>err.txt ); then
+    fail=$((fail+1)); failed+=("$src"); echo "FAIL $src: compiled but should have failed"; continue
+  fi
+  if [ -s "$WORK/out.txt" ] || [ -e "$WORK/e.axe" ] || ls "$WORK"/output.axe2.* >/dev/null 2>&1; then
+    fail=$((fail+1)); failed+=("$src (left files)"); echo "FAIL $src: wrote stdout, the output file or a temporary file"; continue
+  fi
+  grep 'error:' "$WORK/err.txt" | sed "s|$ROOT/||g" > "$WORK/err.norm"
+  check "$src" "tests/expected/axe1/err_$n.err" "$WORK/err.norm"
+done
 
 # QEMU: align(4096) fn page() sits at 0x9000 in a kernel loaded at 0x8000 (tests/usermode/boot.lap reads it),
 # runs, and reads the initialized data after the text. COM1 must show PAGE.

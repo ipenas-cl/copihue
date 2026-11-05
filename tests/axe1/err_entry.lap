@@ -1,0 +1,10 @@
+// _start is in .data, after the text: the entry point is not in the text.
+fn helper() -> i64 {
+    return 1;
+}
+
+section ".data" {
+    fn _start() {
+        while (1) { }
+    }
+}

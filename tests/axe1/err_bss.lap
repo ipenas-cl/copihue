@@ -1,0 +1,7 @@
+// The image is small but the bss does not fit in the one page.
+let big: [u8; 5000];
+
+fn _start() {
+    big[0] = 1;
+    while (1) { }
+}

@@ -829,6 +829,31 @@ bss=72
 
 `text` is the whole `.text` section, `align` padding included. It is an error with `--boot` or without `--flat`, and it cannot be combined with `--elf`.
 
+### AXE1 images
+
+`copihue --flat 0x400000 --axe1 -o prog.axe prog.lap` writes the one-page file that `scripts/mkaxe.sh` of AtomicOS builds by hand: a 16-byte header, then the flat image unchanged. Like `--axe2` it needs `--flat 0x400000` exactly (`--axe1 images load at 0x400000`), is not combined with `--elf`, `--boot` or `--axe2`, and `-S` still stops at the assembly. All numbers are little-endian:
+
+| offset | size | field |
+|---|---|---|
+| 0 | 4 | magic `AXE1` (`41 58 45 31`) |
+| 4 | 4 | bytes of payload: the image after the header, 1 to 4080 |
+| 8 | 8 | entry point: the virtual address of `_start` (`0x400000` for a plain program) |
+
+The payload is byte for byte what `--flat 0x400000` writes: the text first, then the initialized data right behind it (no page of its own: AXE1 is one page, and the layout of `--axe2` is not applied), and the bss, which takes no bytes in the file. The program is loaded at `0x400000`; a one-page program finds its I/O at `0x401000`. The header has no memory size, so a bss relies on the loader giving a zeroed page, the same assumption a raw `--flat` image under `mkaxe.sh` already made; this is the loader's, not something the compiler checks.
+
+Limits: the payload at most 4080 bytes (4096 minus the header), and the image plus its bss at most one page of 4096 bytes. Over either is an error and no output file is written: `--axe1: the image is 4116 bytes; an AXE1 program is one page, at most 4080 bytes after the 16-byte header (text 4116, data 0); use --axe2 for more` (this is what an `align(4096) fn` or an `align(4096) let` produces), or `--axe1: the image with its bss is 5052 bytes; an AXE1 program is one page of 4096 bytes; ...`. `_start` must be inside the text and exist (`--flat needs a function named _start` otherwise), the text cannot be empty, and a named section other than `.text`, `.data` and `.bss`, or one with an `@` address, is refused as in `--axe2`. With `--sizes` the AXE1 build prints, after `text=`, `data=` and `bss=`, the payload, the memory size and the entry:
+
+```
+text=133
+data=8
+bss=12
+image=144
+memsize=156
+entry=0x400000
+```
+
+`tests/axe1/page.lap` is that program (a `const`-sized array, an initialized and an uninitialized global). The suite checks the header field by field, that the payload is the raw `--flat` image, the full file against `tests/expected/axe1/page.hex`, `-O0` against `-O2`, and the five error cases (`err_big`, `err_bss`, `err_entry`, `err_section`, `err_nostart`). Nothing here loads the file in LapageriaOS; that was not tried.
+
 ### AXE2 images
 
 `copihue --flat 0x400000 --axe2 -o prog.axe prog.lap` writes the file LapageriaOS loads: a 32-byte header, then the image. `--axe2` needs `--flat 0x400000` exactly (any other address is `--axe2 images load at 0x400000`), is not combined with `--elf` or `--boot`, and `-S` still stops at the assembly (with `.data` already on its own page). All numbers are little-endian:
@@ -854,7 +879,11 @@ text_bytes=8192
 image=8204
 memsize=8276
 entry=0x400000
+data_at=0x402000
+bss_at=0x40200c
 ```
+
+`data_at` and `bss_at` are the addresses where the `.data` and `.bss` sections start (the lines were added in 0.44.3; the first seven are unchanged). With them an `align(4096) let` can be checked without running the image (see Alignment).
 
 `tests/axe2/layout.lap` is that program: `_start` at byte 0, `second()` aligned to the second page, a `let` array and scalar in the data, and a bss. The suite checks each header field, the page positions, and the full file against `tests/expected/axe2/layout.hex`, and the four error cases (`err_pages`, `err_bss`, `err_entry`, `err_section`).
 

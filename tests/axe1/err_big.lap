@@ -1,0 +1,8 @@
+// An AXE1 program is one page: second() starts on the second page, so the image is over 4080 bytes.
+fn _start() {
+    while (1) { }
+}
+
+align(4096) fn second() -> i64 {
+    return 2;
+}

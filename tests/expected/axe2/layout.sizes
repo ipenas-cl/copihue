@@ -5,3 +5,5 @@ text_bytes=8192
 image=8204
 memsize=8276
 entry=0x400000
+data_at=0x402000
+bss_at=0x40200c

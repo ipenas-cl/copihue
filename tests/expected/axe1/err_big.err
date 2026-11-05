@@ -1,0 +1,1 @@
+copihue: error: --axe1: the image is 4116 bytes; an AXE1 program is one page, at most 4080 bytes after the 16-byte header (text 4116, data 0); use --axe2 for more

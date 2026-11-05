@@ -1,0 +1,61 @@
+bits 64
+org 0x400000
+section .data
+magic: dq 1234605616436508552
+section .bss
+__bss_start:
+slots: resb 4
+hits: resq 1
+section .bss
+__bss_end:
+section .text
+_start:
+    push rbp
+    mov rbp, rsp
+    sub rsp, __frame__start
+    mov rax, 1
+    push rax
+    mov rax, 0
+    lea rbx, [slots]
+    add rbx, rax
+    pop rax
+    mov byte [rbx], al
+    mov rax, [magic]
+    push rax
+    mov rax, 255
+    mov rbx, rax
+    pop rax
+    and rax, rbx
+    push rax
+    pop rdi
+    call bump
+.L0:
+    mov rax, 1
+    test rax, rax
+    jz .L1
+.L2:
+    jmp .L0
+.L1:
+    xor rax, rax
+    leave
+    ret
+__frame__start equ 64
+bump:
+    push rbp
+    mov rbp, rsp
+    sub rsp, __frame_bump
+    mov [rbp-8], rdi
+    mov rax, [hits]
+    push rax
+    mov rax, [rbp-8]
+    mov rbx, rax
+    pop rax
+    add rax, rbx
+    mov [hits], rax
+    mov rax, [hits]
+    leave
+    ret
+    xor rax, rax
+    leave
+    ret
+__frame_bump equ 80

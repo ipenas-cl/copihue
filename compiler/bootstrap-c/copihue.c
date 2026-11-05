@@ -38,6 +38,7 @@ int g_checked = 0;                   // --checked: slice and local-array traps i
 const char* g_flat_org = NULL;       // --flat ADDR: freestanding flat binary loaded at ADDR, entry _start
 int g_flat_elf = 0;                  // --elf with --flat: ELF64 ET_EXEC of that image, named sections kept
 int g_axe2 = 0;                      // --axe2 with --flat 0x400000: AXE2 header + image, data on its own page
+int g_axe1 = 0;                      // --axe1 with --flat 0x400000: AXE1 header + one-page image
 int g_sizes = 0;                     // --sizes with --flat: text, data and bss sizes on stdout
 int g_boot = 0;                      // --boot: flat sector at 0x7C00, padded to 512, signature 0xAA55
 int g_reloc = 0;                     // -c: one ELF64 relocatable object (nasm -f elf64), no ld
@@ -21170,6 +21171,8 @@ static void usage(FILE* o) {
         "  --checked           bounds-check []T and local arrays in --freestanding, --flat, and --boot\n"
         "  --flat <addr>       freestanding flat binary (nasm -f bin) loaded at <addr>;\n"
         "                      execution starts at fn _start, bss_start()/bss_end() give .bss bounds\n"
+        "  --axe1              with --flat 0x400000: the AXE1 file (16-byte header + image), one page,\n"
+        "                      at most 4080 bytes of image, _start inside the text\n"
         "  --axe2              with --flat 0x400000: the AXE2 file (32-byte header + image), data on\n"
         "                      the page after the text; 1 to 16 pages, _start inside the text\n"
         "  --sizes             with --flat: print text=, data=, bss= (bytes) on stdout\n"
@@ -21704,8 +21707,11 @@ static void check_traits(AstNode* prog, TypeTable* tt) {
 #define AXE2_PAGE 4096ULL
 #define AXE2_LIMIT 65536ULL
 #define AXE2_BASE 0x400000ULL
+#define AXE1_HEADER 16ULL
+#define AXE1_PAYLOAD_MAX (4096ULL - AXE1_HEADER)
 
-static int emit_flat_measured(const char* asm_path, const char* out_path, int axe2, int sizes) {
+static int emit_flat_measured(const char* asm_path, const char* out_path, int axe, int sizes) {
+    int axe1 = axe == 1, axe2 = axe == 2;
     const char* map_asm = "output.axe2.asm";
     const char* map_path = "output.axe2.map";
     const char* raw_path = "output.axe2.bin";
@@ -21714,6 +21720,7 @@ static int emit_flat_measured(const char* asm_path, const char* out_path, int ax
     unsigned char* raw = NULL;
     unsigned long long origin = 0, entry = 0;
     unsigned long long text_len = 0, data_len = 0, bss_len = 0, text_bytes = 0, mem_size = 0;
+    unsigned long long data_at = 0, bss_at = 0;
     int nsec = 0, nsym = 0, has_entry = 0, rc = 1;
     size_t raw_len = 0;
     char buf[8192];
@@ -21741,8 +21748,8 @@ static int emit_flat_measured(const char* asm_path, const char* out_path, int ax
         int d = flat_sec_index(secs, nsec, ".data");
         int b = flat_sec_index(secs, nsec, ".bss");
         if (t >= 0) text_len = secs[t].length;
-        if (d >= 0) data_len = secs[d].length;
-        if (b >= 0) bss_len = secs[b].length;
+        if (d >= 0) { data_len = secs[d].length; data_at = secs[d].vstart; }
+        if (b >= 0) { bss_len = secs[b].length; bss_at = secs[b].vstart; }
         text_bytes = (text_len + AXE2_PAGE - 1) & ~(AXE2_PAGE - 1);
         mem_size = (b >= 0 ? secs[b].vstart + secs[b].length : origin + text_len) - origin;
     }
@@ -21787,11 +21794,34 @@ static int emit_flat_measured(const char* asm_path, const char* out_path, int ax
             goto done;
         }
     }
+    if (axe1) {
+        if (text_len == 0) {
+            fprintf(stderr, COMPILER_BIN ": error: --axe1: the text is empty\n");
+            goto done;
+        }
+        if (raw_len > AXE1_PAYLOAD_MAX) {
+            fprintf(stderr, COMPILER_BIN ": error: --axe1: the image is %zu bytes; an AXE1 program is one page, at most %llu bytes after the 16-byte header (text %llu, data %llu); use --axe2 for more\n",
+                    raw_len, AXE1_PAYLOAD_MAX, text_len, data_len);
+            goto done;
+        }
+        if (mem_size > AXE2_PAGE) {
+            fprintf(stderr, COMPILER_BIN ": error: --axe1: the image with its bss is %llu bytes; an AXE1 program is one page of %llu bytes; use --axe2 for more\n",
+                    mem_size, AXE2_PAGE);
+            goto done;
+        }
+        if (!has_entry || entry < origin || entry >= origin + text_len) {
+            fprintf(stderr, COMPILER_BIN ": error: --axe1: the entry point _start (0x%llx) is outside the text (0x%llx to 0x%llx)\n",
+                    entry, origin, origin + text_len);
+            goto done;
+        }
+    }
     if (sizes) {
         printf("text=%llu\ndata=%llu\nbss=%llu\n", text_len, data_len, bss_len);
         if (axe2)
-            printf("text_bytes=%llu\nimage=%zu\nmemsize=%llu\nentry=0x%llx\n",
-                   text_bytes, raw_len, mem_size, entry);
+            printf("text_bytes=%llu\nimage=%zu\nmemsize=%llu\nentry=0x%llx\ndata_at=0x%llx\nbss_at=0x%llx\n",
+                   text_bytes, raw_len, mem_size, entry, data_at, bss_at);
+        else if (axe1)
+            printf("image=%zu\nmemsize=%llu\nentry=0x%llx\n", raw_len, mem_size, entry);
         fflush(stdout);
     }
     {
@@ -21811,6 +21841,12 @@ static int emit_flat_measured(const char* asm_path, const char* out_path, int ax
             wr_u32(hdr + 16, (unsigned)text_bytes);
             wr_u32(hdr + 20, (unsigned)mem_size);
             ok = fwrite(hdr, 1, sizeof hdr, of) == sizeof hdr;
+        } else if (axe1) {
+            memset(hdr, 0, 16);
+            memcpy(hdr, "AXE1", 4);
+            wr_u32(hdr + 4, (unsigned)raw_len);
+            wr_u64(hdr + 8, entry);
+            ok = fwrite(hdr, 1, 16, of) == 16;
         }
         if (ok && raw_len) ok = fwrite(raw, 1, raw_len, of) == raw_len;
         if (fclose(of) != 0 || !ok) {
@@ -21898,6 +21934,7 @@ int main(int argc, char** argv) {
         else if (!strcmp(a, "--checked")) g_checked = 1;
         else if (!strcmp(a, "--elf")) g_flat_elf = 1;
         else if (!strcmp(a, "--axe2")) g_axe2 = 1;
+        else if (!strcmp(a, "--axe1")) g_axe1 = 1;
         else if (!strcmp(a, "--sizes")) g_sizes = 1;
         else if (!strcmp(a, "--flat")) {
             if (i + 1 >= argc) { fprintf(stderr, COMPILER_BIN ": error: --flat needs a load address\n"); return 2; }
@@ -21933,17 +21970,22 @@ int main(int argc, char** argv) {
         fprintf(stderr, COMPILER_BIN ": error: -c cannot be combined with --flat or --boot\n");
         return 2;
     }
-    if ((g_axe2 || g_sizes) && (!g_flat_org || g_boot)) {
-        fprintf(stderr, COMPILER_BIN ": error: %s requires --flat%s\n", g_axe2 ? "--axe2" : "--sizes",
-                g_axe2 ? " 0x400000" : " (not --boot)");
+    if (g_axe1 && g_axe2) {
+        fprintf(stderr, COMPILER_BIN ": error: --axe1 and --axe2 cannot be combined\n");
         return 2;
     }
-    if ((g_axe2 || g_sizes) && g_flat_elf) {
-        fprintf(stderr, COMPILER_BIN ": error: %s cannot be combined with --elf\n", g_axe2 ? "--axe2" : "--sizes");
+    const char* axe_opt = g_axe1 ? "--axe1" : g_axe2 ? "--axe2" : NULL;
+    if ((axe_opt || g_sizes) && (!g_flat_org || g_boot)) {
+        fprintf(stderr, COMPILER_BIN ": error: %s requires --flat%s\n", axe_opt ? axe_opt : "--sizes",
+                axe_opt ? " 0x400000" : " (not --boot)");
         return 2;
     }
-    if (g_axe2 && strtoull(g_flat_org, NULL, 0) != AXE2_BASE) {
-        fprintf(stderr, COMPILER_BIN ": error: --axe2 images load at 0x400000; use --flat 0x400000 (got --flat %s)\n", g_flat_org);
+    if ((axe_opt || g_sizes) && g_flat_elf) {
+        fprintf(stderr, COMPILER_BIN ": error: %s cannot be combined with --elf\n", axe_opt ? axe_opt : "--sizes");
+        return 2;
+    }
+    if (axe_opt && strtoull(g_flat_org, NULL, 0) != AXE2_BASE) {
+        fprintf(stderr, COMPILER_BIN ": error: %s images load at 0x400000; use --flat 0x400000 (got --flat %s)\n", axe_opt, g_flat_org);
         return 2;
     }
     if (g_native && g_nasm) {
@@ -22005,13 +22047,14 @@ int main(int argc, char** argv) {
 
     // An AXE2 image is text, data and bss in that order. A named section or a
     // load address would move bytes the header does not describe.
-    if (g_axe2) {
+    if (axe_opt) {
         for (int i = 0; i < g_nnamed; i++) {
             const char* sn = g_named_secs[i].name;
             if (strcmp(sn, ".text") && strcmp(sn, ".data") && strcmp(sn, ".bss"))
-                diag_error(1, 1, "--axe2: section '%s' is not allowed; an AXE2 image is .text, .data and .bss", sn);
+                diag_error(1, 1, "%s: section '%s' is not allowed; an %s image is .text, .data and .bss",
+                           axe_opt, sn, g_axe1 ? "AXE1" : "AXE2");
             else if (g_named_secs[i].has_addr)
-                diag_error(1, 1, "--axe2: section '%s' cannot have a load address", sn);
+                diag_error(1, 1, "%s: section '%s' cannot have a load address", axe_opt, sn);
         }
     }
 
@@ -22030,16 +22073,16 @@ int main(int argc, char** argv) {
     if (only_asm) return 0;
     if (g_flat_org) {
         int rc = g_flat_elf ? emit_flat_elf(asm_out, exe_out)
-               : (g_axe2 || g_sizes) ? emit_flat_measured(asm_out, exe_out, g_axe2, g_sizes)
+               : (g_axe1 || g_axe2 || g_sizes) ? emit_flat_measured(asm_out, exe_out, g_axe1 ? 1 : g_axe2 ? 2 : 0, g_sizes)
                             : run_cmd("nasm -f bin '%s' -o '%s'", asm_out, exe_out);
         if (rc != 0) {
-            if (!g_flat_elf && !g_axe2 && !g_sizes)
+            if (!g_flat_elf && !g_axe1 && !g_axe2 && !g_sizes)
                 fprintf(stderr, COMPILER_BIN ": error: assembler (nasm) failed\n");
             return 1;
         }
         remove(asm_out);
         if (verbose) fprintf(stderr, "  wrote %s (%s, org %s)\n", exe_out,
-                             g_flat_elf ? "flat elf" : g_axe2 ? "axe2 image" : "flat binary", g_flat_org);
+                             g_flat_elf ? "flat elf" : g_axe1 ? "axe1 image" : g_axe2 ? "axe2 image" : "flat binary", g_flat_org);
         return 0;
     }
     if (via_mem) {
