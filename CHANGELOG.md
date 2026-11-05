@@ -2,6 +2,11 @@
 
 Todos los cambios importantes del proyecto.
 
+## [Sin versión]
+
+### Docs
+- `docs/DESIGN_SELFHOST.md`: plan de autoalojamiento (Copihue se compila a sí mismo, sin C, `nasm` ni `ld` en el camino hosted), aprobado el 2026-11-05. Fases S0 (inventario, corpus de igualdad y huecos del lenguaje) a S5 (C solo como arranque). Enlazado desde el README. Sin cambios en el compilador.
+
 ## [0.44.7] - 2026-11-05
 
 Pedido de LapageriaOS / AtomicOS (HR-01 punto 5, HR-02 puntos 2 y 4): un stub UEFI compilado con `--flat 0x1000` lo carga el firmware en una dirección que no se conoce al compilar. Las globales y las cadenas de Copihue se direccionaban en absoluto (`mov rax, str_0`, `[g]` con la dirección de `org`), así que el stub no podía usarlas y alcanzaba `data` con `lea reg, [rel etiqueta]` desde `asm()`, con un `naked fn` de una línea por símbolo.
