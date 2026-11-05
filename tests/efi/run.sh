@@ -108,7 +108,7 @@ else
     if objdump -p "$WORK/app-O0.efi" 2>/dev/null | grep -q '^Magic.*PE32+'; then
       op=$(objdump -p "$WORK/app-O0.efi" 2>/dev/null)
       printf '%s\n' "$op" | grep -q '^Subsystem.*(EFI application)' || bad "objdump does not read Subsystem 10 (EFI application)"
-      printf '%s\n' "$op" | grep -q '^AddressOfEntryPoint *0*1000$' || bad "objdump does not read AddressOfEntryPoint 0x1000"
+      printf '%s\n' "$op" | grep -qE '^AddressOfEntryPoint[[:space:]]+0*1000$' || bad "objdump does not read AddressOfEntryPoint 0x1000"
       objdump -h "$WORK/app-O0.efi" 2>/dev/null | awk '$2==".text"||$2==".data"||$2==".bss"||$2==".reloc"{n++} END{exit n==4?0:1}' || bad "objdump -h does not list .text .data .bss .reloc"
       ok
     else
