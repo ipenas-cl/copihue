@@ -13,8 +13,8 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y nasm curl qemu-system-x86
       - name: Build the compiler (warnings are errors)
         run: make CFLAGS="-O2 -Wall -Werror"
-      - name: Regression suite (the default build, where the compiler writes the ELF itself, no nasm and no ld for programs and -c objects; all tests and examples at -O0 and -O2, error messages, freestanding, -c linked with ld)
-        run: make test
+      - name: Regression suite (the default build, where the compiler writes the ELF itself, no nasm and no ld for programs and -c objects; all tests and examples at -O0 and -O2, error messages, freestanding, align(N) fn, the --flat --axe2 header and layout, the QEMU kernel that runs a function at 0x9000, the --flat --elf layout read by a C checker, -c linked with ld; CMP_REQUIRE=1 makes a missing qemu an error)
+        run: CMP_REQUIRE=1 make test
       - name: Regression suite with --nasm (the old path, nasm and ld; -O0 and -O2, same golden files)
         run: make nasm-test
       - name: x86-64 encoder x64.c, assembler asm.c, ELF writer elf.c and -c objects (labels, jumps, call, sections, executable structure; objects compared with nasm's, linked with ld and gcc, run, read by readelf and objdump) against nasm -f elf64

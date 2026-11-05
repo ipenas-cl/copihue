@@ -16,7 +16,7 @@
 
 // ==== NAMING (single place to change when the language is renamed) ====
 #define LANG_NAME     "Copihue"
-#define LANG_VERSION  "0.44.0"
+#define LANG_VERSION  "0.44.1"
 #define COMPILER_BIN  "copihue"
 #define SRC_EXT       ".lap"   /* Lapageria rosea, the copihue */
 #define OLD_SRC_EXT   ".cph"   /* v0.18.x extension, still accepted with a warning */
@@ -37,6 +37,8 @@ int g_freestanding = 0;              // --freestanding: no OS, no syscalls, no _
 int g_checked = 0;                   // --checked: slice and local-array traps in freestanding/flat/boot
 const char* g_flat_org = NULL;       // --flat ADDR: freestanding flat binary loaded at ADDR, entry _start
 int g_flat_elf = 0;                  // --elf with --flat: ELF64 ET_EXEC of that image, named sections kept
+int g_axe2 = 0;                      // --axe2 with --flat 0x400000: AXE2 header + image, data on its own page
+int g_sizes = 0;                     // --sizes with --flat: text, data and bss sizes on stdout
 int g_boot = 0;                      // --boot: flat sector at 0x7C00, padded to 512, signature 0xAA55
 int g_reloc = 0;                     // -c: one ELF64 relocatable object (nasm -f elf64), no ld
 int g_native = 0;                    // --native: the default back end (compiler/native) without the fallback to nasm and ld
