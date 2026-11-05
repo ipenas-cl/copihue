@@ -1,0 +1,5 @@
+// flags: --pe-efi
+// The firmware passes two arguments to the entry: the image handle and the system table.
+ms64 fn _start(image: i64, st: *u64, extra: i64) -> i64 {
+    return 0;
+}

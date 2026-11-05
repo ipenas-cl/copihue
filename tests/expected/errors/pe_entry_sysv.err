@@ -1,0 +1,4 @@
+tests/errors/pe_entry_sysv.lap:3:4: error: --pe-efi _start must be 'ms64 fn' (the firmware calls it with the Microsoft x64 convention): ms64 fn _start(image: i64, st: *u64) -> i64
+      3 | fn _start() {
+        |    ^
+1 error, compilation failed

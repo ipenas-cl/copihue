@@ -10,10 +10,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: sudo apt-get update && sudo apt-get install -y nasm curl qemu-system-x86
+      - run: sudo apt-get update && sudo apt-get install -y nasm curl qemu-system-x86 ovmf
       - name: Build the compiler (warnings are errors)
         run: make CFLAGS="-O2 -Wall -Werror"
-      - name: Regression suite (the default build, where the compiler writes the ELF itself, no nasm and no ld for programs and -c objects; all tests and examples at -O0 and -O2, error messages, freestanding, align(N) fn, the --flat --axe2 header and layout, the QEMU kernel that runs a function at 0x9000, the --flat --elf layout read by a C checker, -c linked with ld; CMP_REQUIRE=1 makes a missing qemu an error)
+      - name: Regression suite (the default build, where the compiler writes the ELF itself, no nasm and no ld for programs and -c objects; all tests and examples at -O0 and -O2, error messages, freestanding, align(N) fn, the --flat --axe2 header and layout, the QEMU kernel that runs a function at 0x9000, the --pe-efi PE32+ file read by a C checker and run by QEMU with OVMF (package ovmf at /usr/share/OVMF), the --flat --elf layout read by a C checker, -c linked with ld; CMP_REQUIRE=1 makes a missing qemu an error)
         run: CMP_REQUIRE=1 make test
       - name: Regression suite with --nasm (the old path, nasm and ld; -O0 and -O2, same golden files)
         run: make nasm-test

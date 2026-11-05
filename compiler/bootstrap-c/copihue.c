@@ -16,7 +16,7 @@
 
 // ==== NAMING (single place to change when the language is renamed) ====
 #define LANG_NAME     "Copihue"
-#define LANG_VERSION  "0.44.7"
+#define LANG_VERSION  "0.44.8"
 #define COMPILER_BIN  "copihue"
 #define SRC_EXT       ".lap"   /* Lapageria rosea, the copihue */
 #define OLD_SRC_EXT   ".cph"   /* v0.18.x extension, still accepted with a warning */
@@ -43,6 +43,7 @@ int g_axe1 = 0;                      // --axe1 with --flat 0x400000: AXE1 header
 int g_sizes = 0;                     // --sizes with --flat: text, data and bss sizes on stdout
 int g_boot = 0;                      // --boot: flat sector at 0x7C00, padded to 512, signature 0xAA55
 int g_pic = 0;                       // --pic with --flat: every access to a symbol of the image is relative to RIP
+int g_pe_efi = 0;                    // --pe-efi: a PE32+ EFI application (subsystem 10); implies --flat 0x1000 --pic
 static void pic_note_asm(const char* file, int line, int col, const char* instr);
 int g_reloc = 0;                     // -c: one ELF64 relocatable object (nasm -f elf64), no ld
 int g_native = 0;                    // --native: the default back end (compiler/native) without the fallback to nasm and ld
@@ -20327,7 +20328,8 @@ void gen_func(Codegen* cg, AstNode* n) {
     if (bits == 16 || bits == 32) native_note(n->line, "a function with bits 16 or bits 32");
     if (g_pic && (bits == 16 || bits == 32))
         diag_error(n->line, n->col, "--pic: a bits %d function cannot be position independent "
-                   "(there is no RIP-relative addressing outside 64-bit mode); build it without --pic", bits);
+                   "(there is no RIP-relative addressing outside 64-bit mode); %s", bits,
+                   g_pe_efi ? "a PE image is 64-bit code only" : "build it without --pic");
     // A pointer parameter is the CPU frame, not the integer error code.
     // error_code as the first field selects the #PF/#GP layout.
     int frame_ptr = 0;
@@ -21798,7 +21800,16 @@ void codegen(AstNode* ast, const char* file, StringTable* strtab, TypeTable* typ
                 !strcmp(ast->children[i]->name, "_start")) flat_entry = ast->children[i];
         if (!flat_entry) diag_error(1, 1, g_boot
             ? "--boot needs a function named _start (the entry point)"
+            : g_pe_efi ? "--pe-efi needs a function named _start (the entry point): ms64 fn _start(image: i64, st: *u64) -> i64"
             : "--flat needs a function named _start (the entry point)");
+        else if (g_pe_efi && (!(flat_entry->flags & AF_MS64) || flat_entry->bits || (flat_entry->flags & AF_NAKED)))
+            diag_error(flat_entry->line, flat_entry->col,
+                       "--pe-efi _start must be 'ms64 fn' (the firmware calls it with the Microsoft x64 convention): "
+                       "ms64 fn _start(image: i64, st: *u64) -> i64");
+        else if (g_pe_efi && flat_entry->child_count - 1 > 2)
+            diag_error(flat_entry->line, flat_entry->col,
+                       "--pe-efi _start takes at most two parameters (the image handle and the system table); it has %d",
+                       flat_entry->child_count - 1);
         else if (g_boot && (flat_entry->bits != 16 || !(flat_entry->flags & AF_NAKED)))
             diag_error(flat_entry->line, flat_entry->col,
                        "--boot _start must be 'bits 16 naked fn' (real mode, no 64-bit frame)");
@@ -21907,9 +21918,10 @@ void codegen(AstNode* ast, const char* file, StringTable* strtab, TypeTable* typ
     NamedSection* data_sec = section_find(".data");
     if (section_bin_addr(data_sec))
         fprintf(cg.out, "section .data vstart=0x%llx align=1\n", data_sec->addr);
-    else if (g_axe2)
+    else if (g_axe2 || g_pe_efi)
         // The text pages are read-only and executable, the rest is not: the
         // data starts on the page after the text. An empty .data adds no bytes.
+        // A PE image gives .text and .data different section flags, so the same.
         fprintf(cg.out, "section .data align=4096\n");
     else if (g_flat_org && section_align_need(&cg, 1) > 0)
         // An align(N) let in a flat image: the section starts on that boundary
@@ -21955,6 +21967,8 @@ void codegen(AstNode* ast, const char* file, StringTable* strtab, TypeTable* typ
     if (g_flat_org) {
         if (section_bin_addr(bss_sec))
             fprintf(cg.out, "\nsection .bss vstart=0x%llx align=1\n__bss_start:\n", bss_sec->addr);
+        else if (g_pe_efi)
+            fprintf(cg.out, "\nsection .bss align=4096\n__bss_start:\n");   // its own page, as .data
         else if (section_align_need(&cg, 0) > 0)
             fprintf(cg.out, "\nsection .bss align=%d\n__bss_start:\n", section_align_need(&cg, 0));
         else
@@ -22332,6 +22346,10 @@ static void usage(FILE* o) {
         "  --pic               with --flat: the code reaches globals, strings, data blocks and\n"
         "                      functions relative to RIP, so the image runs at any address;\n"
         "                      refused with --boot, --elf, --axe1 and --axe2\n"
+        "  --pe-efi            a PE32+ UEFI application (subsystem 10, x86-64) written by the compiler:\n"
+        "                      implies --flat 0x1000 --pic; the entry is ms64 fn _start(image, st);\n"
+        "                      default output a.efi; refused with --flat, --boot, --elf, --axe1,\n"
+        "                      --axe2, -c, --sizes and --native\n"
         "  --elf               with --flat: ELF64 executable of that image (not a raw binary);\n"
         "                      named sections keep their load address; several files are one image\n"
         "  --boot              boot sector: --flat 0x7C00, pad to 512 bytes, signature 0xAA55;\n"
@@ -23027,6 +23045,227 @@ done:
     return rc;
 }
 
+// --pe-efi. The same flat image as --flat 0x1000 --pic (nasm -f bin with [map all]), wrapped in
+// the PE32+ file an x86-64 UEFI firmware loads as an application. The image is laid out as the
+// firmware will map it: .text at RVA 0x1000, .data and .bss each on their own 4096-byte page after
+// it (the assembly asks for that), so every RVA is the address nasm used for the same label and the
+// RIP-relative code reaches its data wherever the firmware puts the image. The file packs the raw
+// data on 512-byte boundaries (FileAlignment 0x200, SectionAlignment 0x1000).
+// A .reloc section holds one empty block (page 0x1000, no entries), so a firmware that wants the
+// base relocation directory finds a valid one and relocates nothing: the code has no absolute address.
+#define PE_FILE_ALIGN 0x200ULL
+#define PE_SEC_ALIGN 0x1000ULL
+#define PE_IMAGE_BASE 0x140000000ULL
+#define PE_HEADERS 0x200ULL
+
+typedef struct {
+    char name[9];
+    unsigned long long rva, vsize, raw_off, raw_size;
+    unsigned flags;
+} PeSec;
+
+static int emit_pe_efi(const char* asm_path, const char* out_path) {
+    const char* map_asm = "output.pe.asm";
+    const char* map_path = "output.pe.map";
+    const char* raw_path = "output.pe.bin";
+    FlatSec* secs = calloc(FLAT_MAX_SEC, sizeof *secs);
+    FlatSym* syms = calloc(FLAT_MAX_SYM, sizeof *syms);
+    unsigned char* raw = NULL;
+    unsigned char* file = NULL;
+    unsigned long long origin = 0, entry = 0;
+    unsigned long long text_len = 0, data_len = 0, bss_len = 0, data_rva = 0, bss_rva = 0, data_off = 0;
+    int nsec = 0, nsym = 0, has_entry = 0, rc = 1, npe = 0;
+    size_t raw_len = 0, file_len = 0;
+    char buf[8192];
+    PeSec pe[4];
+    FILE* in = fopen(asm_path, "r");
+    FILE* out = fopen(map_asm, "w");
+    FILE* rf;
+
+    if (!secs || !syms || !in || !out) {
+        fprintf(stderr, COMPILER_BIN ": error: cannot prepare the PE map assembly\n");
+        if (in) fclose(in);
+        if (out) fclose(out);
+        goto done;
+    }
+    while (fgets(buf, sizeof buf, in)) fputs(buf, out);
+    fprintf(out, "\n[map all %s]\n", map_path);
+    fclose(in);
+    fclose(out);
+    if (run_cmd("nasm -f bin '%s' -o '%s'", map_asm, raw_path) != 0) {
+        fprintf(stderr, COMPILER_BIN ": error: assembler (nasm) failed\n");
+        goto done;
+    }
+    if (!flat_parse_map(map_path, &origin, secs, &nsec, syms, &nsym)) goto done;
+    {
+        int t = flat_sec_index(secs, nsec, ".text");
+        int d = flat_sec_index(secs, nsec, ".data");
+        int b = flat_sec_index(secs, nsec, ".bss");
+        if (t >= 0) text_len = secs[t].length;
+        if (d >= 0 && secs[d].length) { data_len = secs[d].length; data_rva = secs[d].vstart; data_off = secs[d].start - origin; }
+        if (b >= 0 && secs[b].length) { bss_len = secs[b].length; bss_rva = secs[b].vstart; }
+        if (t >= 0 && secs[t].vstart != PE_SEC_ALIGN) {
+            fprintf(stderr, COMPILER_BIN ": error: --pe-efi: internal: the text is at 0x%llx, not at RVA 0x1000\n", secs[t].vstart);
+            goto done;
+        }
+    }
+    if (text_len == 0) {
+        fprintf(stderr, COMPILER_BIN ": error: --pe-efi: the text is empty\n");
+        goto done;
+    }
+    for (int i = 0; i < nsym; i++)
+        if (!strcmp(syms[i].name, "_start")) { entry = syms[i].virt; has_entry = 1; }
+    if (!has_entry || entry < origin || entry >= origin + text_len) {
+        fprintf(stderr, COMPILER_BIN ": error: --pe-efi: the entry point _start (0x%llx) is outside the text (0x%llx to 0x%llx)\n",
+                entry, origin, origin + text_len);
+        goto done;
+    }
+    rf = fopen(raw_path, "rb");
+    if (!rf) {
+        fprintf(stderr, COMPILER_BIN ": error: the image was not written\n");
+        goto done;
+    }
+    fseek(rf, 0, SEEK_END);
+    raw_len = (size_t)ftell(rf);
+    fseek(rf, 0, SEEK_SET);
+    raw = malloc(raw_len ? raw_len : 1);
+    if (!raw || (raw_len && fread(raw, 1, raw_len, rf) != raw_len)) {
+        fclose(rf);
+        fprintf(stderr, COMPILER_BIN ": error: cannot read the image\n");
+        goto done;
+    }
+    fclose(rf);
+    if (raw_len < text_len || (data_len && data_off + data_len > raw_len)) {
+        fprintf(stderr, COMPILER_BIN ": error: --pe-efi: internal: the image (%zu bytes) does not hold its sections\n", raw_len);
+        goto done;
+    }
+
+    // The sections, in RVA order. Raw data is packed after the headers.
+    {
+        unsigned long long raw_at = PE_HEADERS, end = PE_SEC_ALIGN + text_len;
+        memset(pe, 0, sizeof pe);
+        snprintf(pe[npe].name, sizeof pe[npe].name, ".text");
+        pe[npe].rva = PE_SEC_ALIGN; pe[npe].vsize = text_len;
+        pe[npe].raw_off = raw_at; pe[npe].raw_size = flat_align((size_t)text_len, PE_FILE_ALIGN);
+        pe[npe].flags = 0x60000020;                           // code, execute, read
+        raw_at += pe[npe].raw_size; npe++;
+        if (data_len) {
+            if (data_rva % PE_SEC_ALIGN || data_rva < end) {
+                fprintf(stderr, COMPILER_BIN ": error: --pe-efi: internal: .data is at 0x%llx, not on a page after the text\n", data_rva);
+                goto done;
+            }
+            snprintf(pe[npe].name, sizeof pe[npe].name, ".data");
+            pe[npe].rva = data_rva; pe[npe].vsize = data_len;
+            pe[npe].raw_off = raw_at; pe[npe].raw_size = flat_align((size_t)data_len, PE_FILE_ALIGN);
+            pe[npe].flags = 0xC0000040;                       // initialized data, read, write
+            raw_at += pe[npe].raw_size; end = data_rva + data_len; npe++;
+        }
+        if (bss_len) {
+            if (bss_rva % PE_SEC_ALIGN || bss_rva < end) {
+                fprintf(stderr, COMPILER_BIN ": error: --pe-efi: internal: .bss is at 0x%llx, not on a page after the data\n", bss_rva);
+                goto done;
+            }
+            snprintf(pe[npe].name, sizeof pe[npe].name, ".bss");
+            pe[npe].rva = bss_rva; pe[npe].vsize = bss_len;
+            pe[npe].flags = 0xC0000080;                       // uninitialized data, read, write
+            end = bss_rva + bss_len; npe++;
+        }
+        snprintf(pe[npe].name, sizeof pe[npe].name, ".reloc");
+        pe[npe].rva = flat_align((size_t)end, PE_SEC_ALIGN); pe[npe].vsize = 12;
+        pe[npe].raw_off = raw_at; pe[npe].raw_size = PE_FILE_ALIGN;
+        pe[npe].flags = 0x42000040;                           // initialized data, discardable, read
+        raw_at += pe[npe].raw_size; npe++;
+
+        file_len = (size_t)raw_at;
+        file = calloc(1, file_len);
+        if (!file) goto done;
+        {
+            unsigned char* h = file;
+            unsigned char* opt;
+            unsigned long long size_code = pe[0].raw_size, size_init = 0, size_uninit = 0;
+            size_t hdr = 0x40 + 4 + 20 + 240 + 40 * (size_t)npe;
+            for (int i = 1; i < npe; i++) {
+                if (pe[i].flags == 0xC0000080) size_uninit += flat_align((size_t)pe[i].vsize, PE_SEC_ALIGN);
+                else size_init += pe[i].raw_size;
+            }
+            if (hdr > PE_HEADERS) {
+                fprintf(stderr, COMPILER_BIN ": error: --pe-efi: internal: the headers do not fit in 0x200 bytes\n");
+                goto done;
+            }
+            // DOS header: only the signature and e_lfanew are read by a PE loader.
+            h[0] = 'M'; h[1] = 'Z';
+            wr_u32(h + 0x3C, 0x40);
+            // PE signature and COFF header
+            memcpy(h + 0x40, "PE\0\0", 4);
+            wr_u16(h + 0x44, 0x8664);                          // Machine: x86-64
+            wr_u16(h + 0x46, (unsigned)npe);                   // NumberOfSections
+            wr_u32(h + 0x48, 0);                               // TimeDateStamp: 0, so the file is reproducible
+            wr_u16(h + 0x54, 240);                             // SizeOfOptionalHeader
+            wr_u16(h + 0x56, 0x0022);                          // EXECUTABLE_IMAGE | LARGE_ADDRESS_AWARE
+            opt = h + 0x58;
+            wr_u16(opt + 0, 0x20B);                            // PE32+
+            opt[2] = 0; opt[3] = 1;                            // linker version
+            wr_u32(opt + 4, (unsigned)size_code);
+            wr_u32(opt + 8, (unsigned)size_init);
+            wr_u32(opt + 12, (unsigned)size_uninit);
+            wr_u32(opt + 16, (unsigned)entry);                 // AddressOfEntryPoint (an RVA: org is 0x1000)
+            wr_u32(opt + 20, (unsigned)PE_SEC_ALIGN);          // BaseOfCode
+            wr_u64(opt + 24, PE_IMAGE_BASE);
+            wr_u32(opt + 32, (unsigned)PE_SEC_ALIGN);
+            wr_u32(opt + 36, (unsigned)PE_FILE_ALIGN);
+            wr_u16(opt + 48, 0);                               // subsystem version
+            wr_u32(opt + 56, (unsigned)flat_align((size_t)(pe[npe - 1].rva + pe[npe - 1].vsize), PE_SEC_ALIGN));
+            wr_u32(opt + 60, (unsigned)PE_HEADERS);
+            wr_u16(opt + 68, 10);                              // Subsystem: EFI application
+            wr_u16(opt + 70, 0x0100);                          // NX_COMPAT: data is not executable
+            wr_u64(opt + 72, 0x100000);                        // stack reserve
+            wr_u64(opt + 80, 0x1000);                          // stack commit
+            wr_u32(opt + 108, 16);                             // NumberOfRvaAndSizes
+            wr_u32(opt + 112 + 5 * 8, (unsigned)pe[npe - 1].rva);   // directory 5: base relocations
+            wr_u32(opt + 112 + 5 * 8 + 4, 12);
+            for (int i = 0; i < npe; i++) {
+                unsigned char* s = h + 0x58 + 240 + 40 * (size_t)i;
+                memcpy(s, pe[i].name, strlen(pe[i].name));
+                wr_u32(s + 8, (unsigned)pe[i].vsize);
+                wr_u32(s + 12, (unsigned)pe[i].rva);
+                wr_u32(s + 16, (unsigned)pe[i].raw_size);
+                wr_u32(s + 20, pe[i].raw_size ? (unsigned)pe[i].raw_off : 0);
+                wr_u32(s + 36, pe[i].flags);
+            }
+            memcpy(file + pe[0].raw_off, raw, (size_t)text_len);
+            if (data_len) memcpy(file + pe[1].raw_off, raw + data_off, (size_t)data_len);
+            {   // .reloc: one block for the page of the text, with two ABSOLUTE (no-op) entries
+                unsigned char* r = file + pe[npe - 1].raw_off;
+                wr_u32(r, (unsigned)PE_SEC_ALIGN);
+                wr_u32(r + 4, 12);
+            }
+        }
+    }
+    {
+        FILE* of = fopen(out_path, "wb");
+        int ok;
+        if (!of) {
+            fprintf(stderr, COMPILER_BIN ": error: cannot write %s\n", out_path);
+            goto done;
+        }
+        ok = fwrite(file, 1, file_len, of) == file_len;
+        if (fclose(of) != 0 || !ok) {
+            fprintf(stderr, COMPILER_BIN ": error: cannot write %s\n", out_path);
+            goto done;
+        }
+    }
+    rc = 0;
+done:
+    free(secs);
+    free(syms);
+    free(raw);
+    free(file);
+    remove(map_asm);
+    remove(map_path);
+    remove(raw_path);
+    return rc;
+}
+
 // --native. The encoder, the assembler and the ELF writer in compiler/native
 // are plain C files; they are included here so that one `gcc copihue.c` still
 // builds the compiler.
@@ -23099,6 +23338,7 @@ int main(int argc, char** argv) {
         else if (!strcmp(a, "--axe1")) g_axe1 = 1;
         else if (!strcmp(a, "--sizes")) g_sizes = 1;
         else if (!strcmp(a, "--pic")) g_pic = 1;
+        else if (!strcmp(a, "--pe-efi")) g_pe_efi = 1;
         else if (!strcmp(a, "--flat")) {
             if (i + 1 >= argc) { fprintf(stderr, COMPILER_BIN ": error: --flat needs a load address\n"); return 2; }
             if (g_boot) { fprintf(stderr, COMPILER_BIN ": error: --flat and --boot cannot be combined\n"); return 2; }
@@ -23120,6 +23360,23 @@ int main(int argc, char** argv) {
             fprintf(stderr, COMPILER_BIN ": error: too many input files (maximum %d)\n", MAX_LOADED);
             return 2;
         } else inputs[ninputs++] = a;
+    }
+    if (g_pe_efi) {
+        // A PE32+ EFI application is its own layout: --flat 0x1000 (the RVA of the text) --pic, and a
+        // header the compiler writes. Every option that names another layout or another format is refused.
+        const char* bad = g_boot ? "--boot: a boot sector is not a PE file"
+            : g_flat_org ? "--flat: --pe-efi sets the layout itself (the text is at RVA 0x1000 and the image is position independent)"
+            : g_flat_elf ? "--elf: the output is a PE file, not an ELF file"
+            : g_axe1 ? "--axe1: the output is a PE file, not an AXE1 file"
+            : g_axe2 ? "--axe2: the output is a PE file, not an AXE2 file"
+            : g_reloc ? "-c: the output is a PE executable, not a relocatable object"
+            : g_sizes ? "--sizes: that is for --flat images"
+            : g_native ? "--native: that is the hosted ELF back end" : NULL;
+        if (bad) {
+            fprintf(stderr, COMPILER_BIN ": error: --pe-efi cannot be combined with %s\n", bad);
+            return 2;
+        }
+        g_flat_org = "0x1000"; g_pic = 1; g_freestanding = 1;
     }
     if (g_flat_elf && g_boot) {
         fprintf(stderr, COMPILER_BIN ": error: --elf cannot be combined with --boot\n");
@@ -23187,7 +23444,7 @@ int main(int argc, char** argv) {
     }
 
     const char* asm_out = only_asm ? (out ? out : "output.asm") : "output.asm";
-    const char* exe_out = out ? out : (g_reloc ? "output.o" : "a.out");
+    const char* exe_out = out ? out : (g_reloc ? "output.o" : g_pe_efi ? "a.efi" : "a.out");
 
     if (verbose) {
         fprintf(stderr, LANG_NAME " " LANG_VERSION ": compiling %s (-O%d%s)\n",
@@ -23231,6 +23488,15 @@ int main(int argc, char** argv) {
         }
     }
 
+    // A PE image is text, then data and bss in one section; the header describes no other.
+    if (g_pe_efi) {
+        for (int i = 0; i < g_nnamed; i++) {
+            const char* sn = g_named_secs[i].name;
+            if (strcmp(sn, ".text") && strcmp(sn, ".data") && strcmp(sn, ".bss"))
+                diag_error(1, 1, "--pe-efi: section '%s' is not allowed; a PE image is .text, .data and .bss", sn);
+        }
+    }
+
     // A hosted program or a -c object goes to the built-in assembler straight
     // from memory; -S, --flat, --boot and --nasm go through the file.
     int via_mem = !only_asm && !g_flat_org && !g_nasm;
@@ -23246,17 +23512,18 @@ int main(int argc, char** argv) {
     if (verbose && !g_flat_org && !via_mem) fprintf(stderr, "  wrote %s\n", asm_out);
     if (only_asm) return 0;
     if (g_flat_org) {
-        int rc = g_flat_elf ? emit_flat_elf(asm_out, exe_out)
+        int rc = g_pe_efi ? emit_pe_efi(asm_out, exe_out)
+               : g_flat_elf ? emit_flat_elf(asm_out, exe_out)
                : (g_axe1 || g_axe2 || g_sizes) ? emit_flat_measured(asm_out, exe_out, g_axe1 ? 1 : g_axe2 ? 2 : 0, g_sizes)
                             : run_cmd("nasm -f bin '%s' -o '%s'", asm_out, exe_out);
         if (rc != 0) {
-            if (!g_flat_elf && !g_axe1 && !g_axe2 && !g_sizes)
+            if (!g_flat_elf && !g_axe1 && !g_axe2 && !g_sizes && !g_pe_efi)
                 fprintf(stderr, COMPILER_BIN ": error: assembler (nasm) failed\n");
             return 1;
         }
         remove(asm_out);
         if (verbose) fprintf(stderr, "  wrote %s (%s, org %s)\n", exe_out,
-                             g_flat_elf ? "flat elf" : g_axe1 ? "axe1 image" : g_axe2 ? "axe2 image" : "flat binary", g_flat_org);
+                             g_pe_efi ? "pe32+ efi application" : g_flat_elf ? "flat elf" : g_axe1 ? "axe1 image" : g_axe2 ? "axe2 image" : "flat binary", g_flat_org);
         return 0;
     }
     if (via_mem) {

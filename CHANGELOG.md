@@ -2,6 +2,35 @@
 
 Todos los cambios importantes del proyecto.
 
+## [0.44.8] - 2026-11-05
+
+Pedido de LapageriaOS / AtomicOS (HR-01 punto 3): no había forma de producir una aplicación EFI. El stub UEFI se compilaba con `--flat 0x1000` y un `src/uefi/pe.asm` (nasm) le ponía las cabeceras. Desde 0.44.7 `--flat --pic` deja una imagen sin direcciones absolutas y desde 0.44.6 existe `ms64 fn`; con eso el compilador puede escribir el archivo PE32+ él mismo.
+
+### Added
+- **`--pe-efi`**: el compilador escribe un PE32+ que un firmware UEFI x86-64 carga como aplicación: Machine 0x8664, magia 0x20B, Subsystem 10 (EFI application), ImageBase 0x140000000, SectionAlignment 0x1000, FileAlignment 0x200, SizeOfHeaders 0x200, NX_COMPAT, marca de tiempo 0 (dos compilaciones dan los mismos bytes), sin tabla de símbolos. Secciones, cada una en su página y solo las que tienen contenido: `.text` (RVA 0x1000, lectura y ejecución), `.data` (cadenas, globales con valor, bloques `data`; lectura y escritura), `.bss` (solo tamaño en el archivo; lectura y escritura) y `.reloc` (lectura, descartable). Ninguna sección es escribible y ejecutable a la vez.
+- **Decisiones**: `--pe-efi` implica `--freestanding`, `--pic` y una imagen plana con el texto en el RVA 0x1000 (`--flat 0x1000 --pic`), así que valen todas las reglas y mensajes de `--pic`. La entrada es `ms64 fn _start(image: i64, st: *u64) -> i64` (`rcx` el manejador de la imagen, `rdx` la tabla del sistema; el resultado es el EFI_STATUS; hasta dos parámetros); el thunk de la `ms64 fn` es lo primero de `.text`, así que AddressOfEntryPoint es 0x1000. El directorio `.reloc` es un bloque válido para la página del texto sin entradas que muevan nada (dos de relleno, 12 bytes): el código no tiene direcciones absolutas. La salida por omisión es `a.efi`.
+- **`.data` y `.bss` en su propia página** (`section .data align=4096`, `section .bss align=4096`) solo con `--pe-efi`; el RVA de cada etiqueta es la dirección que nasm usó, por eso el código RIP-relativo llega a sus datos donde el firmware ponga la imagen.
+- **Errores con archivo:línea:columna y sin archivo de salida**: sin `_start` (`--pe-efi needs a function named _start ...`), `_start` que no es `ms64 fn` (o es `naked`/`bits`), `_start` con más de dos parámetros, una sección con nombre que no sea `.text`, `.data` o `.bss`, y todo lo que `--pic` ya rechaza (global con la dirección de una cadena, dirección absoluta en un bloque `data`, etiqueta como inmediato en `asm()`, función `bits 16/32`); en ese último caso el mensaje de `bits` dice "a PE image is 64-bit code only" en vez de "build it without --pic".
+- **Combinaciones**: `--pe-efi` con `--flat`, `--boot`, `--elf`, `--axe1`, `--axe2`, `-c`, `--sizes` o `--native` es error (`--pe-efi cannot be combined with ...`, salida 2). `-S` vale: escribe el asm de la imagen (`org 0x1000`, `default rel`, `.data` y `.bss` en páginas), no un PE. `--nasm` se acepta y no cambia nada (el PE se arma igual, con `nasm -f bin`; los bytes son los mismos); `-O0`, `-O1`, `-O2`, `--checked` y varios archivos en una imagen valen.
+
+### Tests
+- `tests/efi/app.lap`: aplicación que valida la tabla del sistema (firma `IBI SYST`, manejador distinto de cero), lee y escribe un global de `.data`, uno de `.bss`, un arreglo, una cadena y un bloque `data` de UTF-16, escribe `EFI-CONOUT` con `ConOut->OutputString` (llamada por una variable `ms64 fn`), escribe `EFI-OK` (o `EFI-FAIL` y el número de la primera comprobación que falla) por COM1 y termina con `RuntimeServices->ResetSystem(EfiResetShutdown)`.
+- `tests/efi/pecheck.c`: verificador en C que lee solo el archivo (firmas MZ y PE, Machine, magia, subsistema, alineaciones, tamaños, tabla de secciones en orden y sin solaparse, datos crudos dentro del archivo, ninguna sección escribible y ejecutable, entrada dentro de una sección de código, directorio de reubicaciones con bloques que suman). `objdump -p` de esta máquina (lee `coff-x86-64`) se usa como segunda opinión cuando lee PE32+.
+- `tests/efi/run.sh` (sección 4k de `tests/run_tests.sh`): reglas de opciones (9 combinaciones), `-S`, `tests/errors/pe_*.lap` a -O0 y -O2 con mensaje y posición, estructura de `app.lap` a -O0, -O2 y `--nasm` (mismos bytes entre `--nasm` y el modo por omisión, y entre dos compilaciones), **17 mutaciones** de una cabecera hechas a propósito (subsistema 3 y 11, Machine i386, magia PE32, firmas PE y MZ, entrada fuera de las secciones y en la página de datos, SizeOfImage pequeño, alineaciones 0x800 y 0x300, `.text` escribible, RVA fuera de página, RELOCS_STRIPPED, directorio `.reloc` vacío, datos crudos fuera del archivo, PointerToRawData sin alinear): cada una debe fallar en `pecheck`.
+- **QEMU con OVMF** (`-machine q35`, pflash con `edk2-x86_64-code.fd` y `edk2-i386-vars.fd` del qemu de Homebrew; en Debian/Ubuntu el paquete `ovmf`, `/usr/share/OVMF`; o `OVMF_CODE`/`OVMF_VARS`): el archivo es `EFI/BOOT/BOOTX64.EFI` de un directorio FAT; a -O0 y -O2 el COM1 muestra `EFI-OK`, la consola muestra `EFI-CONOUT` y QEMU termina solo por el `ResetSystem`. La mutación (subsistema 3) no se ejecuta. Sin qemu u OVMF esa parte se omite; con `CMP_REQUIRE=1` es un error. El flujo de CI instala `ovmf`.
+- `tests/errors/pe_*.lap` (8, con `// flags: --pe-efi` y su `.err`, generado por el compilador y revisado a mano): `pe_no_entry`, `pe_entry_sysv`, `pe_entry_params`, `pe_section`, `pe_global_string`, `pe_data_abs`, `pe_bits32`, `pe_asm_abs`.
+- `tests/efi/` queda fuera del corpus de `tests/run_tests.sh`, `tools/native/corpus.sh` y `tests/x64/run_text.sh`.
+- Sin `--pe-efi` el código no cambió: el asm (`-S`; `-O0`, `-O2`, `--freestanding -O2`, `--flat 0x8000 -O2` y `--flat 0x10000 --pic -O2`) de los 803 pares programa/modo de `tests/` y `examples/` que compilan (3398 archivos comparados con los de 0.44.7, incluidos los mensajes de los que no compilan) es idéntico, salvo la línea de versión.
+- Programas mínimos probados a mano con `pecheck` a -O0, -O1 y -O2: solo texto (2 secciones), solo `.bss` (3), `.data` y un `align(4096)` en `.bss` (4), y dos archivos en una imagen.
+- Ninguna salida esperada escrita a mano: los `.err` los generó el compilador.
+- `gcc -O2 -Wall -Werror` sin advertencias.
+
+### Pendiente
+- Solo se probó con OVMF de QEMU (edk2) en TCG, no en hardware ni con otros firmwares; no hay Secure Boot (el archivo no está firmado).
+- Sin tabla de importaciones, recursos ni directorio de depuración; sin aplicaciones IA32 ni ARM; las estructuras y GUIDs del firmware las declara el programa.
+- Un global que guarde la dirección de otro sigue sin poder iniciarse (hereda la regla de `--pic`).
+- En esta máquina `tests/flat/generic.lap` y otras comparaciones de bytes de `--flat` fallan por la versión de nasm instalada (3.02 codifica distinto `movsxd`/`cdqe`); los bytes del compilador son idénticos a los de 0.44.7.
+
 ## [Sin versión]
 
 ### Docs

@@ -1,0 +1,4 @@
+tests/errors/pe_section.lap:1:1: error: --pe-efi: section '.extra' is not allowed; a PE image is .text, .data and .bss
+      1 | // flags: --pe-efi
+        | ^
+1 error, compilation failed

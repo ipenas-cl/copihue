@@ -1,4 +1,4 @@
-# Copihue Language Reference (v0.44.7)
+# Copihue Language Reference (v0.44.8)
 
 This document describes the language that `copihue` accepts today. Anything not listed here is not supported.
 Planned features are in the README roadmap.
@@ -994,6 +994,40 @@ A literal address (`*(0xB8000 as *u8)`, `inb`/`outb`, a memory-mapped register) 
 **Combinations.** `--pic` needs `--flat ADDR` (`--pic needs --flat <addr>`; `-S --pic` and `--freestanding --pic` alone are the same error, and so is `-c --pic`). `--boot`, `--elf`, `--axe1` and `--axe2` are errors (`--pic cannot be combined with --boot`, `... with --elf`, `... with --axe1 or --axe2`): a boot sector, an ET_EXEC file and an AXE image are loaded at one address that the file itself names. `-S`, `--sizes`, `--checked`, `--nasm`, `-O0`, `-O1`, `-O2` and several files in one image are accepted. `ADDR` is still the `org`; it is only where nasm believes the image will be, and the bytes do not depend on it (`--flat 0x10000 --pic` and `--flat 0x40000 --pic` write the same file).
 
 `tests/pic/run.sh` checks all of it: the option errors, `tests/errors/pic_*.lap`, an awk check on the assembly of `tests/pic/kernel.lap` (no label as an absolute address; the same check finds them in the assembly built without `--pic`), the same bytes for two `--flat` bases, and QEMU running that payload copied to 0x10000 and to 0x40000 by `tests/pic/harness.in` (the harness is 32-bit code, so it is not a `--pic` image). The payload clears its `.bss`, reads and writes scalars, arrays, a struct and an array of structs, takes strings, `&blob`, `&local`, `&f`, calls through a local, a global, a table and an `ms64 fn` variable, and checks that `&_start` is where the harness put it. It prints `PIC` at both addresses, at `-O0` and `-O2`. Built without `--pic` and run at the second address it does not print `PIC`.
+
+### UEFI applications (`--pe-efi`)
+
+`copihue --pe-efi -o BOOTX64.EFI app.lap` (0.44.8) writes the file an x86-64 UEFI firmware loads and runs: a PE32+ executable of subsystem 10 (EFI application). It replaces the hand-written `pe.asm` that wrapped a `--flat 0x1000` stub in headers: there is no nasm step of yours and no second tool, the compiler writes the headers itself. (It still runs `nasm -f bin` on the image, as `--flat` does; `--nasm` is accepted and changes nothing, the bytes are the same.)
+
+```copihue
+ms64 fn _start(image: i64, st: *u64) -> i64 {
+    let con: *u64 = st[8] as *u64;          // SystemTable->ConOut
+    let out: ms64 fn = con[1];              // ConOut->OutputString
+    out(con as i64, &msg as i64);           // msg: a `data` block of UTF-16 (dw ...)
+    return 0;                               // EFI_SUCCESS, back to the firmware
+}
+```
+
+**It is `--flat 0x1000 --pic` plus a header.** `--pe-efi` implies `--freestanding`, `--pic` and a flat image whose text starts at RVA 0x1000, so every rule of [`--pic`](#position-independent-images---pic) applies, with the same messages (an error that says `--pic:` is that rule, read it for a PE image). The code reaches globals, strings, `data` blocks and functions RIP-relative; the firmware may put the image at any address and nothing needs fixing up. The compiler does not accept `--flat` with it, because the layout is not yours to choose.
+
+**The entry is `ms64 fn _start(image: i64, st: *u64) -> i64`.** The name is `_start`, as in every flat image; the convention is the one the firmware uses (`ms64`, since 0.44.6), so the first argument arrives in `rcx` (EFI_HANDLE of the image) and the second in `rdx` (EFI_SYSTEM_TABLE\*). The parameters are optional (at most two). The result is the EFI_STATUS: `return 0;` is `EFI_SUCCESS` and the firmware gets control back when the function returns; a program that never returns calls `ResetSystem` or `BootServices->Exit`. The thunk of an `ms64 fn` is the first thing in `.text`, so AddressOfEntryPoint is 0x1000. `_start` that is not `ms64 fn`, a `naked` or `bits` one, one with more than two parameters, and a program with no `_start` are errors (`--pe-efi _start must be 'ms64 fn' ...`) at the function, with its line and column.
+
+**The file.** PE32+ (magic 0x20B), Machine 0x8664, Subsystem 10, ImageBase 0x140000000, SectionAlignment 0x1000, FileAlignment 0x200, SizeOfHeaders 0x200, DllCharacteristics NX_COMPAT, no RELOCS_STRIPPED, time stamp 0 (two builds are the same bytes), no symbol table. Sections, each on its own page, only the ones that have content:
+
+| Section | RVA | Holds | Permissions |
+|---|---|---|---|
+| `.text` | 0x1000 | the code, `_start` first | read, execute |
+| `.data` | next page after `.text` | string literals, initialized globals, `data` blocks | read, write |
+| `.bss` | next page after `.data` | uninitialized globals (in the file only as a size) | read, write |
+| `.reloc` | after the last one | the base relocation directory | read, discardable |
+
+No section is both writable and executable. The `.reloc` directory is one block for the page of the text with no entry that relocates anything (two type-0 padding entries, 12 bytes), which is valid and is what a linker writes for an image without relocations; the code has no absolute address, so there is nothing to put in it. The firmware relocates by the difference between where it loaded the image and ImageBase and finds no entries. `bss_start()` and `bss_end()` work as in `--flat`; the firmware zeroes `.bss` when it maps the image, so clearing it is not needed. A `let` with `align(N)` is kept (`N` up to 4096: the sections are pages). A named section other than `.text`, `.data` and `.bss` is an error (`--pe-efi: section '.extra' is not allowed`).
+
+**Combinations.** `--pe-efi` with `--flat`, `--boot`, `--elf`, `--axe1`, `--axe2`, `-c`, `--sizes` or `--native` is an error (`--pe-efi cannot be combined with --elf: ...`, exit 2): each names another layout or another file format. `--freestanding` and `--pic` are accepted and redundant. `-S` is accepted and writes the assembly of the image (`org 0x1000`, `default rel`, `.data` and `.bss` on their own pages), which is how the error tests run; it is not a PE file. `--checked`, `--nasm`, `-O0`, `-O1`, `-O2` and several files in one image work. `-o` names the output (default `a.efi`); QEMU and real firmware look for `\EFI\BOOT\BOOTX64.EFI` on a FAT volume.
+
+**Not covered.** No import table, no resources, no debug directory and no signing (no Secure Boot); no `.reloc` entries, so an absolute address in the image is an error and not a fix-up; no ARM or 32-bit (`IA32`) application; no `EfiMain` name other than `_start`; the protocols and structures of the firmware (system table, boot services, GUIDs) are yours to declare, the compiler does not know them.
+
+**Tests.** `tests/efi/run.sh`: the option errors, `tests/errors/pe_*.lap`, the file of `tests/efi/app.lap` read by `tests/efi/pecheck.c` (signatures, Machine, magic, subsystem, alignments, sizes, section table, entry inside code, `.reloc` blocks; `objdump -p` too when the installed one reads PE), the same file with one field broken on purpose (17 mutations, each must fail the checker), and QEMU with OVMF booting it as `BOOTX64.EFI`: COM1 shows `EFI-OK`, the console shows `EFI-CONOUT` (through `ConOut->OutputString`), and the application ends the machine with `ResetSystem`. The same file with subsystem 3 must not run. OVMF is read from `$OVMF_CODE` (and `$OVMF_VARS`), from the Homebrew qemu (`edk2-x86_64-code.fd` and `edk2-i386-vars.fd`) or from the Debian/Ubuntu package `ovmf` (`/usr/share/OVMF`); without it that part is skipped, and `CMP_REQUIRE=1` (the CI installs `ovmf`) turns that into a failure.
 
 ### AXE1 images
 

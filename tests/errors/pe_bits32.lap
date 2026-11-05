@@ -1,0 +1,9 @@
+// flags: --pe-efi
+// There is no RIP-relative addressing outside 64-bit mode.
+bits 32 naked fn trampoline() {
+    cli();
+}
+
+ms64 fn _start(image: i64, st: *u64) -> i64 {
+    return 0;
+}

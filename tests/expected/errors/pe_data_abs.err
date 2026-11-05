@@ -1,0 +1,4 @@
+tests/errors/pe_data_abs.lap:6:5: error: --pic: data block 'table' holds the absolute address of 'table', which depends on the load address and a --pic image has no relocations; store a difference of labels (table - table) and add the base at run time
+      6 |     dq table;
+        |     ^
+1 error, compilation failed

@@ -1,0 +1,4 @@
+// flags: --pe-efi
+// The firmware calls the entry with the Microsoft x64 convention.
+fn _start() {
+}

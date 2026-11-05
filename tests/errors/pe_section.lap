@@ -1,0 +1,9 @@
+// flags: --pe-efi
+// A PE image is .text, .data and .bss.
+section ".extra" {
+    let word: i64 = 1;
+}
+
+ms64 fn _start(image: i64, st: *u64) -> i64 {
+    return 0;
+}
