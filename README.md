@@ -10,7 +10,7 @@
 
 A systems programming language with its own compiler, written in C with an x86-64 NASM back end. It produces Linux x86-64 ELF executables **with no libc and no runtime**, and it can also produce freestanding code for kernels and boot sectors. *Formerly Chronos.*
 
-Current version: **0.44.3** (`compiler/bootstrap-c/copihue.c`, `LANG_VERSION`). Release notes are in [CHANGELOG.md](CHANGELOG.md).
+Current version: **0.44.4** (`compiler/bootstrap-c/copihue.c`, `LANG_VERSION`). Release notes are in [CHANGELOG.md](CHANGELOG.md).
 
 > **Status: not production-ready.** It is a tested compiler for a small but real language. Memory safety is partial (checked slices and indexes, `own *T` moves) and there is no borrow checker: a `vec` slice can dangle after a push. Linux x86-64 only. The goal is a language that beats C++, Rust and OCaml; today it does not, and the numbers below say where it stands.
 
@@ -61,6 +61,7 @@ The `-c` object is `ET_REL` with `.text`, `.rodata`, `.data`, `.bss` (those it h
 Two levels of syntax. The **easy level** lets the compiler decide: an omitted parameter type or `->` is `i64`, `let x = e` infers the type, `vec T` grows by itself and frees at the end of the block, `own *T` is an owning pointer that moves on `return` or when passed on. The **explicit level** gives the developer the width of every integer, `*volatile T`, `align(N)`, `packed struct`, atomics, `naked` and `interrupt` functions, and named sections (`section "name" @ addr`). Design: [docs/DESIGN_TWO_LEVELS.md](docs/DESIGN_TWO_LEVELS.md).
 
 - Integers `i8` to `i64` and `u8` to `u64`, with arithmetic at the width of the type, and checked assignments (a wider value needs `as`).
+- Assignment targets: a store is never dropped in silence. `mem(8)[0] = 5;` with `fn mem(off: i64) -> *volatile u32` stores four bytes, volatile, through the pointer the call returns, as it would through a pointer variable; `f(x) = 5`, `3 = x`, `-x = 5` and the like are compile errors with the line. A store into a wider field or element computes `a + b` at the destination's width ([REFERENCE](docs/REFERENCE.md), Assignment targets).
 - Named integer constants: `const N = 8;` at module or function level, usable in `[T; N]` and in any expression, folded at compile time ([REFERENCE](docs/REFERENCE.md), Constants).
 - Slices `[]T` with bounds-checked indexing in hosted code, `for x in s`, `unsafe { }`, and `str` as a `[]u8` ([DESIGN_SLICES](docs/DESIGN_SLICES.md), [DESIGN_STRINGS](docs/DESIGN_STRINGS.md)).
 - Modules with `pub` and `name::item`, several files per command, `import`, and `-c` objects ([DESIGN_MODULES](docs/DESIGN_MODULES.md)).
@@ -147,6 +148,7 @@ Copihue is slower on recursive code (`fib`), on the matching engine, and on a gr
 ## What is missing
 
 - Borrow or lifetime checking, and generics over enums, slices, `vec` and `own *T`.
+- `+=`, `-=` and `++` on an element, a field or a dereference (only on variables); `getp()->x = v` (a call before `->`; `getp().x = v` works); `a + b` in a call argument or a `return` is still cut to the operands' width.
 - `str` is bytes only (no UTF-8, no heap strings); a `vec` cannot be returned, passed or stored in a struct.
 - Generic bodies in `-c` objects: the same monomorphized body emitted in two objects fails at `ld`.
 - The compiler does not emit GDT, page tables or the `STAR`/`LSTAR`/`EFER` writes; the kernel does.

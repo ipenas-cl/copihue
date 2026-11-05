@@ -2,6 +2,37 @@
 
 Todos los cambios importantes del proyecto.
 
+## [0.44.4] - 2026-11-05
+
+Pedido urgente de LapageriaOS / AtomicOS (HR-01, punto 1): `mem(8)[0] = 5;`, con `fn mem(off: i64) -> *volatile u32`, compilaba sin error ni advertencia y el asm solo evaluaba la llamada: no había store. Costó una sesión de depuración en `ahci.lap`. Ningún store se descarta ya en silencio.
+
+### Fixed
+- **Store por un puntero que es un valor.** `f(x)[i] = v`, `*f(x) = v`, `f(x).campo = v` (si `f` devuelve `*Struct`), `(p + 8)[0] = v`, `(a as *u32)[i] = v` y `ps[i][j] = v` (si `ps[i]` es un puntero) designan memoria, igual que un puntero local: el store se emite, con el ancho del pointee (un `*u16` escribe 2 bytes, un `*u32` 4, sin tocar al vecino) y con la marca `volatile` si el pointee es `*volatile T`. Antes el índice y el valor se evaluaban y el store no existía (y quedaba un `push rax` sin `pop`). `*mem(8) = 5` escribía 8 bytes aunque el pointee fuera `u32`. El valor se evalúa primero, luego el índice y luego el puntero, como en un store por un nombre.
+- **Lectura por un puntero que es un valor.** `let v = mem(8)[2]` daba 0 en silencio (`; array not found`); ahora lee en la misma dirección y con el mismo ancho que el store, con la marca `volatile`. `*mem(8)` de un `*volatile T` lee `T`, no 8 bytes.
+- **`-x = v`, `!x = v`, `&x = v`, `a + b = v`.** El parser tomaba `x = v` como asignación dentro de cualquier expresión y asignaba `x` en silencio (`a + b = 5` asignaba `b`). Ahora `x = v` asigna solo donde empieza una expresión o entre paréntesis; después de un operador es error.
+- **Campo de un escalar o de un struct sin ese campo** (`a.x = 5` con `a: i64`, `s.nope = 5`, un global `*Struct` sin campo) y **índice de un global escalar o de un nombre no declarado** (`g[0] = 5`): no emitían nada y ahora son error. Un campo de un global `*Struct` (`gp.x = 5`) tampoco se emitía; ahora sí.
+- **Truncación.** `p.x = a + b`, `arr[i] = a - b`, `q.x = a * 3`, `ptr[i] = a + b`, `e.arr[i] = a + b` y `*p = a + b`, con operandos `u32`, `i32` o `u8` y un destino de 64 bits, se cortaban al ancho de los operandos (`mov eax, eax`) antes de guardarse: `3000000000 + 3000000000` guardaba 1705032704. Ahora la aritmética se hace al ancho del destino cuando es más ancho, con signo o sin él, la misma regla de 0.42.5 que ya valía para `let w: i64 = a + b` y `w = a + b`. Un destino tan angosto como los operandos sigue envolviendo (`w.u8 = c + d` con `u8`).
+
+### Added
+- Error de compilación, con `archivo:línea:columna` y sin archivo de salida, para un destino que no es un lugar (en cualquier modo): `the assignment target is not assignable: the result of a call` (`f(x) = v`, `f(x) += v`, `f(x)++`), `a number literal`, `the result of an operator expression` (`(a + b) = v`, `-x = v`, `a + b = v`, `&x = v`, `(a < b) = v`), `the result of a cast`, `a parenthesized name; write the name without parentheses`, `an element of a string literal (read-only text)`, `the expression has type i64, not a pointer` (`f(x)[0] = v` con `f` entera), `the pointee type of this expression is unknown (cast it, e.g. 'as *u8')` (`malloc(16)[0] = v`), `field 'x' of an expression that is not a struct or a pointer to one`, `'a' is not a struct or a pointer to one`, `struct 'S' has no field 'nope'`, `cannot assign a whole struct 'P' through a pointer expression; assign its fields`. Leer por algo que no se puede indexar también es error (`cannot index this expression: ...`, `cannot index 'g': it is not an array or a pointer`, `use of undeclared variable 'zz'`); antes daba 0.
+- `+=`, `-=`, `*=`, `/=`, `%=`, `++` y `--` sobre un elemento, un campo o un desreferencia (`t[0] += 1`, `s.x -= 1`, `*q *= 2`) siguen sin existir (solo valen sobre variables), pero ahora el error lo dice: `compound assignment and ++/-- apply to a variable, not to an element, a field or a dereference; write it out (x[i] = x[i] + v)`, en vez de `expected ';' after this, found '+='`.
+- El diagnóstico de un store apunta al comienzo de la sentencia.
+- `tests/assign/run.sh` (sección 4g de `tests/run_tests.sh`): cada rechazo en seis modos (nativo `-O0` y `-O2`, `--nasm`, `-c`, `--freestanding`, `--flat`) con el mensaje y la línea del golden y sin archivo de salida; el store en el asm (`-S` en `-O0`/`-O2`, hosted, `--freestanding`, `--flat`), en el objeto nativo `-c` y en el objeto de nasm (`objdump`: dos `movl %eax,(%rbx)` y un `movw %ax,(%rbx)` después de la llamada); y `tests/assign/kernel.lap`, un kernel plano que QEMU ejecuta de verdad en `-O0` y `-O2` y que informa por COM1 (`ASSIGN`, o `FAIL` y el número de la primera comprobación): los stores por llamadas, el vecino intacto, y sumas pasadas de 32 bits por campo, elemento, puntero y campo-arreglo.
+
+### Tests
+- `tests/errors/assign_not_place.lap` (10 errores, uno por forma), `assign_compound_elem.lap`, `assign_index_int_call.lap`, `assign_field_of_call.lap`, `assign_string_elem.lap`, `assign_scalar_field.lap`, `assign_untyped_ptr.lap`, `assign_global_scalar_index.lap`, `assign_read_unindexable.lap`, con sus `.err`.
+- `tests/lang/assign_ptr_expr.lap` y `tests/lang/assign_wide.lap`: salida escrita a mano y **no ejecutada** (esta Mac no ejecuta ELF de Linux); la CI las ejecuta. Lo que sí se ejecutó aquí es `tests/assign/kernel.lap` bajo QEMU.
+- Compilar el 0.44.3 con `tests/assign/kernel.lap` da `FAIL01` por COM1 (el primer store por una llamada no existe); con el 0.44.4, `ASSIGN`, en `-O0` y `-O2`.
+- El asm (`-S`, `-O0` y `-O2`) de los 325 programas de `tests/` y `examples/` es idéntico byte a byte entre 0.44.3 y 0.44.4 (comparado con un binario del 0.44.3), y los diagnósticos de `tests/errors/` anteriores también: los únicos cambios son los programas y errores nuevos.
+- `tests/run_tests.sh` en esta Mac (Darwin): 362 pasan, 2 fallan, 2 omitidas (las dos omitidas necesitan nasm y ld para ensamblar, que aquí no enlazan ELF). Los dos fallos (`tests/flat/generic.lap`, `tests/boot/edx_keep.lap`) son de esta máquina: el ensamblado que emite el compilador es idéntico al del 0.44.3 y el nasm 3.02 de aquí codifica `movsxd rax, eax` como `48 98` y el orden de los prefijos `66 67` distinto del golden. `gcc -O2 -Wall -Werror` sin advertencias.
+
+### Pendiente
+- Los argumentos de una llamada y el `return a + b` siguen cortando la suma al ancho de los operandos (`id(a + b)` con `u32`); la regla de 0.42.5 vale para `let`, `x = e` y, desde ahora, para los stores.
+- `+=` y `++` sobre elementos, campos y desreferencias.
+- `getp()->x = v` (una llamada antes de `->`) sigue siendo `'->x' needs a variable of pointer-to-struct type on the left`; `getp().x = v` funciona.
+- Una lectura `*f(x)` de un puntero que no es `volatile` sigue siendo de 8 bytes (como `*p` de un puntero no volátil); `f(x)[0]` sí lee el ancho del pointee.
+- No se pudo ejecutar un ELF de Linux en esta máquina: lo ejecutado es el kernel de QEMU; los programas de `tests/lang/` y los ejecutables hosted los ejecuta la CI.
+
 ## [0.44.3] - 2026-11-05
 
 Tres pedidos abiertos de LapageriaOS / AtomicOS (EX-05, EX-04, RD-03).
