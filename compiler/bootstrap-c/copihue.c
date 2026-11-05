@@ -16,7 +16,7 @@
 
 // ==== NAMING (single place to change when the language is renamed) ====
 #define LANG_NAME     "Copihue"
-#define LANG_VERSION  "0.44.4"
+#define LANG_VERSION  "0.44.5"
 #define COMPILER_BIN  "copihue"
 #define SRC_EXT       ".lap"   /* Lapageria rosea, the copihue */
 #define OLD_SRC_EXT   ".cph"   /* v0.18.x extension, still accepted with a warning */
@@ -348,6 +348,7 @@ typedef struct AstNode {
 #define AF_METHOD    65536 // x.f() parsed as f(x); resolve it to an impl, or error
 #define AF_TRY      131072 // match lowered from `?`; value is the return enum name
 #define AF_TAIL_ACC 262144 // return is `expr + self(...)` turned into acc + jmp
+#define AF_FOLDED   524288 // a number the parser folded from an expression (-O1 and up)
 
 // Symbol table
 typedef struct {
@@ -1644,6 +1645,7 @@ AstNode* fold_binary_op(AstNode* left, AstNode* right, char* op) {
     char buf[32];
     snprintf(buf, sizeof(buf), "%ld", result);
     folded->value = strdup(buf);
+    folded->flags |= AF_FOLDED;
 
     return folded;
 }
@@ -1843,6 +1845,45 @@ static void const_clash(Tok name) {
     free(s);
 }
 
+// One binary operator on two folded values. 1 = done, 0 = not an operator we fold,
+// -1 = division by zero.
+static int const_binop(const char* o, long long a, long long b, long long* out) {
+    unsigned long long ua = (unsigned long long)a;
+    unsigned long long ub = (unsigned long long)b;
+    if (!strcmp(o, "+")) { *out = (long long)(ua + ub); return 1; }
+    if (!strcmp(o, "-")) { *out = (long long)(ua - ub); return 1; }
+    if (!strcmp(o, "*")) { *out = (long long)(ua * ub); return 1; }
+    if (!strcmp(o, "/") || !strcmp(o, "%")) {
+        if (b == 0) return -1;
+        if (a == LLONG_MIN && b == -1) { *out = o[0] == '/' ? a : 0; return 1; }
+        *out = o[0] == '/' ? a / b : a % b;
+        return 1;
+    }
+    if (!strcmp(o, "<<")) { *out = (b >= 0 && b < 64) ? (long long)(ua << b) : 0; return 1; }
+    if (!strcmp(o, ">>")) { *out = (b >= 0 && b < 64) ? (a >> b) : (a < 0 ? -1 : 0); return 1; }
+    if (!strcmp(o, "&")) { *out = a & b; return 1; }
+    if (!strcmp(o, "|")) { *out = a | b; return 1; }
+    if (!strcmp(o, "^")) { *out = a ^ b; return 1; }
+    if (!strcmp(o, "==")) { *out = a == b; return 1; }
+    if (!strcmp(o, "!=")) { *out = a != b; return 1; }
+    if (!strcmp(o, "<")) { *out = a < b; return 1; }
+    if (!strcmp(o, "<=")) { *out = a <= b; return 1; }
+    if (!strcmp(o, ">")) { *out = a > b; return 1; }
+    if (!strcmp(o, ">=")) { *out = a >= b; return 1; }
+    if (!strcmp(o, "&&")) { *out = a && b; return 1; }
+    if (!strcmp(o, "||")) { *out = a || b; return 1; }
+    return 0;
+}
+
+static int const_unop(char o, long long a, long long* out) {
+    switch (o) {
+    case '-': *out = (long long)(0ULL - (unsigned long long)a); return 1;
+    case '~': *out = ~a; return 1;
+    case '!': *out = !a; return 1;
+    }
+    return 0;
+}
+
 // 1 = constant (value in *out), 0 = not a constant expression, -1 = division by zero.
 static int const_eval(AstNode* n, long long* out) {
     long long a, b;
@@ -1851,43 +1892,13 @@ static int const_eval(AstNode* n, long long* out) {
     if (n->type == AST_NUMBER && n->value) { *out = atoll(n->value); return 1; }
     if (n->type == AST_UNARY && n->op && n->child_count == 1) {
         if ((r = const_eval(n->children[0], &a)) != 1) return r;
-        switch (n->op[0]) {
-        case '-': *out = (long long)(0ULL - (unsigned long long)a); return 1;
-        case '~': *out = ~a; return 1;
-        case '!': *out = !a; return 1;
-        }
-        return 0;
+        return const_unop(n->op[0], a, out);
     }
     if ((n->type == AST_BINOP || n->type == AST_COMPARE || n->type == AST_LOGICAL) &&
         n->op && n->child_count == 2) {
-        const char* o = n->op;
-        unsigned long long ua, ub;
         if ((r = const_eval(n->children[0], &a)) != 1) return r;
         if ((r = const_eval(n->children[1], &b)) != 1) return r;
-        ua = (unsigned long long)a;
-        ub = (unsigned long long)b;
-        if (!strcmp(o, "+")) { *out = (long long)(ua + ub); return 1; }
-        if (!strcmp(o, "-")) { *out = (long long)(ua - ub); return 1; }
-        if (!strcmp(o, "*")) { *out = (long long)(ua * ub); return 1; }
-        if (!strcmp(o, "/") || !strcmp(o, "%")) {
-            if (b == 0) return -1;
-            if (a == LLONG_MIN && b == -1) { *out = o[0] == '/' ? a : 0; return 1; }
-            *out = o[0] == '/' ? a / b : a % b;
-            return 1;
-        }
-        if (!strcmp(o, "<<")) { *out = (b >= 0 && b < 64) ? (long long)(ua << b) : 0; return 1; }
-        if (!strcmp(o, ">>")) { *out = (b >= 0 && b < 64) ? (a >> b) : (a < 0 ? -1 : 0); return 1; }
-        if (!strcmp(o, "&")) { *out = a & b; return 1; }
-        if (!strcmp(o, "|")) { *out = a | b; return 1; }
-        if (!strcmp(o, "^")) { *out = a ^ b; return 1; }
-        if (!strcmp(o, "==")) { *out = a == b; return 1; }
-        if (!strcmp(o, "!=")) { *out = a != b; return 1; }
-        if (!strcmp(o, "<")) { *out = a < b; return 1; }
-        if (!strcmp(o, "<=")) { *out = a <= b; return 1; }
-        if (!strcmp(o, ">")) { *out = a > b; return 1; }
-        if (!strcmp(o, ">=")) { *out = a >= b; return 1; }
-        if (!strcmp(o, "&&")) { *out = a && b; return 1; }
-        if (!strcmp(o, "||")) { *out = a || b; return 1; }
+        return const_binop(n->op, a, b, out);
     }
     return 0;
 }
@@ -21143,6 +21154,195 @@ static void emit_bound_ends(Codegen* cg) {
 // alloc/release calls. A call in a while condition and the right-hand side
 // of && / || are not hoisted.
 
+// ---- 0.44.5: the initializer of a global is folded at compile time ----
+// .data holds numbers, so an initializer is a constant integer expression: literals,
+// consts (already numbers by now), the operators, `as` between integers, sizeof and
+// offsetof. Anything else is an error on the let; nothing reaches the assembler.
+
+static long long wrap_to_int(int bits, int sg, long long v) {
+    unsigned long long m, u;
+    if (bits >= 64) return v;
+    m = (1ULL << bits) - 1ULL;
+    u = (unsigned long long)v & m;
+    if (sg && (u >> (bits - 1))) u |= ~m;
+    return (long long)u;
+}
+
+// 1 = constant (*out), 0 = not a constant (*why says what is in the way), -1 = division by zero.
+static int gconst_eval(Codegen* cg, AstNode* n, long long* out, const char** why) {
+    static char buf[200];
+    long long a, b;
+    int r;
+    if (!n) { *why = "an empty expression"; return 0; }
+    switch (n->type) {
+    case AST_NUMBER:
+        *out = atoll(n->value ? n->value : "0");
+        return 1;
+    case AST_UNARY:
+        if (n->op && n->child_count == 1) {
+            if ((r = gconst_eval(cg, n->children[0], &a, why)) != 1) return r;
+            if (const_unop(n->op[0], a, out)) return 1;
+        }
+        *why = "this unary operator";
+        return 0;
+    case AST_BINOP:
+    case AST_COMPARE:
+    case AST_LOGICAL:
+        if (n->op && n->child_count == 2) {
+            if ((r = gconst_eval(cg, n->children[0], &a, why)) != 1) return r;
+            if ((r = gconst_eval(cg, n->children[1], &b, why)) != 1) return r;
+            r = const_binop(n->op, a, b, out);
+            if (r) return r;
+        }
+        *why = "this operator";
+        return 0;
+    case AST_CAST: {
+        int bits = 64, sg = 1;
+        if (n->child_count != 1 || (n->struct_type && !strcmp(n->struct_type, "__array__"))) {
+            *why = "a cast to an array";
+            return 0;
+        }
+        if ((r = gconst_eval(cg, n->children[0], &a, why)) != 1) return r;
+        if (n->is_pointer & 1) { *out = a; return 1; }
+        if (n->value && int_name(n->value, &bits, &sg)) { *out = wrap_to_int(bits, sg, a); return 1; }
+        snprintf(buf, sizeof buf, "a cast to '%s'", n->value ? n->value : "?");
+        *why = buf;
+        return 0;
+    }
+    case AST_CALL:
+        if (n->name && !n->qual && !strcmp(n->name, "sizeof") && n->child_count == 1) {
+            int sz = sizeof_node(cg, n->children[0]);
+            if (sz >= 0) { *out = sz; return 1; }
+            *why = "a sizeof with no known size";
+            return 0;
+        }
+        if (n->name && !n->qual && !strcmp(n->name, "offsetof") && n->child_count == 2 &&
+            n->children[0] && n->children[0]->type == AST_IDENT && n->children[0]->name &&
+            n->children[1] && n->children[1]->type == AST_IDENT && n->children[1]->name) {
+            const char* st = n->children[0]->name;
+            int off;
+            if (g_cur_mod && !typetab_lookup(cg->types, (char*)st)) st = link_sym(g_cur_mod, st);
+            off = typetab_lookup(cg->types, (char*)st)
+                      ? typetab_field_offset(cg->types, (char*)st, n->children[1]->name) : -1;
+            if (off >= 0) { *out = off; return 1; }
+            *why = "an offsetof with no such struct or field";
+            return 0;
+        }
+        *why = "a call";
+        return 0;
+    case AST_IDENT:
+        snprintf(buf, sizeof buf, "the name '%s', which is not a const",
+                 n->name ? n->name : "?");
+        *why = buf;
+        return 0;
+    case AST_STRING:        *why = "a string literal"; return 0;
+    case AST_ADDR_OF:       *why = "an address (&x)"; return 0;
+    case AST_DEREF:         *why = "a pointer dereference"; return 0;
+    case AST_INDEX:         *why = "an index expression"; return 0;
+    case AST_FIELD_ACCESS:  *why = "a field access"; return 0;
+    case AST_STRUCT_LITERAL:*why = "a struct literal"; return 0;
+    case AST_ARRAY_LITERAL: *why = "an array literal"; return 0;
+    case AST_ASSIGN:        *why = "an assignment"; return 0;
+    default:                *why = "an expression that is not a constant"; return 0;
+    }
+}
+
+// Folds the value in *slot into a number node. what: "the initializer of global 'x'".
+// tname/ptr_bits: the declared type (the element type for an array). Returns 1 when the
+// slot was rewritten from an expression, 0 when it was a plain number or on an error
+// (reported, so no object is written).
+static int fold_init_value(Codegen* cg, AstNode** slot, const char* what, const char* tname,
+                           int ptr_bits, AstNode* gvar) {
+    AstNode* e = *slot;
+    int bits = 64, sg = 1, is_int, r, line, col;
+    long long v;
+    const char* why = "";
+    AstNode* num;
+    char nb[32];
+    if (!e) return 0;
+    {
+        // Point at the start of the expression: a binary node sits on its right operand.
+        AstNode* s = e;
+        while ((s->type == AST_BINOP || s->type == AST_COMPARE || s->type == AST_LOGICAL ||
+                s->type == AST_CAST) && s->child_count > 0 && s->children[0] && s->children[0]->line)
+            s = s->children[0];
+        line = s->line ? s->line : gvar->line;
+        col = s->line ? s->col : gvar->col;
+    }
+    is_int = !(ptr_bits & 1) && tname && int_name(tname, &bits, &sg);
+    if (e->type == AST_NUMBER && !(e->flags & AF_FOLDED)) {
+        if (is_int && slot != &gvar->children[0] &&
+            !lit_fits(bits, sg, atoll(e->value ? e->value : "0")))
+            diag_error(line, col, "expected %s, found integer literal %s", tname, e->value);
+        return 0;
+    }
+    if (e->type == AST_UNARY && is_numeral(e, &v) && !(e->children[0]->flags & AF_FOLDED)) {
+        // -5: the same rule as a literal, so `-1` is refused for u64 as in a local let.
+        if (is_int && !lit_fits(bits, sg, v)) {
+            diag_error(line, col, "expected %s, found integer literal %lld", tname, v);
+            return 1;
+        }
+    } else {
+        r = gconst_eval(cg, e, &v, &why);
+        if (r < 0) {
+            diag_error(line, col, "%s divides by zero", what);
+            return 1;
+        }
+        if (r == 0) {
+            diag_error(line, col, "%s is not a constant expression: %s", what, why);
+            return 1;
+        }
+        if (is_int) {
+            // `x as u32` where the slot is 32 bits wide is a reinterpretation, as in a local let.
+            int cb, cs;
+            if (e->type == AST_CAST && !(e->is_pointer & 1) && e->value &&
+                int_name(e->value, &cb, &cs) && cb == bits)
+                v = wrap_to_int(bits, sg, v);
+            else if (bits < 64 && !lit_fits(bits, sg, v)) {
+                diag_error(line, col, "expected %s, found constant value %lld", tname, v);
+                return 1;
+            }
+        }
+    }
+    num = ast_new(AST_NUMBER);
+    snprintf(nb, sizeof nb, "%lld", v);
+    num->value = strdup(nb);
+    num->line = e->line;
+    num->col = e->col;
+    *slot = num;
+    return 1;
+}
+
+// The initializer of one global let. Returns 1 when it was rewritten or refused, so the
+// literal range check of check_types (which does not know a u64 above 2^63) is skipped.
+static int fold_global_init(Codegen* cg, AstNode* gvar, int is_array, int is_slice) {
+    AstNode* init = gvar->children[0];
+    char what[200];
+    int is_ptr = gvar->is_pointer & 1;
+    const char* tn = gvar->value;
+    int done = 0;
+    if (!init || is_slice) return 0;
+    if (init->type == AST_STRING) return 0;   // a pointer to the bytes, placed by the caller
+    if (!is_ptr && tn && enum_lookup(tn)) return 0;   // reported on its own
+    snprintf(what, sizeof what, "the initializer of global '%s'", gvar->name ? gvar->name : "?");
+    if (is_array) {
+        if (init->type == AST_STRING) return 0;
+        if (init->type != AST_ARRAY_LITERAL) {
+            diag_error(init->line ? init->line : gvar->line, init->line ? init->col : gvar->col,
+                       "%s must be an array literal or a string", what);
+            return 1;
+        }
+        for (int j = 0; j < init->child_count; j++) {
+            char ew[240];
+            snprintf(ew, sizeof ew, "element %d of the initializer of global '%s'", j,
+                     gvar->name ? gvar->name : "?");
+            done |= fold_init_value(cg, &init->children[j], ew, tn, gvar->is_pointer, gvar);
+        }
+        return done;
+    }
+    return fold_init_value(cg, &gvar->children[0], what, tn, gvar->is_pointer, gvar);
+}
+
 void codegen(AstNode* ast, const char* file, StringTable* strtab, TypeTable* types) {
     Codegen cg;
     cg.out = NULL;
@@ -21176,9 +21376,30 @@ void codegen(AstNode* ast, const char* file, StringTable* strtab, TypeTable* typ
             int is_pointer = (gvar->is_pointer & 1);
             int is_mutable = (gvar->is_pointer & 2) >> 1;
 
+            // 0.44.5: fold a constant expression into a number; refuse the rest on the let.
+            int init_folded = 0;
+            if (is_initialized && !(gvar->flags & AF_EXTERN)) {
+                const char* saved_mod = g_cur_mod;
+                int is_slice = gvar->struct_type && !strcmp(gvar->struct_type, "__slice__");
+                if (gvar->file) focus_file(gvar->file);
+                g_cur_mod = gvar->mod;
+                init_folded = fold_global_init(&cg, gvar, is_array, is_slice);
+                g_cur_mod = saved_mod;
+                // A string into a non-pointer slot: check_types says so; one error is enough.
+                if (!is_array && !is_slice && gvar->children[0]->type == AST_STRING &&
+                    !is_pointer && type_name)
+                    init_folded = 2;
+            }
+
             // If initialized, get the value
             if (is_initialized && gvar->children[0]->type == AST_NUMBER) {
                 init_value = gvar->children[0]->value;
+            } else if (is_initialized && !is_array && gvar->children[0]->type == AST_STRING &&
+                       (is_pointer || !type_name) &&
+                       !(gvar->struct_type && !strcmp(gvar->struct_type, "__slice__"))) {
+                // `let s: *u8 = "text"` and `let s = "text"`: the slot holds the address of the bytes.
+                AstNode* lit = gvar->children[0];
+                init_value = strtab_add(cg.strtab, lit->value, lit->array_size);
             }
 
             if (!is_pointer && type_name && enum_lookup(type_name)) {
@@ -21215,7 +21436,8 @@ void codegen(AstNode* ast, const char* file, StringTable* strtab, TypeTable* typ
                 VTy dst_ty;
                 g_cur_mod = gvar->mod;
                 dst_ty = ty_decl(&cg, 0, gvar->is_pointer, gvar->value);
-                check_types(gvar->children[0], "", dst_ty, expr_ty(&cg, gvar->children[0]));
+                if (init_folded != 1)
+                    check_types(gvar->children[0], "", dst_ty, expr_ty(&cg, gvar->children[0]));
                 g_cur_mod = saved_mod;
             }
             {
@@ -21277,6 +21499,16 @@ void codegen(AstNode* ast, const char* file, StringTable* strtab, TypeTable* typ
                     }
                     gv->array_init_values[str_len] = strdup("0");  // Null terminator
                 }
+            }
+            // Backstop: an initialized global with nothing to emit would be an undefined
+            // symbol for the assembler. Say so on the let.
+            if (is_initialized && !init_folded) {
+                GlobalVar* gv = global_exact(&global_symtab, symn);
+                if (gv && !gv->is_extern && !gv->is_slice && !gv->init_value &&
+                    !gv->array_init_values)
+                    diag_error(gvar->line, gvar->col,
+                               "the initializer of global '%s' cannot be placed in .data; use a constant integer expression",
+                               gvar->name ? gvar->name : "?");
             }
         }
     }
