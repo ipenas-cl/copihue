@@ -16,7 +16,7 @@
 
 // ==== NAMING (single place to change when the language is renamed) ====
 #define LANG_NAME     "Copihue"
-#define LANG_VERSION  "0.44.5"
+#define LANG_VERSION  "0.44.6"
 #define COMPILER_BIN  "copihue"
 #define SRC_EXT       ".lap"   /* Lapageria rosea, the copihue */
 #define OLD_SRC_EXT   ".cph"   /* v0.18.x extension, still accepted with a warning */
@@ -349,6 +349,7 @@ typedef struct AstNode {
 #define AF_TRY      131072 // match lowered from `?`; value is the return enum name
 #define AF_TAIL_ACC 262144 // return is `expr + self(...)` turned into acc + jmp
 #define AF_FOLDED   524288 // a number the parser folded from an expression (-O1 and up)
+#define AF_MS64    1048576 // ms64 fn, or a let/param of type `ms64 fn`: Microsoft x64 convention
 
 // Symbol table
 typedef struct {
@@ -369,6 +370,7 @@ typedef struct {
     int hwbits;           // Width of hwreg in bits. 0 if hwreg is NULL
     int is_vec;           // vec T: pointer, i64 length, i64 capacity. 24 bytes
     int drop_kind;        // 0 none, 1 own *T (free the pointer), 2 vec (free the buffer)
+    int ms64;             // `ms64 fn` variable: a call through it uses the Microsoft x64 convention
 } Symbol;
 
 #define MAX_BLOCK_SCOPE 64
@@ -409,6 +411,7 @@ typedef struct {
     char* src_name;     // Source spelling. name is the NASM symbol (mod__item or the source name)
     const char* mod;    // Defining module. NULL is the flat namespace
     int is_pub;         // 1 if the source said `pub`
+    int ms64;           // `ms64 fn` global: a call through it uses the Microsoft x64 convention
 } GlobalVar;
 
 typedef struct {
@@ -440,6 +443,7 @@ typedef struct {
     int is_volatile;    // *volatile T: the pointee is a memory-mapped register
     int is_vec;         // vec T. base_type is the element
     int is_own;         // own *T. The pointer is freed when its block ends
+    int is_ms64;        // `ms64 fn`: an i64 function address called with the Microsoft x64 convention
 } TypeSpec;
 
 typedef struct { Tok* tokens; int pos, count; int split_shr; } Parser;
@@ -1091,6 +1095,7 @@ int symtab_add(SymbolTable* st, char* name, int size) {
     st->symbols[st->count - 1].hwbits = 0;
     st->symbols[st->count - 1].is_vec = 0;
     st->symbols[st->count - 1].drop_kind = 0;
+    st->symbols[st->count - 1].ms64 = 0;
     symbol_assign_reg(&st->symbols[st->count - 1]);
     return -st->stack_size;
 }
@@ -1115,6 +1120,7 @@ int symtab_add_struct(SymbolTable* st, char* name, char* type_name, int size_byt
     st->symbols[st->count - 1].hwbits = 0;
     st->symbols[st->count - 1].is_vec = 0;
     st->symbols[st->count - 1].drop_kind = 0;
+    st->symbols[st->count - 1].ms64 = 0;
     symbol_assign_reg(&st->symbols[st->count - 1]);
     return -st->stack_size;
 }
@@ -1174,6 +1180,7 @@ int symtab_add_pointer(SymbolTable* st, char* name) {
     st->symbols[st->count - 1].hwbits = 0;
     st->symbols[st->count - 1].is_vec = 0;
     st->symbols[st->count - 1].drop_kind = 0;
+    st->symbols[st->count - 1].ms64 = 0;
     symbol_assign_reg(&st->symbols[st->count - 1]);
     return -st->stack_size;
 }
@@ -1297,6 +1304,7 @@ void global_symtab_add_full(GlobalSymbolTable* gst, char* name, char* type_name,
     gv->src_name = NULL;
     gv->mod = NULL;
     gv->is_pub = 0;
+    gv->ms64 = 0;
     gv->pointee_type = is_pointer ? strdup(type_name) : NULL;
 
     // Calculate size
@@ -1686,6 +1694,9 @@ static void emit_scale_reg(Codegen* cg, const char* reg, int stride) {
 AstNode* parse_expr(Parser* p);
 AstNode* parse_stmt(Parser* p);
 TypeSpec parse_type(Parser* p);
+// Set by a `let`, a global, or a parameter just before parse_type: they are the only
+// places that keep `ms64 fn`. Anywhere else it is an error, not a silent i64.
+static int g_ms64_ok;
 static int peek_word(Parser* p, const char* s);
 static int at_type_start(Parser* p);
 static char* type_spec_name(TypeSpec s);
@@ -3264,6 +3275,7 @@ AstNode* parse_stmt(Parser* p) {
 
         // Optional type annotation: let x: i32 or let arr: [i32; 10] or let ptr: *i32 or let p: Point
         if (match_tok(p, T_COLON)) {
+            g_ms64_ok = 1;
             TypeSpec spec = parse_type(p);
 
             // Store type info in AST node (similar to global vars)
@@ -3273,6 +3285,7 @@ AstNode* parse_stmt(Parser* p) {
 
             // For arrays, mark as array in struct_type field
             if (spec.is_own) let->flags |= AF_OWN;
+            if (spec.is_ms64) let->flags |= AF_MS64;
             if (spec.is_slice) {
                 let->struct_type = strdup("__slice__");
             } else if (spec.is_vec) {
@@ -3838,6 +3851,21 @@ static char* pointee_name(TypeSpec inner) {
 // them as types, and any other token leaves the word as a name.
 TypeSpec parse_type(Parser* p) {
     TypeSpec spec = {0};
+    int ms64_ok = g_ms64_ok;
+    g_ms64_ok = 0;
+
+    // `ms64 fn`: the address of a function that uses the Microsoft x64 convention.
+    // It is an i64; a call through the variable follows that convention.
+    if (peek_word(p, "ms64") && peek_tok_at(p, 1, T_FN)) {
+        Tok kw = advance_tok(p);
+        advance_tok(p);
+        if (!ms64_ok)
+            diag_error(kw.line, kw.col,
+                       "'ms64 fn' is the type of a let, a global, or a parameter only");
+        spec.base_type = strdup("i64");
+        spec.is_ms64 = 1;
+        return spec;
+    }
 
     if (peek_word(p, "own") && peek_tok_at(p, 1, T_STAR)) {
         Tok kw = advance_tok(p);
@@ -3975,6 +4003,7 @@ AstNode* parse_global_var(Parser* p) {
 
     // Optional type annotation: let x: i32 = ... or let arr: [i32; 10];
     if (match_tok(p, T_COLON)) {
+        g_ms64_ok = 1;
         TypeSpec spec = parse_type(p);
 
         // Store type info in AST node (creative use of fields)
@@ -3986,6 +4015,7 @@ AstNode* parse_global_var(Parser* p) {
             spec.is_own = 0;
             spec.is_pointer = 0;
         }
+        if (spec.is_ms64) global_var->flags |= AF_MS64;
         global_var->value = spec.base_type;          // Base type
         global_var->array_size = spec.array_count;   // Array count
         global_var->is_pointer = spec.is_pointer | (spec.is_mutable << 1) | (spec.is_volatile << 2);
@@ -4062,7 +4092,9 @@ AstNode* parse_func(Parser* p) {
                     }
                 } else {
                     /* parse_type, not take_type_name: `Par<T, i32>` keeps its arguments. */
+                    g_ms64_ok = 1;
                     TypeSpec spec = parse_type(p);
+                    if (spec.is_ms64) par->flags |= AF_MS64;
                     if (spec.is_slice) {
                         par->struct_type = strdup("__slice__");
                         par->value = spec.base_type ? spec.base_type : strdup("i64");
@@ -4291,8 +4323,8 @@ static AstNode* parse_data(Parser* p) {
 
 // `bits 16`, `bits 32`, `bits 64`, and `naked`, in either order, in front of fn.
 static AstNode* parse_bits_naked_fn(Parser* p) {
-    int bits = 0, naked = 0, saw_bits = 0;
-    while (peek_word(p, "bits") || peek_word(p, "naked")) {
+    int bits = 0, naked = 0, saw_bits = 0, ms64 = 0;
+    while (peek_word(p, "bits") || peek_word(p, "naked") || peek_word(p, "ms64")) {
         if (peek_word(p, "bits")) {
             Tok b = advance_tok(p);
             Tok num = advance_tok(p);
@@ -4302,6 +4334,10 @@ static AstNode* parse_bits_naked_fn(Parser* p) {
             if (saw_bits) diag_error(b.line, b.col, "bits was already set on this function");
             bits = v;
             saw_bits = 1;
+        } else if (peek_word(p, "ms64")) {
+            Tok mk = advance_tok(p);
+            if (ms64) diag_error(mk.line, mk.col, "ms64 was already set on this function");
+            ms64 = 1;
         } else {
             Tok nk = advance_tok(p);
             if (naked) diag_error(nk.line, nk.col, "naked was already set on this function");
@@ -4310,11 +4346,12 @@ static AstNode* parse_bits_naked_fn(Parser* p) {
     }
     if (!check_tok(p, T_FN)) {
         Tok bad = peek_tok(p);
-        diag_error(bad.line, bad.col, "expected 'fn' after bits or naked");
+        diag_error(bad.line, bad.col, "expected 'fn' after bits, naked, or ms64");
         return ast_new(AST_FUNCTION);
     }
     AstNode* fn = parse_func(p);
     if (naked) fn->flags |= AF_NAKED;
+    if (ms64) fn->flags |= AF_MS64;
     fn->bits = bits;
     return fn;
 }
@@ -4564,7 +4601,7 @@ static void parse_extern_fn(Parser* p, AstNode* prog) {
     if (!g_reloc)
         diag_error(kw.line, kw.col, "extern fn is only available with -c");
     AstNode* fn;
-    if (peek_word(p, "bits") || peek_word(p, "naked"))
+    if (peek_word(p, "bits") || peek_word(p, "naked") || peek_word(p, "ms64"))
         fn = parse_bits_naked_fn(p);
     else if (check_tok(p, T_FN))
         fn = parse_func(p);
@@ -4756,7 +4793,7 @@ static int pub_follows(Parser* p) {
     if (peek_word_at(p, 1, "extern") || peek_word_at(p, 1, "data") ||
         peek_word_at(p, 1, "packed") || peek_word_at(p, 1, "interrupt") ||
         peek_word_at(p, 1, "syscall") || peek_word_at(p, 1, "bits") ||
-        peek_word_at(p, 1, "naked"))
+        peek_word_at(p, 1, "naked") || peek_word_at(p, 1, "ms64"))
         return 1;
     if (peek_word_at(p, 1, "align") && peek_tok_at(p, 2, T_LPAREN)) return 1;
     return 0;
@@ -5231,11 +5268,12 @@ static void parse_top_item(Parser* p, AstNode* prog) {
     } else if (peek_word(p, "data") && peek_tok_at(p, 1, T_IDENT)) {
         add_top(prog, parse_data(p));
     } else if (peek_word(p, "extern") &&
-               (peek_tok_at(p, 1, T_FN) || peek_word_at(p, 1, "bits") || peek_word_at(p, 1, "naked"))) {
+               (peek_tok_at(p, 1, T_FN) || peek_word_at(p, 1, "bits") || peek_word_at(p, 1, "naked") ||
+                peek_word_at(p, 1, "ms64"))) {
         parse_extern_fn(p, prog);
     } else if (peek_word(p, "extern") && peek_tok_at(p, 1, T_IDENT)) {
         parse_extern(p, prog);
-    } else if (peek_word(p, "bits") || peek_word(p, "naked")) {
+    } else if (peek_word(p, "bits") || peek_word(p, "naked") || peek_word(p, "ms64")) {
         AstNode* fn = parse_bits_naked_fn(p);
         set_fn_align(fn, item_align);
         add_top(prog, fn);
@@ -8249,6 +8287,74 @@ static VTy param_decl_vty(Codegen* cg, AstNode* fn, const char* name) {
 }
 
 
+static char* expr_struct_type(Codegen* cg, AstNode* n);
+
+// A call to an `ms64 fn`, or through a variable of type `ms64 fn`.
+static int call_is_ms64(Codegen* cg, AstNode* n, int indirect) {
+    if (!n || !n->name) return 0;
+    if (indirect) {
+        Symbol* loc = (!n->qual && cg->symtab) ? symtab_lookup_symbol(cg->symtab, n->name) : NULL;
+        GlobalVar* gv;
+        if (loc) return loc->ms64;
+        gv = cg->global_symtab ? global_symtab_lookup(cg->global_symtab, n->name) : NULL;
+        return gv && gv->ms64;
+    }
+    {
+        AstNode* fn = find_func(cg, n->name);
+        return fn && (fn->flags & AF_MS64);
+    }
+}
+
+// Microsoft x64 call. Arguments 1 to 4 go in rcx, rdx, r8, r9; the 5th onward at
+// [rsp+32], [rsp+40], ... when `call` runs, above 32 bytes of shadow space, with
+// rsp 16-byte aligned. The result is in rax.
+// The arguments are evaluated and pushed first, as in any call, so a nested call
+// still sees the caller's rsp. rsp is not known to be aligned there, so it is
+// aligned on the spot: the pushed values stay where they are (r10 points at
+// them), the outgoing area is carved below them and rounded down to 16, and
+// r10 is kept in the slot right above that area, because the callee may
+// destroy r10. rbx holds the target of an indirect call; the callee preserves it.
+static void gen_ms64_call(Codegen* cg, AstNode* n, int indirect) {
+    static const char* regs[] = {"rcx", "rdx", "r8", "r9"};
+    int argc = n->child_count;
+    int extra = argc > 4 ? argc - 4 : 0;
+    int area = 32 + 8 * extra;
+    if (legacy_bits()) {
+        diag_error(n->line, n->col, "an ms64 call is a 64-bit call; it is not available in bits %d", g_fn_bits);
+        return;
+    }
+    for (int i = 0; i < argc; i++) {
+        AstNode* a = n->children[i];
+        if (enum_passed_by_addr(cg, a) || local_slice(cg, a) || global_slice(cg, a) ||
+            expr_struct_type(cg, a)) {
+            diag_error(a->line, a->col,
+                       "an ms64 call takes integers and pointers; argument %d is a struct, a slice, or an enum",
+                       i + 1);
+            return;
+        }
+    }
+    for (int i = 0; i < argc; i++) {
+        gen_one_arg(cg, n->children[i]);
+        emit(cg, "    push rax\n");
+        release_moved_arg(cg, n, i, indirect);
+    }
+    if (indirect) gen_load_callee(cg, n->name);
+    emit(cg, "    mov r10, rsp\n");
+    emit(cg, "    sub rsp, %d\n", area + 8);
+    emit(cg, "    and rsp, -16\n");
+    for (int i = 0; i < argc && i < 4; i++)
+        emit(cg, "    mov %s, [r10+%d]\n", regs[i], 8 * (argc - 1 - i));
+    for (int i = 4; i < argc; i++) {
+        emit(cg, "    mov rax, [r10+%d]\n", 8 * (argc - 1 - i));
+        emit(cg, "    mov [rsp+%d], rax\n", 32 + 8 * (i - 4));
+    }
+    emit(cg, "    mov [rsp+%d], r10\n", area);
+    if (indirect) emit(cg, "    call rbx\n");
+    else emit(cg, "    call %s\n", call_nasm(cg, n));
+    emit(cg, "    mov rsp, [rsp+%d]\n", area);
+    if (argc) emit(cg, "    add rsp, %d\n", 8 * argc);
+}
+
 static void gen_user_call(Codegen* cg, AstNode* n, int indirect) {
     if (!monomorphize_call(cg, n)) {
         emit(cg, "    xor rax, rax\n");
@@ -8335,6 +8441,10 @@ static void gen_user_call(Codegen* cg, AstNode* n, int indirect) {
             if (fn && (fn->flags & AF_OWN) && g_stmt_expr == n)
                 diag_error(n->line, n->col, "an owning pointer must be moved into 'own *T'");
         }
+    }
+    if (call_is_ms64(cg, n, indirect)) {
+        gen_ms64_call(cg, n, indirect);
+        return;
     }
     if (!indirect) {
         AstNode* fnr = find_func(cg, n->name);
@@ -18499,6 +18609,7 @@ void gen_stmt(Codegen* cg, AstNode* n) {
                             cg->symtab->stack_size - before, n->line, n->col);
         if (n->value && cg->symtab && cg->symtab->count > 0)
             cg->symtab->symbols[cg->symtab->count - 1].type_name = strdup(n->value);
+        if (n->flags & AF_MS64) cg->symtab->symbols[cg->symtab->count - 1].ms64 = 1;
         if (n->child_count > 0) {
             VTy src_ty = expr_ty(cg, n->children[0]);
             if (src_ty.kind == VK_SLICE) {
@@ -18817,6 +18928,7 @@ static void bind_param(Codegen* cg, AstNode* par, const char* src_reg, int stack
         off = symtab_add(cg->symtab, par->name, 1);
         if (par->value && cg->symtab && cg->symtab->count > 0)
             cg->symtab->symbols[cg->symtab->count - 1].type_name = strdup(par->value);
+        if (par->flags & AF_MS64) cg->symtab->symbols[cg->symtab->count - 1].ms64 = 1;
     }
     Symbol* bound = &cg->symtab->symbols[cg->symtab->count - 1];
     const char* rr = local_reg(bound);
@@ -20141,6 +20253,7 @@ void gen_func(Codegen* cg, AstNode* n) {
     int is_sys = (n->flags & AF_SYSCALL) != 0;
     int naked = (n->flags & AF_NAKED) != 0;
     int bits = n->bits;
+    int ms64 = (n->flags & AF_MS64) != 0;
     if (naked) native_note(n->line, "a naked function");
     if (is_int) native_note(n->line, "an interrupt function");
     if (is_sys) native_note(n->line, "a syscall function");
@@ -20197,11 +20310,30 @@ void gen_func(Codegen* cg, AstNode* n) {
         diag_error(n->line, n->col,
                    "bits %d functions must be naked; the frame prologue uses 64-bit registers", bits);
     }
-    if (naked && param_count > 0) {
+    if (naked && param_count > 0 && !ms64) {
         int mode = bits ? bits : 64;
-        int maxp = (mode == 16 || mode == 32) ? 4 : 6;
+        int maxp = (mode == 16 || mode == 32) ? 4 : ms64 ? 4 : 6;
         if (param_count > maxp)
             diag_error(n->line, n->col, "a naked function takes at most %d register parameters", maxp);
+    }
+    if (ms64) {
+        if (is_int || is_sys)
+            diag_error(n->line, n->col, "an interrupt or syscall function cannot be ms64");
+        else if (bits && bits != 64)
+            diag_error(n->line, n->col, "an ms64 function is 64-bit; bits %d cannot be ms64", bits);
+        if (!naked && n->value && !(n->is_pointer & 1) && enum_lookup(n->value))
+            diag_error(n->line, n->col, "an ms64 function returns an integer or a pointer, not an enum");
+        for (int i = 0; i < param_count; i++) {
+            AstNode* par = n->children[i];
+            if (!par) continue;
+            if ((par->struct_type && !strcmp(par->struct_type, "__slice__")) ||
+                (!par->is_pointer && par->value &&
+                 (enum_lookup(par->value) || typetab_lookup(cg->types, par->value))) ||
+                (par->flags & AF_OWN))
+                diag_error(par->line, par->col,
+                           "an ms64 parameter is an integer or a pointer; '%s' is a struct, a slice, an enum, or an owning pointer",
+                           par->name ? par->name : "?");
+        }
     }
     if (is_int && param_count > 1) {
         diag_error(n->line, n->col,
@@ -20242,6 +20374,31 @@ void gen_func(Codegen* cg, AstNode* n) {
     if (g_reloc && n->inst_disp && !n->is_forward_decl)
         emit(cg, "global %s\n", g_fn_name);
 
+    if (ms64 && !naked && !is_int && !is_sys && (!bits || bits == 64)) {
+        // Microsoft x64 entry. The body below is an ordinary function; this thunk
+        // keeps rdi, rsi, and rbx for the caller (the MS convention makes them
+        // non-volatile), moves rcx, rdx, r8, r9 and the stack arguments
+        // ([rbp+48] is the 5th) to where that body reads them, and calls it.
+        // The symbol the caller sees is the thunk; the body gets a private name.
+        int extra = param_count > 6 ? param_count - 6 : 0;
+        emit(cg, "\n%s:\n", g_fn_name);
+        emit(cg, "    push rbp\n    mov rbp, rsp\n    push rdi\n    push rsi\n    push rbx\n    sub rsp, 8\n");
+        if (extra & 1) emit(cg, "    sub rsp, 8\n");
+        for (int i = param_count - 1; i >= 6; i--)
+            emit(cg, "    push qword [rbp+%d]\n", 48 + 8 * (i - 4));
+        if (param_count >= 4) emit(cg, "    mov r11, r9\n");
+        if (param_count >= 3) emit(cg, "    mov r10, r8\n");
+        if (param_count >= 2) emit(cg, "    mov rsi, rdx\n");
+        if (param_count >= 1) emit(cg, "    mov rdi, rcx\n");
+        if (param_count >= 3) emit(cg, "    mov rdx, r10\n");
+        if (param_count >= 4) emit(cg, "    mov rcx, r11\n");
+        if (param_count >= 5) emit(cg, "    mov r8, [rbp+48]\n");
+        if (param_count >= 6) emit(cg, "    mov r9, [rbp+56]\n");
+        snprintf(g_fn_name, sizeof(g_fn_name), "__ms64_%s",
+                 n->mod ? link_sym(n->mod, n->name) : n->name);
+        emit(cg, "    call %s\n", g_fn_name);
+        emit(cg, "    lea rsp, [rbp-24]\n    pop rbx\n    pop rsi\n    pop rdi\n    pop rbp\n    ret\n");
+    }
     if (bits) emit(cg, "\nbits %d\n%s:\n", bits, g_fn_name);
     else emit(cg, "\n%s:\n", g_fn_name);
     if (naked) {
@@ -20357,11 +20514,12 @@ void gen_func(Codegen* cg, AstNode* n) {
         // that parameter. bx/ebx/rbx stay scratch and are not parameter registers.
         // bx/bp and ebx/ebp/esi/edi are naked lvalues in bits 16/32 (not here).
         int mode = bits ? bits : 64;
-        int maxp = (mode == 16 || mode == 32) ? 4 : 6;
+        int maxp = (mode == 16 || mode == 32) ? 4 : ms64 ? 4 : 6;
         static const char* p16[] = {"ax", "cx", "dx", "si"};
         static const char* p32[] = {"eax", "ecx", "edx", "esi"};
         static const char* p64[] = {"rdi", "rsi", "rdx", "rcx", "r8", "r9"};
-        const char** pregs = mode == 16 ? p16 : mode == 32 ? p32 : p64;
+        static const char* pms[] = {"rcx", "rdx", "r8", "r9"};
+        const char** pregs = mode == 16 ? p16 : mode == 32 ? p32 : ms64 ? pms : p64;
         int pw = mode == 16 ? 16 : mode == 32 ? 32 : 64;
         int nbind = param_count < maxp ? param_count : maxp;
         for (int i = 0; i < nbind; i++) {
@@ -21446,6 +21604,7 @@ void codegen(AstNode* ast, const char* file, StringTable* strtab, TypeTable* typ
                     added->src_name = gvar->name ? strdup(gvar->name) : NULL;
                     added->mod = gvar->mod;
                     added->is_pub = (gvar->flags & AF_PUB) ? 1 : 0;
+                    added->ms64 = (gvar->flags & AF_MS64) ? 1 : 0;
                 }
                 if (added && (gvar->flags & AF_VOLATILE))
                     added->is_volatile = 1;
