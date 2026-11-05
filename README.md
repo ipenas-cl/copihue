@@ -16,7 +16,7 @@ Current version: **0.42.5** (`compiler/bootstrap-c/copihue.c`, `LANG_VERSION`). 
 
 ## Install
 
-Requirements: Linux x86-64, `gcc`, `make`, `nasm`, `ld` (binutils).
+Requirements: Linux x86-64, `gcc`, `make`. Building a program, or a `-c` object, needs no `nasm` and no `ld`: the compiler writes the ELF file itself. `nasm` and `ld` (binutils) are needed for a program with `asm("...")` or a `naked`, `interrupt` or `syscall` function, for `--freestanding -c`, `--flat` and `--boot`, for `--nasm`, and by `make test`.
 
 ```bash
 sudo apt-get install -y gcc make nasm binutils
@@ -43,12 +43,18 @@ copihue hello.lap -o hello && ./hello
 ```
 
 ```
-copihue [-O0|-O1|-O2] [-o out] [-S] [-c] [--native] [--freestanding | --flat ADDR | --boot] [-v] file.lap [more.lap ...]
+copihue [-O0|-O1|-O2] [-o out] [-S] [-c] [--nasm | --native] [--freestanding | --flat ADDR | --boot] [-v] file.lap [more.lap ...]
 ```
 
-`-S` writes NASM assembly only. `-c` writes one ELF64 relocatable object (link with `ld`). `--freestanding`, `--flat` and `--boot` are for kernels (see [docs/KERNELS.md](docs/KERNELS.md)). The value returned by `main` is the exit code.
+`-S` writes NASM assembly only. `-c` writes one ELF64 relocatable object (link with `ld` or `gcc`). `--freestanding`, `--flat` and `--boot` are for kernels (see [docs/KERNELS.md](docs/KERNELS.md)). The value returned by `main` is the exit code.
 
-`--native` (experimental) writes the hosted ELF64 executable with the compiler's own assembler and ELF writer (`compiler/native`), with no `nasm` and no `ld`. It takes hosted 64-bit programs only; with `-S`, `-c`, `--freestanding`, `--flat`, `--boot`, or a program that has `asm("...")` or a `naked`, `interrupt` or `syscall` function it stops with an error instead of falling back to `nasm` and `ld`. The file carries `.symtab`, `.strtab` and `.shstrtab` with minimal section headers, so `readelf -S -s` and `objdump -d` show the functions and data labels by name. The default path is unchanged. Status and what is verified: [docs/DESIGN_NATIVE.md](docs/DESIGN_NATIVE.md).
+**The compiler writes the ELF itself.** A hosted program, and a `-c` object, is assembled by the compiler's own assembler and ELF writer (`compiler/native`): no `nasm`, no `ld`, and no `output.asm` or `output.o` left on disk (the assembly goes from memory to the assembler; `-S` is still the way to see it). The executable carries `.symtab`, `.strtab` and `.shstrtab` with minimal section headers, so `readelf -S -s` and `objdump -d` show the functions and data labels by name. A program the built-in assembler does not take (`asm("...")`, a `naked`, `interrupt` or `syscall` function, a function with `bits 16` or `bits 32`) is built with `nasm` and `ld` instead, and the compiler says so on stderr: `copihue: warning: the built-in assembler does not take this program (line 5: asm("...") (user assembly)); falling back to nasm and ld`. `--freestanding -c` is `nasm`'s too, without a warning.
+
+- `--nasm` always uses `nasm -f elf64` and `ld`, as before the built-in back end; it leaves `output.asm` and `output.o`.
+- `--native` is the default, but strict: it refuses what the built-in assembler does not take (the error names the construct and its line) instead of falling back. It is accepted with `-c`; with `-S`, `--freestanding`, `--flat`, `--boot` or `--elf` it is an error. Scripts that pass `--native` keep working.
+- `--native` and `--nasm` cannot be combined.
+
+The `-c` object is `ET_REL` with `.text`, `.rodata`, `.data`, `.bss` (those it has), `.rela.*`, `.symtab`, `.strtab` and `.shstrtab`; `extern` names are undefined global symbols. It is compared with `nasm -f elf64`'s object of the same text in `make native-test` (bytes, relocations, symbols) and, on Linux, linked and run with `ld` and `gcc`. It carries no `.note.GNU-stack` section, like `nasm`'s. Status and what is verified: [docs/DESIGN_NATIVE.md](docs/DESIGN_NATIVE.md).
 
 ## What the language has
 
@@ -130,9 +136,10 @@ Copihue is slower on recursive code (`fib`), on the matching engine, and on a gr
 - `bench/`: benchmarks outside `make test`
 - `docs/REFERENCE.md`: language reference; `docs/DESIGN_*.md`: one note per feature
 - `docs/STATUS.md`, `docs/KERNELS.md`: detailed limits, test inventory and kernel modes
-- `compiler/native/x64.c`: x86-64 instruction encoder, first piece of writing the ELF without `nasm` and `ld`. Not used by `copihue` yet; `make native-test` compares it with `nasm`. Inventory and design: [docs/DESIGN_NATIVE.md](docs/DESIGN_NATIVE.md)
-- `compiler/native/asm.c`: assembler for the hosted NASM text (labels, jump relaxation, `call`, `.data`/`.rodata`/`.bss`); `make native-test` checks the bytes, the `.bss` size and the relocations against `nasm -f elf64` on all 466 corpus programs. Not used by `copihue`: [docs/DESIGN_NATIVE.md](docs/DESIGN_NATIVE.md)
-- `compiler/native/x64.c`: a second x86-64 encoder that also returns relocations; `make native-test` compares it with `nasm -f elf64` (bytes and relocations). Not used by `copihue` either: [docs/DESIGN_NATIVE_X64.md](docs/DESIGN_NATIVE_X64.md)
+- `compiler/native/x64.c`: x86-64 instruction encoder, the first piece of writing the ELF without `nasm` and `ld`; `make native-test` compares it with `nasm`. Inventory and design: [docs/DESIGN_NATIVE.md](docs/DESIGN_NATIVE.md)
+- `compiler/native/asm.c`: assembler for the NASM text the compiler emits (labels, jump relaxation, `call`, `.data`/`.rodata`/`.bss`, `extern` in `-c` objects); `make native-test` checks the bytes, the `.bss` size and the relocations against `nasm -f elf64` on all the corpus programs. Used by `copihue`: [docs/DESIGN_NATIVE.md](docs/DESIGN_NATIVE.md)
+- `compiler/native/elf.c`: writes the ELF64 executable and the `-c` relocatable object. Used by `copihue`.
+- `compiler/native/x64.c`: a second x86-64 encoder that also returns relocations; `make native-test` compares it with `nasm -f elf64` (bytes and relocations): [docs/DESIGN_NATIVE_X64.md](docs/DESIGN_NATIVE_X64.md)
 - `compiler/asm/`: an early experimental compiler in x86-64 assembly (still uses `chronos` names)
 - `archive/`, `docs/history/`, `docs/archive/`: Chronos-era material, kept unchanged
 
@@ -143,7 +150,7 @@ Copihue is slower on recursive code (`fib`), on the matching engine, and on a gr
 - Generic bodies in `-c` objects: the same monomorphized body emitted in two objects fails at `ld`.
 - The compiler does not emit GDT, page tables or the `STAR`/`LSTAR`/`EFER` writes; the kernel does.
 - Speed: recursion, the matching engine and `vec_push` against Rust (see above).
-- Self-hosting and other targets (ARM64) are not started. `nasm` and `ld` are still required; the encoder that will replace them covers 100% of the hosted instructions so far (symbols as relocations), and an assembler (`asm.c`) already lays out whole programs; there is no ELF writer or command-line option yet ([docs/DESIGN_NATIVE.md](docs/DESIGN_NATIVE.md)).
+- Self-hosting and other targets (ARM64) are not started. `nasm` and `ld` are no longer needed for hosted programs and `-c` objects, but they still build programs with user assembly or `naked`/`interrupt`/`syscall` functions, `--freestanding -c`, `--flat` and `--boot`. The author's development machine (macOS) cannot run Linux ELF files, so running what the compiler writes is the CI's job ([docs/DESIGN_NATIVE.md](docs/DESIGN_NATIVE.md)).
 
 Plans: [ROADMAP.md](ROADMAP.md) and [docs/VISION.md](docs/VISION.md).
 
