@@ -1,0 +1,8 @@
+// The text and data are one page, the bss makes the image 70000+ bytes in memory:
+// more than 16 pages.
+let big: [u8; 70000];
+
+fn _start() {
+    big[0] = 1;
+    while (1) { }
+}

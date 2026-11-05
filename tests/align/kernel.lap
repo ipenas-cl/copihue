@@ -1,0 +1,95 @@
+// Flat kernel at 0x8000 for QEMU, loaded by tests/usermode/boot.lap (the sector
+// reads 16 sectors, 8192 bytes, to 0x8000). _start is 32-bit: it identity-maps
+// the first 2MB and far-jumps into kmain (long mode). `page` is declared
+// align(4096), so it must sit at 0x9000, the second page of the image, and run
+// from there. The globals follow the text in the image: `table` and `counter`
+// are initialized data read through their addresses. COM1 shows PAGE when the
+// function is at 0x9000, returns counter + 1, and the data reads back; FAIL
+// otherwise.
+
+let table: [u8; 4] = [1, 2, 3, 4];
+let counter: i64 = 41;
+
+data gdt {
+    dq 0;
+    dw 0;
+    dw 0;
+    db 0;
+    db 0x9A;
+    db 0x20;
+    db 0;
+    dw 0xFFFF;
+    dw 0;
+    db 0;
+    db 0x92;
+    db 0xCF;
+    db 0;
+}
+
+data gdtr {
+    dw 23;
+    dd gdt;
+}
+
+fn serial_putc(c: i64) -> i64 {
+    let tries = 0;
+    while ((inb(0x3FD) & 0x20) == 0 && tries < 1000) { tries = tries + 1; }
+    outb(0x3F8, c);
+    return 0;
+}
+
+fn kmain() -> i64 {
+    let at: i64 = &page;
+    let ok = 1;
+    if (at != 0x9000) { ok = 0; }
+    if (page() != 42) { ok = 0; }
+    if (table[2] != 3) { ok = 0; }
+    if (ok == 1) {
+        serial_putc(80);
+        serial_putc(65);
+        serial_putc(71);
+        serial_putc(69);
+    } else {
+        serial_putc(70);
+        serial_putc(65);
+        serial_putc(73);
+        serial_putc(76);
+    }
+    while (1) { hlt(); }
+    return 0;
+}
+
+align(4096) fn page() -> i64 {
+    return counter + 1;
+}
+
+bits 32 naked fn _start() {
+    cli();
+    asm("lgdt [gdtr]");
+    asm("mov ax, 0x10");
+    asm("mov ds, ax");
+    asm("mov es, ax");
+    asm("mov ss, ax");
+    asm("mov esp, 0x6000");
+    asm("cld");
+    asm("xor eax, eax");
+    asm("mov edi, 0x1000");
+    asm("mov ecx, 3072");
+    asm("rep stosd");
+    asm("mov dword [0x1000], 0x2007");
+    asm("mov dword [0x2000], 0x3007");
+    asm("mov dword [0x3000], 0x87");
+    asm("mov eax, cr4");
+    asm("or eax, 0x20");
+    asm("mov cr4, eax");
+    asm("mov eax, 0x1000");
+    asm("mov cr3, eax");
+    asm("mov ecx, 0xC0000080");
+    asm("rdmsr");
+    asm("or eax, 0x100");
+    asm("wrmsr");
+    asm("mov eax, cr0");
+    asm("or eax, 0x80000000");
+    asm("mov cr0, eax");
+    asm("jmp 0x08:kmain");
+}

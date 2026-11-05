@@ -1,0 +1,7 @@
+tests/errors/align_fn_target.lap:2:14: error: align() does not apply to a generic function
+      2 | align(16) fn generic<T>(x: T) -> T {
+        |              ^
+tests/errors/align_fn_target.lap:6:11: error: align() applies to a struct, a field, a function, or a global
+      6 | align(16) section ".extra" {
+        |           ^
+2 errors, compilation failed

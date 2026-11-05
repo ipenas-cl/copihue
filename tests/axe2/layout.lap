@@ -1,0 +1,17 @@
+// --flat 0x400000 --axe2: code in two text pages (second() is aligned to the
+// second page), initialized data (a scalar and an array) on the page after the
+// text, and a bss after the data that takes no bytes in the file.
+let table: [u8; 4] = [1, 2, 3, 4];
+let counter: i64 = 7;
+let total: i64;
+let scratch: [u8; 64];
+
+fn _start() {
+    total = counter + table[2] + second();
+    scratch[0] = 1;
+    while (1) { }
+}
+
+align(4096) fn second() -> i64 {
+    return 2;
+}

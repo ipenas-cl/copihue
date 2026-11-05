@@ -1,0 +1,1 @@
+tests/axe2/err_section.lap:1:1: error: --axe2: section '.extra' is not allowed; an AXE2 image is .text, .data and .bss

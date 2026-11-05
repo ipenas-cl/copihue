@@ -1,0 +1,1 @@
+copihue: error: --axe2: the entry point _start (0x401000) is outside the text (0x400000 to 0x400014)

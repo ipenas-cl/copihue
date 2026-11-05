@@ -1,0 +1,7 @@
+tests/errors/align_fn_pow2.lap:2:7: error: align() takes a power of two from 1 to 4096
+      2 | align(3) fn bad() -> i64 {
+        |       ^
+tests/errors/align_fn_pow2.lap:6:7: error: align() takes a power of two from 1 to 4096
+      6 | align(8192) fn too_big() -> i64 {
+        |       ^
+2 errors, compilation failed

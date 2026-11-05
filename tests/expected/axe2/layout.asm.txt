@@ -1,0 +1,61 @@
+bits 64
+org 0x400000
+section .data align=4096
+table: db 1, 2, 3, 4
+counter: dq 7
+section .bss
+__bss_start:
+total: resq 1
+scratch: resb 64
+section .bss
+__bss_end:
+section .text
+_start:
+    push rbp
+    mov rbp, rsp
+    sub rsp, __frame__start
+    mov rax, [counter]
+    push rax
+    mov rax, 2
+    lea rbx, [table]
+    add rbx, rax
+    movzx rax, byte [rbx]
+    mov rbx, rax
+    pop rax
+    add rax, rbx
+    push rax
+    call second
+    mov rbx, rax
+    pop rax
+    add rax, rbx
+    mov [total], rax
+    mov rax, 1
+    push rax
+    mov rax, 0
+    lea rbx, [scratch]
+    add rbx, rax
+    pop rax
+    mov byte [rbx], al
+.L0:
+    mov rax, 1
+    test rax, rax
+    jz .L1
+.L2:
+    jmp .L0
+.L1:
+    xor rax, rax
+    leave
+    ret
+__frame__start equ 64
+align 4096, db 0xCC
+second:
+    push rbp
+    mov rbp, rsp
+    sub rsp, __frame_second
+    mov rax, 2
+    leave
+    ret
+    xor rax, rax
+    leave
+    ret
+__frame_second equ 64

@@ -1,0 +1,21 @@
+// Fifteen functions aligned to a page after _start: the last starts at 0xF000,
+// the 16th page. The image fits in 16 pages (65536 bytes), so --axe2 accepts it.
+fn _start() {
+    while (1) { }
+}
+
+align(4096) fn f1() -> i64 { return 1; }
+align(4096) fn f2() -> i64 { return 2; }
+align(4096) fn f3() -> i64 { return 3; }
+align(4096) fn f4() -> i64 { return 4; }
+align(4096) fn f5() -> i64 { return 5; }
+align(4096) fn f6() -> i64 { return 6; }
+align(4096) fn f7() -> i64 { return 7; }
+align(4096) fn f8() -> i64 { return 8; }
+align(4096) fn f9() -> i64 { return 9; }
+align(4096) fn f10() -> i64 { return 10; }
+align(4096) fn f11() -> i64 { return 11; }
+align(4096) fn f12() -> i64 { return 12; }
+align(4096) fn f13() -> i64 { return 13; }
+align(4096) fn f14() -> i64 { return 14; }
+align(4096) fn f15() -> i64 { return 15; }

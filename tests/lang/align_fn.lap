@@ -1,0 +1,23 @@
+// align(N) before fn: the function's address is a multiple of N, even in a
+// hosted program. `plain` is not aligned, so its address is not asserted.
+align(4096) fn page() -> i64 {
+    return 7;
+}
+
+align(64) fn line() -> i64 {
+    return 8;
+}
+
+fn plain() -> i64 {
+    return 9;
+}
+
+fn main() -> i64 {
+    print_int((&page) & 4095);
+    println("");
+    print_int((&line) & 63);
+    println("");
+    print_int(page() + line() + plain());
+    println("");
+    return 0;
+}

@@ -1,0 +1,12 @@
+// flags: --flat 0x10000
+align(3) fn bad() -> i64 {
+    return 1;
+}
+
+align(8192) fn too_big() -> i64 {
+    return 2;
+}
+
+fn _start() {
+    while (1) { }
+}
