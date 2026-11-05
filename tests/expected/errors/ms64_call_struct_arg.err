@@ -1,0 +1,4 @@
+tests/errors/ms64_call_struct_arg.lap:6:14: error: an ms64 call takes integers and pointers; argument 1 is a struct, a slice, or an enum
+      6 |     return f(p);
+        |              ^
+1 error, compilation failed

@@ -1,0 +1,7 @@
+struct Pair { a: i64, b: i64 }
+
+fn main() -> i64 {
+    let f: ms64 fn = 0;
+    let p: Pair = Pair { a: 1, b: 2 };
+    return f(p);
+}

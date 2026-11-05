@@ -25,6 +25,9 @@
 # 4h. Initializers of globals (0.44.5): tests/errors/ginit_*.lap are refused in every way the compiler builds;
 #    the constant expressions are in .data (assembly of tests/lang/global_init.lap and tests/ginit/kernel.lap);
 #    QEMU runs tests/ginit/kernel.lap. All of it in tests/ginit/run.sh.
+# 4i. Microsoft x64 convention (0.44.6): tests/errors/ms64_*.lap are refused in every way the compiler builds; the
+#    call sequence is in the assembly of tests/lang/ms64_fn.lap and no System V program has it; QEMU runs
+#    tests/ms64/kernel.lap. All of it in tests/ms64/run.sh.
 # 5. Boot sectors: tests/boot/*.lap, and QEMU must print COPIHUE.
 # 6. User mode: tests/usermode, and QEMU must print USER.
 # 7. Context switch: tests/ctx, and QEMU must print COPIHUE.
@@ -106,7 +109,7 @@ check() {  # $1 = name, $2 = golden file, $3 = actual file
   else fail=$((fail+1)); failed+=("$1"); echo "FAIL $1"; [ -f "$2" ] && diff "$2" "$3" | head -10; fi
 }
 
-for src in $(ls tests/*.lap tests/*/*.lap examples/*.lap examples/*/*.lap examples/*/*/*.lap | grep -v -e '^tests/errors/' -e '^tests/freestanding/' -e "^tests/flat/" -e "^tests/boot/" -e '^tests/usermode/' -e '^tests/ctx/' -e '^tests/native/' -e '^tests/align/' -e '^tests/assign/' -e '^tests/axe1/' -e '^tests/ginit/' -e '^tests/axe2/' -e '^tests/tools/'); do
+for src in $(ls tests/*.lap tests/*/*.lap examples/*.lap examples/*/*.lap examples/*/*/*.lap | grep -v -e '^tests/errors/' -e '^tests/freestanding/' -e "^tests/flat/" -e "^tests/boot/" -e '^tests/usermode/' -e '^tests/ctx/' -e '^tests/native/' -e '^tests/align/' -e '^tests/assign/' -e '^tests/axe1/' -e '^tests/ginit/' -e '^tests/ms64/' -e '^tests/axe2/' -e '^tests/tools/'); do
   case "$SKIP" in *" $src "*) continue ;; esac
   golden=tests/expected/${src%.lap}.out
   FELL=0
@@ -1152,6 +1155,15 @@ if gin=$(bash "$ROOT/tests/ginit/run.sh" "$CC" 2>&1); then
   pass=$((pass+1)); echo "$gin" | grep -E '^skip|^tests/ginit:'
 else
   fail=$((fail+1)); failed+=("tests/ginit"); echo "$gin" | head -40
+fi
+
+# 4i. Microsoft x64 convention (0.44.6): `ms64 fn` and a variable of type `ms64 fn`. The refusals, the call
+# sequence in the assembly (System V programs unchanged), and a kernel that calls and defines ms64
+# functions with 0, 1, 4, 5, 6, 8 and 9 arguments under QEMU. The details are in tests/ms64/run.sh.
+if ms=$(bash "$ROOT/tests/ms64/run.sh" "$CC" 2>&1); then
+  pass=$((pass+1)); echo "$ms" | grep -E '^skip|^tests/ms64:'
+else
+  fail=$((fail+1)); failed+=("tests/ms64"); echo "$ms" | head -40
 fi
 
 rm -f "$CC"

@@ -1,0 +1,4 @@
+tests/errors/ms64_type_field.lap:1:22: error: 'ms64 fn' is the type of a let, a global, or a parameter only
+      1 | struct Table { open: ms64 fn, close: i64 }
+        |                      ^
+1 error, compilation failed

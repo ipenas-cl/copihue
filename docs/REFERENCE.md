@@ -1,4 +1,4 @@
-# Copihue Language Reference (v0.44.5)
+# Copihue Language Reference (v0.44.6)
 
 This document describes the language that `copihue` accepts today. Anything not listed here is not supported.
 Planned features are in the README roadmap.
@@ -532,6 +532,44 @@ set_gate(32, &timer);
 ```
 
 The address can be stored in an integer, a global, or an array element and called later. An indirect call does not check the argument count.
+
+### Microsoft x64 convention (`ms64`)
+
+UEFI firmware, and Windows code in general, uses the Microsoft x64 convention, not System V. Since 0.44.6 a function and a function pointer can be marked `ms64`. The marker is a modifier like `naked` and `bits`, not a string after `extern`: `extern fn` already means "defined in another `-c` object", and `ms64` says how the call is made, not where the body is.
+
+```copihue
+// calling the firmware: a variable of type `ms64 fn` holds the address
+let alloc: ms64 fn = bs_allocate_pages;           // read from the boot services table
+let status = alloc(0, 2, 7, 1, &addr);           // five arguments: the fifth is on the stack
+
+// defining a function the firmware calls (the entry point of an EFI image)
+ms64 fn efi_main(image: i64, table: *SystemTable) -> i64 { return 0; }
+
+// an assembly routine that the Microsoft convention calls: the caller side is the same
+naked ms64 fn probe(a: i64, b: i64, c: i64, d: i64, e: i64) -> i64 { asm("lea rax, [rcx+rdx]"); }
+```
+
+**Where it goes.**
+- `ms64 fn name(...)`, in any order with `naked` and `bits 64`: the function uses the convention. It can be a forward declaration (`ms64 fn f(a: i64);`) and `extern ms64 fn f(...);` with `-c`. A call by name checks the argument count as always.
+- `let f: ms64 fn`, `let f: ms64 fn = &g;`, a global `let gf: ms64 fn;`, and a parameter `cb: ms64 fn`: an `i64` that holds a function address. A call `f(a, b)` through it uses the convention. The argument count is not checked, as for any call through a variable. It is the type of a `let`, a global, or a parameter and nothing else: in a struct field, in a return type, or in a cast it is `'ms64 fn' is the type of a let, a global, or a parameter only`. To call a pointer stored in a struct, read it into a `let f: ms64 fn` first.
+- `&name` of an `ms64 fn` is the address that firmware must call.
+
+**The call.** At the `call` instruction:
+- arguments 1 to 4 are in `rcx`, `rdx`, `r8`, `r9`;
+- argument 5 and later are on the stack at `[rsp+32]`, `[rsp+40]`, ..., one qword each, above 32 bytes of shadow space (`[rsp]` to `[rsp+31]`) that the caller reserves and the callee may use. Inside the callee, after the return address, the fifth argument is at `[rsp+40]`;
+- `rsp` is a multiple of 16 (so it is 8 modulo 16 on entry to the callee);
+- the result is in `rax`;
+- `rax rcx rdx r8 r9 r10 r11` (and the vector registers) are destroyed; `rbx rbp rdi rsi r12`-`r15` are kept by the callee. The compiler already treats `rdi` and `rsi` as destroyed by every call, so it needs no change to rely on this.
+
+The compiler does not know the depth of `rsp` at an arbitrary point of an expression, so a call to an `ms64` function aligns the stack where it stands: it evaluates the arguments and pushes them as for any call, keeps the address of that block in `r10`, makes room for the shadow space and the stack arguments below it, rounds `rsp` down to 16, copies the arguments to `rcx rdx r8 r9` and the outgoing area, saves `r10` in a slot above that area, calls, and restores `rsp`. A nested call in an argument is a complete call of its own. The cost is a few instructions per call; a System V call is as it was (the assembly of every program in `tests/` and `examples/` is identical to 0.44.5).
+
+**Defining an `ms64 fn`.** A function with a body gets two labels. `name` is a thunk the caller sees: it saves `rbp`, `rdi`, `rsi`, and `rbx` (the compiler's code uses `rbx` as a scratch register, and the Microsoft convention keeps it), moves `rcx rdx r8 r9` to where the body reads its first four parameters, copies the stack arguments of a function with more than six parameters, calls the body, and restores. `__ms64_name` is the body, an ordinary function (the same code at `-O0` and `-O2`, `--flat`, `--freestanding`, and hosted). `r12`-`r15` are saved by the body whenever it uses them. A call from the body to the function itself goes through the thunk. The entry `rsp` of the thunk is 8 modulo 16, as the firmware leaves it.
+
+A `naked ms64 fn` has no thunk and no frame. The convention is the declaration for the callers, and the parameters are the incoming registers: the first four are `rcx`, `rdx`, `r8`, `r9`. More than four parameters are allowed (up to 16); the fifth and later are not variables, the assembly reads them at `[rsp+40]`, `[rsp+48]`, ... A naked function keeps what the convention asks only if its assembly does.
+
+**Limits.** Integers and pointers up to 64 bits. Copihue has no floating-point type; a struct, a slice (`[]T`, `str`), an enum, or an `own *T` as an `ms64` parameter or argument is an error (`an ms64 parameter is an integer or a pointer; 'p' is a struct, a slice, an enum, or an owning pointer`; `an ms64 call takes integers and pointers; argument 1 is a struct, a slice, or an enum`), and so is an enum return. `ms64` with `interrupt` or `syscall` (`an interrupt or syscall function cannot be ms64`) or with `bits 16` / `bits 32` (`an ms64 function is 64-bit; bits 32 cannot be ms64`) is an error, and so is a call to an `ms64` function from a `bits 16/32` function. At most 16 arguments, as for any call. Fewer arguments than four still reserve the 32 bytes of shadow space. `extern ms64 fn f(...);` (with `-c`) compiles to the same call, and the symbol another object defines with `ms64 fn` is the thunk; that link was compiled but not run here.
+
+`tests/lang/ms64_fn.lap` (Copihue functions, built by the compiler's own assembler) and `tests/lang/ms64_call.lap` (assembly callees that check the registers, the stack, the alignment, and the shadow space) call functions with 0, 1, 4, 5, 6, 8 and 9 arguments. `tests/ms64/kernel.lap` runs the same checks under QEMU, at `-O0` and `-O2`, and a trampoline fills `rdi`, `rsi`, `rbx`, and `r13` with markers before it calls an `ms64 fn` written in Copihue, to check they come back. `tests/errors/ms64_*.lap` are the refusals.
 
 ### Interrupt and syscall functions
 

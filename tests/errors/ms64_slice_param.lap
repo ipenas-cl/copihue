@@ -1,0 +1,7 @@
+fn main() -> i64 {
+    return 0;
+}
+
+ms64 fn f(s: []u8) -> i64 {
+    return 0;
+}

@@ -1,0 +1,4 @@
+tests/errors/ms64_arity.lap:6:12: error: function 'f' takes 2 arguments, not 1
+      6 |     return f(1);
+        |            ^
+1 error, compilation failed

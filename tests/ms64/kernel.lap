@@ -1,0 +1,324 @@
+// Flat kernel at 0x8000 for QEMU, loaded by tests/usermode/boot.lap (see tests/align/kernel.lap
+// for the mode switch). It calls and defines Microsoft x64 functions (0.44.6) and reports on COM1:
+// MS64 when every check holds, FAIL and the number of the first check that does not otherwise.
+//
+// The callees written in assembly (`naked ms64 fn`) read rcx, rdx, r8, r9, and [rsp+40] on, check
+// that rsp was 8 modulo 16 on entry, write into the 32 bytes of shadow space, and clobber every
+// volatile register before they return. The callees written in Copihue (`ms64 fn`) are called by
+// those same call sites and by a trampoline that fills rdi, rsi, rbx, and r13 first.
+
+let bad: i64 = 0;
+let gp8: ms64 fn = 0;
+
+// 1 when rsp was 8 modulo 16 at the first instruction, 0 otherwise.
+naked ms64 fn aligned() -> i64 {
+    asm("mov rax, rsp");
+    asm("and eax, 15");
+    asm("cmp eax, 8");
+    asm("sete al");
+    asm("movzx eax, al");
+}
+
+// Returns its argument. The shadow space takes a store and gives it back.
+naked ms64 fn f1(a: i64) -> i64 {
+    asm("mov [rsp+8], rcx");
+    asm("xor ecx, ecx");
+    asm("mov rax, [rsp+8]");
+    asm("xor edx, edx");
+    asm("xor r8d, r8d");
+    asm("xor r9d, r9d");
+    asm("xor r10d, r10d");
+    asm("xor r11d, r11d");
+}
+
+// d*1000 + c*100 + b*10 + a: digit n is argument n. rsp must be 8 modulo 16.
+naked ms64 fn f4(a: i64, b: i64, c: i64, d: i64) -> i64 {
+    asm("mov [rsp+8], rcx");
+    asm("mov [rsp+16], rdx");
+    asm("mov [rsp+24], r8");
+    asm("mov [rsp+32], r9");
+    asm("xor ecx, ecx");
+    asm("xor edx, edx");
+    asm("xor r8d, r8d");
+    asm("xor r9d, r9d");
+    asm("xor r10d, r10d");
+    asm("xor r11d, r11d");
+    asm("mov rax, [rsp+32]");
+    asm("imul rax, rax, 10");
+    asm("add rax, [rsp+24]");
+    asm("imul rax, rax, 10");
+    asm("add rax, [rsp+16]");
+    asm("imul rax, rax, 10");
+    asm("add rax, [rsp+8]");
+    asm("mov r10, rsp");
+    asm("and r10d, 15");
+    asm("cmp r10d, 8");
+    asm("je .ok4");
+    asm("xor eax, eax");
+    asm(".ok4:");
+}
+
+// The fifth argument is at [rsp+40] after the call, above the shadow space.
+naked ms64 fn f5(a: i64, b: i64, c: i64, d: i64, e: i64) -> i64 {
+    asm("mov [rsp+8], rcx");
+    asm("mov [rsp+16], rdx");
+    asm("mov [rsp+24], r8");
+    asm("mov [rsp+32], r9");
+    asm("mov rax, [rsp+40]");
+    asm("imul rax, rax, 10");
+    asm("add rax, [rsp+32]");
+    asm("imul rax, rax, 10");
+    asm("add rax, [rsp+24]");
+    asm("imul rax, rax, 10");
+    asm("add rax, [rsp+16]");
+    asm("imul rax, rax, 10");
+    asm("add rax, [rsp+8]");
+    asm("xor ecx, ecx");
+    asm("xor edx, edx");
+    asm("xor r8d, r8d");
+    asm("xor r9d, r9d");
+    asm("xor r10d, r10d");
+    asm("xor r11d, r11d");
+    asm("mov r10, rsp");
+    asm("and r10d, 15");
+    asm("cmp r10d, 8");
+    asm("je .ok5");
+    asm("xor eax, eax");
+    asm(".ok5:");
+}
+
+naked ms64 fn f6(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64) -> i64 {
+    asm("mov rax, [rsp+48]");
+    asm("imul rax, rax, 10");
+    asm("add rax, [rsp+40]");
+    asm("imul rax, rax, 10");
+    asm("add rax, r9");
+    asm("imul rax, rax, 10");
+    asm("add rax, r8");
+    asm("imul rax, rax, 10");
+    asm("add rax, rdx");
+    asm("imul rax, rax, 10");
+    asm("add rax, rcx");
+    asm("mov r10, rsp");
+    asm("and r10d, 15");
+    asm("cmp r10d, 8");
+    asm("je .ok6");
+    asm("xor eax, eax");
+    asm(".ok6:");
+}
+
+naked ms64 fn f8(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, h: i64) -> i64 {
+    asm("mov rax, [rsp+64]");
+    asm("imul rax, rax, 10");
+    asm("add rax, [rsp+56]");
+    asm("imul rax, rax, 10");
+    asm("add rax, [rsp+48]");
+    asm("imul rax, rax, 10");
+    asm("add rax, [rsp+40]");
+    asm("imul rax, rax, 10");
+    asm("add rax, r9");
+    asm("imul rax, rax, 10");
+    asm("add rax, r8");
+    asm("imul rax, rax, 10");
+    asm("add rax, rdx");
+    asm("imul rax, rax, 10");
+    asm("add rax, rcx");
+    asm("mov r10, rsp");
+    asm("and r10d, 15");
+    asm("cmp r10d, 8");
+    asm("je .ok8");
+    asm("xor eax, eax");
+    asm(".ok8:");
+}
+
+// The same digits, written in Copihue.
+ms64 fn c0() -> i64 { return 42; }
+ms64 fn c1(a: i64) -> i64 { return a + 100; }
+ms64 fn c4(a: i64, b: i64, c: i64, d: i64) -> i64 {
+    return d * 1000 + c * 100 + b * 10 + a;
+}
+ms64 fn c5(a: i64, b: i64, c: i64, d: i64, e: i64) -> i64 {
+    return e * 10000 + d * 1000 + c * 100 + b * 10 + a;
+}
+ms64 fn c6(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64) -> i64 {
+    return f * 100000 + e * 10000 + d * 1000 + c * 100 + b * 10 + a;
+}
+ms64 fn c8(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, h: i64) -> i64 {
+    return h * 10000000 + g * 1000000 + f * 100000 + e * 10000 + d * 1000 + c * 100 + b * 10 + a;
+}
+ms64 fn c9(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, h: i64, i: i64) -> i64 {
+    return i * 1000 + c8(a, b, c, d, e, f, g, h) % 1000;
+}
+// Calls itself through the thunk; the product is 10!.
+ms64 fn fact(n: i64) -> i64 {
+    if (n < 2) { return 1; }
+    return n * fact(n - 1);
+}
+// Takes a function pointer and calls it, a Copihue ms64 fn through an ms64 fn parameter.
+ms64 fn apply4(f: ms64 fn, a: i64, b: i64, c: i64, d: i64) -> i64 {
+    return f(a, b, c, d);
+}
+
+fn plain(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64) -> i64 {
+    return a + b + c + d + e + f + g;
+}
+// An ms64 function that uses a System V one with seven arguments, to cross the two.
+ms64 fn mixed(a: i64, b: i64) -> i64 {
+    return plain(a, b, 1, 1, 1, 1, 1);
+}
+
+// Calls fp with the Microsoft convention after filling rdi, rsi, rbx, and r13 with markers, and
+// returns a bit for each one that came back unchanged: 15 when the callee preserved all four.
+naked fn preserve(fp: i64) -> i64 {
+    asm("push rbx");
+    asm("push r12");
+    asm("push r13");
+    asm("mov r12, rdi");
+    asm("mov rdi, 0x1111");
+    asm("mov rsi, 0x2222");
+    asm("mov rbx, 0x3333");
+    asm("mov r13, 0x4444");
+    asm("sub rsp, 32");
+    asm("mov ecx, 1");
+    asm("mov edx, 2");
+    asm("mov r8d, 3");
+    asm("mov r9d, 4");
+    asm("call r12");
+    asm("add rsp, 32");
+    asm("xor eax, eax");
+    asm("cmp rdi, 0x1111");
+    asm("sete al");
+    asm("xor ecx, ecx");
+    asm("cmp rsi, 0x2222");
+    asm("sete cl");
+    asm("shl ecx, 1");
+    asm("or eax, ecx");
+    asm("xor ecx, ecx");
+    asm("cmp rbx, 0x3333");
+    asm("sete cl");
+    asm("shl ecx, 2");
+    asm("or eax, ecx");
+    asm("xor ecx, ecx");
+    asm("cmp r13, 0x4444");
+    asm("sete cl");
+    asm("shl ecx, 3");
+    asm("or eax, ecx");
+    asm("pop r13");
+    asm("pop r12");
+    asm("pop rbx");
+}
+
+data gdt {
+    dq 0;
+    dw 0;
+    dw 0;
+    db 0;
+    db 0x9A;
+    db 0x20;
+    db 0;
+    dw 0xFFFF;
+    dw 0;
+    db 0;
+    db 0x92;
+    db 0xCF;
+    db 0;
+}
+
+data gdtr {
+    dw 23;
+    dd gdt;
+}
+
+fn serial_putc(c: i64) -> i64 {
+    let tries = 0;
+    while ((inb(0x3FD) & 0x20) == 0 && tries < 1000) { tries = tries + 1; }
+    outb(0x3F8, c);
+    return 0;
+}
+
+fn check(n: i64, ok: i64) -> i64 {
+    if (ok == 0 && bad == 0) { bad = n; }
+    return 0;
+}
+
+fn kmain() -> i64 {
+    let keep: i64 = 99;
+    let p4: ms64 fn = &f4;
+    let q5: ms64 fn = &c5;
+    gp8 = &f8;
+    check(1, aligned() == 1);
+    check(2, 5 + aligned() == 6);
+    check(3, f1(7) == 7);
+    check(4, f4(1, 2, 3, 4) == 4321);
+    check(5, f5(1, 2, 3, 4, 5) == 54321);
+    check(6, f6(1, 2, 3, 4, 5, 6) == 654321);
+    check(7, f8(1, 2, 3, 4, 5, 6, 7, 8) == 87654321);
+    check(8, f4(f1(1), f1(2), f1(3), f1(4)) == 4321);
+    check(9, f4(1, 2, 3, aligned() + 3) == 4321);
+    check(10, p4(4, 3, 2, 1) == 1234);
+    check(11, q5(1, 2, 3, 4, 5) == 54321);
+    check(12, gp8(8, 7, 6, 5, 4, 3, 2, 1) == 12345678);
+    check(13, c0() == 42);
+    check(14, c1(5) == 105);
+    check(15, c4(1, 2, 3, 4) == 4321);
+    check(16, c5(1, 2, 3, 4, 5) == 54321);
+    check(17, c6(1, 2, 3, 4, 5, 6) == 654321);
+    check(18, c8(1, 2, 3, 4, 5, 6, 7, 8) == 87654321);
+    check(19, fact(10) == 3628800);
+    check(20, apply4(&f4, 1, 2, 3, 4) == 4321);
+    check(21, apply4(&c4, 4, 3, 2, 1) == 1234);
+    check(22, mixed(2, 3) == 10);
+    check(23, preserve(&c0) == 15);
+    check(24, preserve(&c8) == 15);
+    check(25, preserve(&fact) == 15);
+    check(26, keep == 99);
+    check(27, c9(1, 1, 1, 1, 1, 1, 1, 1, 9) == 9111);
+    check(28, (c4(1, 2, 3, 4) + f5(1, 2, 3, 4, 5) + c1(f1(1))) == 4321 + 54321 + 101);
+
+    if (bad == 0) {
+        serial_putc(77);
+        serial_putc(83);
+        serial_putc(54);
+        serial_putc(52);
+    } else {
+        serial_putc(70);
+        serial_putc(65);
+        serial_putc(73);
+        serial_putc(76);
+        serial_putc(48 + bad / 10);
+        serial_putc(48 + bad % 10);
+    }
+    while (1) { hlt(); }
+    return 0;
+}
+
+bits 32 naked fn _start() {
+    cli();
+    asm("lgdt [gdtr]");
+    asm("mov ax, 0x10");
+    asm("mov ds, ax");
+    asm("mov es, ax");
+    asm("mov ss, ax");
+    asm("mov esp, 0x6000");
+    asm("cld");
+    asm("xor eax, eax");
+    asm("mov edi, 0x1000");
+    asm("mov ecx, 3072");
+    asm("rep stosd");
+    asm("mov dword [0x1000], 0x2007");
+    asm("mov dword [0x2000], 0x3007");
+    asm("mov dword [0x3000], 0x87");
+    asm("mov eax, cr4");
+    asm("or eax, 0x20");
+    asm("mov cr4, eax");
+    asm("mov eax, 0x1000");
+    asm("mov cr3, eax");
+    asm("mov ecx, 0xC0000080");
+    asm("rdmsr");
+    asm("or eax, 0x100");
+    asm("wrmsr");
+    asm("mov eax, cr0");
+    asm("or eax, 0x80000000");
+    asm("mov cr0, eax");
+    asm("jmp 0x08:kmain");
+}

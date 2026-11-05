@@ -1,0 +1,4 @@
+tests/errors/ms64_struct_param.lap:3:11: error: an ms64 parameter is an integer or a pointer; 'p' is a struct, a slice, an enum, or an owning pointer
+      3 | ms64 fn f(p: Pair) -> i64 {
+        |           ^
+1 error, compilation failed

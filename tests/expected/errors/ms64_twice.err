@@ -1,0 +1,4 @@
+tests/errors/ms64_twice.lap:1:6: error: ms64 was already set on this function
+      1 | ms64 ms64 fn f() -> i64 {
+        |      ^
+1 error, compilation failed
