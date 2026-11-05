@@ -2,7 +2,7 @@
 
 Meta de largo plazo: que Copihue no dependa de C ni de `nasm`/`ld`. Este documento cubre el **paso 1**: que el compilador escriba por sí mismo el ejecutable ELF x86-64 del modo hosted (Linux). Desde M6, `copihue` genera el texto NASM en memoria, lo ensambla con `compiler/native` y escribe el ELF (ejecutable u objeto `-c`) sin llamar a `nasm` ni a `ld`; el camino viejo (`output.asm`, `nasm -f elf64`, `ld`) queda detrás de `--nasm`.
 
-Estado de esta porción (0.42.5; M6 hecho: la ruta nativa es la de por defecto):
+Estado de esta porción (0.44.0; M6 hecho: la ruta nativa es la de por defecto):
 
 - Hecho: el inventario de abajo, y un codificador de instrucciones (`compiler/native/x64.c`, con relocaciones; ver [DESIGN_NATIVE_X64.md](DESIGN_NATIVE_X64.md)) que coincide byte a byte con `nasm -f elf64` en el 100 % de las instrucciones del inventario (ver [Cobertura](#cobertura-de-la-primera-porción)).
 - Hecho (M2): un ensamblador de programas completos, `compiler/native/asm.c`, que resuelve etiquetas, relaja saltos como nasm y codifica `call`; produce los bytes de `.text` de todos los archivos del corpus idénticos a `nasm -f elf64` (ver [M2](#m2-etiquetas-saltos-con-relajación-y-call-compilernativeasmhc)).
