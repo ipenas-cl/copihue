@@ -28,6 +28,9 @@
 # 4i. Microsoft x64 convention (0.44.6): tests/errors/ms64_*.lap are refused in every way the compiler builds; the
 #    call sequence is in the assembly of tests/lang/ms64_fn.lap and no System V program has it; QEMU runs
 #    tests/ms64/kernel.lap. All of it in tests/ms64/run.sh.
+# 4j. --pic (0.44.7): tests/errors/pic_*.lap are refused under --flat --pic; the assembly of tests/pic/kernel.lap
+#    has no absolute address of a label; the image is the same at two --flat bases; QEMU runs it at two
+#    load addresses and must fail without --pic. All of it in tests/pic/run.sh.
 # 5. Boot sectors: tests/boot/*.lap, and QEMU must print COPIHUE.
 # 6. User mode: tests/usermode, and QEMU must print USER.
 # 7. Context switch: tests/ctx, and QEMU must print COPIHUE.
@@ -109,7 +112,7 @@ check() {  # $1 = name, $2 = golden file, $3 = actual file
   else fail=$((fail+1)); failed+=("$1"); echo "FAIL $1"; [ -f "$2" ] && diff "$2" "$3" | head -10; fi
 }
 
-for src in $(ls tests/*.lap tests/*/*.lap examples/*.lap examples/*/*.lap examples/*/*/*.lap | grep -v -e '^tests/errors/' -e '^tests/freestanding/' -e "^tests/flat/" -e "^tests/boot/" -e '^tests/usermode/' -e '^tests/ctx/' -e '^tests/native/' -e '^tests/align/' -e '^tests/assign/' -e '^tests/axe1/' -e '^tests/ginit/' -e '^tests/ms64/' -e '^tests/axe2/' -e '^tests/tools/'); do
+for src in $(ls tests/*.lap tests/*/*.lap examples/*.lap examples/*/*.lap examples/*/*/*.lap | grep -v -e '^tests/errors/' -e '^tests/freestanding/' -e "^tests/flat/" -e "^tests/boot/" -e '^tests/usermode/' -e '^tests/ctx/' -e '^tests/native/' -e '^tests/align/' -e '^tests/assign/' -e '^tests/axe1/' -e '^tests/ginit/' -e '^tests/ms64/' -e '^tests/pic/' -e '^tests/axe2/' -e '^tests/tools/'); do
   case "$SKIP" in *" $src "*) continue ;; esac
   golden=tests/expected/${src%.lap}.out
   FELL=0
@@ -1164,6 +1167,16 @@ if ms=$(bash "$ROOT/tests/ms64/run.sh" "$CC" 2>&1); then
   pass=$((pass+1)); echo "$ms" | grep -E '^skip|^tests/ms64:'
 else
   fail=$((fail+1)); failed+=("tests/ms64"); echo "$ms" | head -40
+fi
+
+# 4j. --pic for --flat (0.44.7): the option rules, the refusals (tests/errors/pic_*.lap), the assembly with
+# no absolute address of a label, the same bytes for --flat 0x10000 and --flat 0x40000, and a payload that
+# QEMU runs at both addresses (the same program without --pic must fail at the second). The details are in
+# tests/pic/run.sh.
+if pic=$(bash "$ROOT/tests/pic/run.sh" "$CC" 2>&1); then
+  pass=$((pass+1)); echo "$pic" | grep -E '^skip|^tests/pic:'
+else
+  fail=$((fail+1)); failed+=("tests/pic"); echo "$pic" | head -40
 fi
 
 rm -f "$CC"

@@ -1,0 +1,4 @@
+tests/errors/pic_bits32.lap:3:18: error: --pic: a bits 32 function cannot be position independent (there is no RIP-relative addressing outside 64-bit mode); build it without --pic
+      3 | bits 32 naked fn trampoline() {
+        |                  ^
+1 error, compilation failed

@@ -1,0 +1,8 @@
+// flags: --flat 0x10000 --pic
+// A section with a load address fixes where its labels are.
+section ".hi" @ 0x20000 {
+    let marker: i64 = 5;
+}
+
+fn _start() {
+}

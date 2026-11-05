@@ -1,0 +1,6 @@
+// flags: --flat 0x10000 --pic
+// A global that holds the address of a string literal would need a relocation at load time.
+let greeting: *u8 = "hello";
+
+fn _start() {
+}
