@@ -1,5 +1,5 @@
 // --native refuses user assembly: the text of asm("...") is not something the
-// built-in assembler is asked to check. Without --native it builds and runs.
+// built-in assembler is asked to check. By default it builds with nasm and ld.
 fn main() -> i32 {
     asm("nop");
     return 0;

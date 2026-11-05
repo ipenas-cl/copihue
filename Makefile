@@ -1,12 +1,14 @@
 # Copihue (formerly Chronos) - build, test and install the compiler.
 #   make                 build ./copihue
-#   make test            regression suite (tests/run_tests.sh)
+#   make test            regression suite (tests/run_tests.sh); the compiler's own back end, no nasm, no ld
+#   make nasm-test       the programs of the suite built with --nasm (nasm and ld, the old path; needs Linux)
 #   make net-test        HTTP server/client integration test (needs curl)
-#   make native-test     x86-64 encoder, assembler and ELF writer (compiler/native, M1-M5) against nasm
+#   make native-test     x86-64 encoder, assembler, ELF writer and -c objects (compiler/native, M1-M6) against nasm
 #   make native-asm-test only the assembler part (labels, jumps, call, data sections) of native-test
-#   make native-elf-test only the ELF writer part (structure of the executables --native writes)
-#   make native-run-test the regression suite with --native (needs Linux to run the executables)
-#   make native-text-test .text of --native against nasm + ld (objcopy; needs Linux binutils, skips without them)
+#   make native-elf-test only the ELF writer part (structure of the executables the compiler writes)
+#   make native-obj-test only the -c part: objects against nasm -f elf64; on Linux also ld, gcc and readelf
+#   make native-run-test the programs of the suite with --native, strict: no fallback to nasm (needs Linux)
+#   make native-text-test .text of the native executables against nasm + ld (objcopy; needs Linux binutils, skips without them)
 #   make native-readelf-test the ELF files read by readelf and objdump (skips without binutils)
 #   make bench           timed comparison in bench/ (not part of make test)
 #   make install         install to $(PREFIX)/bin (default ~/.local)
@@ -31,6 +33,12 @@ native-elf-test:
 
 native-run-test:
 	tests/run_tests.sh --native
+
+nasm-test:
+	tests/run_tests.sh --nasm
+
+native-obj-test:
+	tests/x64/run_obj.sh
 
 native-text-test:
 	tests/x64/run_text.sh
@@ -57,4 +65,4 @@ uninstall:
 clean:
 	rm -f copihue a.out output.asm output.o
 
-.PHONY: test net-test native-test native-asm-test native-elf-test native-run-test native-text-test native-readelf-test native-inventory bench install uninstall clean
+.PHONY: test nasm-test net-test native-test native-asm-test native-elf-test native-obj-test native-run-test native-text-test native-readelf-test native-inventory bench install uninstall clean
