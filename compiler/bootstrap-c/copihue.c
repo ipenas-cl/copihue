@@ -16,7 +16,7 @@
 
 // ==== NAMING (single place to change when the language is renamed) ====
 #define LANG_NAME     "Copihue"
-#define LANG_VERSION  "0.44.6"
+#define LANG_VERSION  "0.44.7"
 #define COMPILER_BIN  "copihue"
 #define SRC_EXT       ".lap"   /* Lapageria rosea, the copihue */
 #define OLD_SRC_EXT   ".cph"   /* v0.18.x extension, still accepted with a warning */
@@ -42,6 +42,8 @@ int g_axe2 = 0;                      // --axe2 with --flat 0x400000: AXE2 header
 int g_axe1 = 0;                      // --axe1 with --flat 0x400000: AXE1 header + one-page image
 int g_sizes = 0;                     // --sizes with --flat: text, data and bss sizes on stdout
 int g_boot = 0;                      // --boot: flat sector at 0x7C00, padded to 512, signature 0xAA55
+int g_pic = 0;                       // --pic with --flat: every access to a symbol of the image is relative to RIP
+static void pic_note_asm(const char* file, int line, int col, const char* instr);
 int g_reloc = 0;                     // -c: one ELF64 relocatable object (nasm -f elf64), no ld
 int g_native = 0;                    // --native: the default back end (compiler/native) without the fallback to nasm and ld
 int g_nasm = 0;                      // --nasm: assemble and link with nasm and ld, as before the built-in back end
@@ -4286,6 +4288,8 @@ static AstNode* parse_data(Parser* p) {
             char* ops = parse_data_ops(p);
             AstNode* it = ast_new(AST_DATA_ITEM);
             it->name = strdup("times");
+            it->line = dir.line;
+            it->col = dir.col;
             char line[4200];
             snprintf(line, sizeof(line), "%.*s %.*s %s", num.len, num.s, dir.len, dir.s, ops);
             it->value = strdup(line);
@@ -4309,6 +4313,8 @@ static AstNode* parse_data(Parser* p) {
             AstNode* it = ast_new(AST_DATA_ITEM);
             it->name = strndup(dir.s, dir.len);
             it->value = ops;
+            it->line = dir.line;
+            it->col = dir.col;
             ast_add(node, it);
             expect(p, T_SEMI);
             continue;
@@ -4757,6 +4763,9 @@ static void parse_section(Parser* p, AstNode* prog) {
                    "section '@' is a load address for --flat and --boot; -c does not emit vstart");
         has_addr = 0;
     }
+    if (has_addr && g_pic)
+        diag_error(kw.line, kw.col, "--pic: section '%s' has a load address (@), which fixes where its labels are; "
+                   "a --pic image is placed by whoever loads it", name ? name : "");
     NamedSection* sec = name && section_name_ok(name) ? section_note(name, has_addr, addr, kw.line, kw.col) : NULL;
     if (!check_tok(p, T_LBRACE)) {
         diag_error(peek_tok(p).line, peek_tok(p).col, "section body must be a block");
@@ -5334,6 +5343,44 @@ void emit(Codegen* cg, const char* fmt, ...) {
     va_end(args);
 }
 
+// The address of a label in a register. --pic: relative to RIP, so it does not depend on the load address.
+static void emit_sym_addr(Codegen* cg, const char* reg, const char* sym) {
+    if (g_pic) emit(cg, "    lea %s, [rel %s]\n", reg, sym);
+    else emit(cg, "    mov %s, %s\n", reg, sym);
+}
+
+// --pic: the first label in a data operand list that is not cancelled by another label in the same
+// operand (`dd gdt` is an absolute address; `dd end - start` is not), or NULL.
+static const char* pic_data_abs_label(const char* ops) {
+    static char name[128];
+    if (!ops) return NULL;
+    while (*ops) {
+        int net = 0, sign = 1;
+        name[0] = 0;
+        while (*ops && *ops != ',') {
+            if (*ops == '-') { sign = -sign; ops++; continue; }
+            if (isalpha((unsigned char)*ops) || *ops == '_' || *ops == '.') {
+                int n = 0;
+                while (isalnum((unsigned char)ops[n]) || ops[n] == '_' || ops[n] == '.') n++;
+                net += sign;
+                if (!name[0]) snprintf(name, sizeof name, "%.*s", n, ops);
+                ops += n;
+                sign = 1;
+                continue;
+            }
+            if (isdigit((unsigned char)*ops)) {
+                while (isalnum((unsigned char)*ops)) ops++;
+                sign = 1;
+                continue;
+            }
+            ops++;
+        }
+        if (name[0] && net != 0) return name;
+        if (*ops == ',') ops++;
+    }
+    return NULL;
+}
+
 int new_label(Codegen* cg) { return cg->label_count++; }
 
 static void cold_emit(const char* fmt, ...) {
@@ -5407,7 +5454,7 @@ static void emit_bounds_hot(Codegen* cg, const char* reg, int count, int skip_ne
     emit(cg, "    jge .Lbounds_error_%d\n", lab);
     cold_emit(".Lbounds_error_%d:\n", lab);
     char* err_msg = strtab_add(cg->strtab, "Array bounds error\\n", 19);
-    cold_emit("    mov rsi, %s\n", err_msg);
+    cold_emit(g_pic ? "    lea rsi, [rel %s]\n" : "    mov rsi, %s\n", err_msg);
     cold_emit("    mov rdx, 19\n");
     cold_emit("    mov rdi, 2\n");
     cold_emit("    mov rax, 1\n");
@@ -9183,7 +9230,11 @@ static int gen_core_builtin(Codegen* cg, AstNode* n) {
     if (!strcmp(f, "bss_start") || !strcmp(f, "bss_end")) {
         if (!g_flat_org) { diag_error(n->line, n->col, "%s() is only available with --flat", f); return 1; }
         if (n->child_count != 0) { diag_error(n->line, n->col, "%s() takes no arguments", f); return 1; }
-        emit(cg, "    mov rax, __%s\n", f);
+        {
+            char sym[32];
+            snprintf(sym, sizeof sym, "__%s", f);
+            emit_sym_addr(cg, "rax", sym);
+        }
         return 1;
     }
     if (!strcmp(f, "section_start") || !strcmp(f, "section_end")) {
@@ -9216,7 +9267,11 @@ static int gen_core_builtin(Codegen* cg, AstNode* n) {
             const char* which = is_end ? "end" : "start";
             if (g_fn_bits == 16) emit(cg, "    mov ax, %s_%s\n", sec->sym, which);
             else if (g_fn_bits == 32) emit(cg, "    mov eax, %s_%s\n", sec->sym, which);
-            else emit(cg, "    mov rax, %s_%s\n", sec->sym, which);
+            else {
+                char sym[160];
+                snprintf(sym, sizeof sym, "%s_%s", sec->sym, which);
+                emit_sym_addr(cg, "rax", sym);
+            }
         }
         return 1;
     }
@@ -9397,6 +9452,18 @@ static int gen_core_builtin(Codegen* cg, AstNode* n) {
         const char* src = n->children[0]->value;
         native_note(n->line, "asm(\"...\") (user assembly)");
         emit(cg, "    ; inline asm\n    ");
+        if (g_pic) {
+            const char* st = src;
+            for (const char* c = src;; c++) {
+                if (*c == ';' || !*c) {
+                    char* one = strndup(st, (size_t)(c - st));
+                    pic_note_asm(n->file, n->line, n->col, one);
+                    free(one);
+                    st = c + 1;
+                }
+                if (!*c) break;
+            }
+        }
         for (const char* c = src; *c; c++) {
             if (*c == ';') emit(cg, "\n    ");
             else emit(cg, "%c", *c);
@@ -9846,7 +9913,7 @@ static int hosted_array_check_skipped(AstNode* ix, int declared) {
 static void emit_trap_cold(Codegen* cg, int lab, const char* tag, const char* msg, int len) {
     char* lit = strtab_add(cg->strtab, (char*)msg, len);
     cold_emit(".Lslice_%s_%d:\n", tag, lab);
-    cold_emit("    mov rsi, %s\n", lit);
+    cold_emit(g_pic ? "    lea rsi, [rel %s]\n" : "    mov rsi, %s\n", lit);
     cold_emit("    mov rdx, %d\n", len);
     cold_emit("    mov rdi, 2\n");
     cold_emit("    mov rax, 1\n");
@@ -10902,7 +10969,7 @@ void gen_addr_of(Codegen* cg, AstNode* n) {
 
                 emit(cg, ".Lbounds_error_%d:\n", ok_label);
                 char* err_msg = strtab_add(cg->strtab, "Array bounds error\\n", 19);
-                emit(cg, "    mov rsi, %s\n", err_msg);
+                emit_sym_addr(cg, "rsi", err_msg);
                 emit(cg, "    mov rdx, 19\n");
                 emit(cg, "    mov rdi, 2\n");
                 emit(cg, "    mov rax, 1\n");
@@ -11240,7 +11307,7 @@ void gen_array_index(Codegen* cg, AstNode* n) {
 
         emit(cg, ".Lbounds_error_%d:\n", ok_label);
         char* err_msg = strtab_add(cg->strtab, "Array bounds error\\n", 19);
-        emit(cg, "    mov rsi, %s\n", err_msg);
+        emit_sym_addr(cg, "rsi", err_msg);
         emit(cg, "    mov rdx, 19\n");
         emit(cg, "    mov rdi, 2\n");
         emit(cg, "    mov rax, 1\n");
@@ -11405,7 +11472,7 @@ void gen_array_index(Codegen* cg, AstNode* n) {
 
             emit(cg, ".Lbounds_error_%d:\n", ok_label);
             char* err_msg = strtab_add(cg->strtab, "Array bounds error\\n", 19);
-            emit(cg, "    mov rsi, %s\n", err_msg);
+            emit_sym_addr(cg, "rsi", err_msg);
             emit(cg, "    mov rdx, 19\n");
             emit(cg, "    mov rdi, 2\n");
             emit(cg, "    mov rax, 1\n");
@@ -13974,7 +14041,7 @@ void gen_expr(Codegen* cg, AstNode* n) {
         char* label = strtab_add(cg->strtab, n->value, slen);
         if (legacy_bits()) emit(cg, "    mov eax, %s\n", label);
         else {
-            emit(cg, "    mov rax, %s\n", label);
+            emit_sym_addr(cg, "rax", label);
             emit(cg, "    mov rbx, %d\n", slen);
         }
     } else if (n->type == AST_IDENT) {
@@ -14053,7 +14120,7 @@ void gen_expr(Codegen* cg, AstNode* n) {
                     const char* ds = data_sym(cg, n->name);
                     if (ds) sym = ds;
                     if (legacy_bits()) emit(cg, "    mov eax, %s\n", sym);
-                    else emit(cg, "    mov rax, %s\n", sym);
+                    else emit_sym_addr(cg, "rax", sym);
                 } else if (n->qual && enum_lookup(n->qual)) {
                     diag_error(n->line, n->col, "an enum is not a scalar; match it");
                     emit(cg, "    xor rax, rax\n");
@@ -20258,6 +20325,9 @@ void gen_func(Codegen* cg, AstNode* n) {
     if (is_int) native_note(n->line, "an interrupt function");
     if (is_sys) native_note(n->line, "a syscall function");
     if (bits == 16 || bits == 32) native_note(n->line, "a function with bits 16 or bits 32");
+    if (g_pic && (bits == 16 || bits == 32))
+        diag_error(n->line, n->col, "--pic: a bits %d function cannot be position independent "
+                   "(there is no RIP-relative addressing outside 64-bit mode); build it without --pic", bits);
     // A pointer parameter is the CPU frame, not the integer error code.
     // error_code as the first field selects the #PF/#GP layout.
     int frame_ptr = 0;
@@ -21623,6 +21693,18 @@ void codegen(AstNode* ast, const char* file, StringTable* strtab, TypeTable* typ
                 if (added) added->align = gvar->align;
                 if (added && gvar->struct_type && !strcmp(gvar->struct_type, "__slice__"))
                     finish_global_slice(&cg, gvar, added);
+                // --pic: a slot that holds the address of a string or of another global would need a
+                // relocation when the image is loaded, and the image has none.
+                if (g_pic && added && !added->is_extern && added->is_initialized && added->init_value &&
+                    !isdigit((unsigned char)added->init_value[0]) && added->init_value[0] != '-') {
+                    AstNode* at = gvar->children[0] ? gvar->children[0] : gvar;
+                    int is_str = !strncmp(added->init_value, "str_", 4);
+                    if (gvar->file) focus_file(gvar->file);
+                    diag_error(at->line, at->col,
+                               "--pic: the initializer of global '%s' is the address of %s, which depends on the load address "
+                               "and a --pic image has no relocations; assign it in a function",
+                               gvar->name ? gvar->name : "?", is_str ? "a string literal" : added->init_value);
+                }
             }
 
             // If array initialization, extract values
@@ -21751,6 +21833,23 @@ void codegen(AstNode* ast, const char* file, StringTable* strtab, TypeTable* typ
                 else if (!strcmp(it->name, "align")) emit(&cg, "align %s, db 0\n", it->value);
                 else if (!strcmp(it->name, "times")) emit(&cg, "times %s\n", it->value);
                 else emit(&cg, "    %s %s\n", it->name, it->value ? it->value : "0");
+                if (g_pic && strcmp(it->name, "label") && strcmp(it->name, "align") && it->value) {
+                    // db/dw/dd/dq and `times N dd ...`: a label that is not cancelled by another label is
+                    // an absolute address; label - label does not move with the image.
+                    const char* ops = it->value;
+                    if (!strcmp(it->name, "times")) {   // "N dd operands"
+                        ops = strchr(ops, ' ');
+                        ops = ops ? strchr(ops + 1, ' ') : NULL;
+                    }
+                    const char* sym = pic_data_abs_label(ops);
+                    if (sym) {
+                        if (d->file) focus_file(d->file);
+                        diag_error(it->line, it->col,
+                                   "--pic: data block '%s' holds the absolute address of '%s', which depends on the load address "
+                                   "and a --pic image has no relocations; store a difference of labels (%s - %s) and add the base at run time",
+                                   d->name, sym, sym, data_sym_of(d));
+                    }
+                }
             }
         } else if (item->type == AST_GLOBAL_VAR && item->section) {
             GlobalVar* gv = global_exact(&global_symtab,
@@ -21794,7 +21893,7 @@ void codegen(AstNode* ast, const char* file, StringTable* strtab, TypeTable* typ
         free(global_symtab.vars);
         return;
     }
-    if (g_flat_org) fprintf(cg.out, "bits 64\norg %s\n\n", g_flat_org);
+    if (g_flat_org) fprintf(cg.out, "bits 64\norg %s\n%s\n", g_flat_org, g_pic ? "default rel\n" : "");
     if (g_flat_org) {
         // nasm counts an alignment from the start of the image, which is the
         // load address: a let is at a multiple of N only if the org is.
@@ -21905,6 +22004,298 @@ void codegen(AstNode* ast, const char* file, StringTable* strtab, TypeTable* typ
     free(global_symtab.vars);
 }
 
+// ==== --pic audit ====
+// The code the compiler writes for --pic reaches its symbols relative to RIP. This reads the
+// assembly back and refuses what nasm would turn into the address of a label: `mov r, label`,
+// `[label + reg]`, `[abs label]`, `dq label` (a difference of two labels is fine: it does not move
+// with the image). It also covers the user's asm(). A line that came from an asm() is reported at
+// that call; any other line is a compiler bug and says so.
+typedef struct { const char* file; int line, col; char* text; } PicAsm;
+static PicAsm* g_pic_asm;
+static int g_pic_nasm, g_pic_casm;
+
+static void pic_note_asm(const char* file, int line, int col, const char* instr) {
+    while (*instr == ' ' || *instr == '\t') instr++;
+    size_t n = strlen(instr);
+    while (n && (instr[n - 1] == ' ' || instr[n - 1] == '\t')) n--;
+    if (!n) return;
+    if (g_pic_nasm == g_pic_casm) {
+        g_pic_casm = g_pic_casm ? g_pic_casm * 2 : 64;
+        g_pic_asm = safe_realloc(g_pic_asm, (size_t)g_pic_casm * sizeof *g_pic_asm);
+    }
+    g_pic_asm[g_pic_nasm].file = file;
+    g_pic_asm[g_pic_nasm].line = line;
+    g_pic_asm[g_pic_nasm].col = col;
+    g_pic_asm[g_pic_nasm].text = strndup(instr, n);
+    g_pic_nasm++;
+}
+
+static int pic_idch(int c) {
+    return isalnum(c) || c == '_' || c == '.' || c == '$' || c == '@' || c == '#' || c == '~' || c == '?';
+}
+
+static int pic_word_is(const char* t, int n, const char* const* list) {
+    for (int i = 0; list[i]; i++)
+        if ((int)strlen(list[i]) == n && !strncmp(list[i], t, (size_t)n)) return 1;
+    return 0;
+}
+
+static int pic_is_reg(const char* t, int n) {
+    static const char* const names[] = {
+        "rax", "rbx", "rcx", "rdx", "rsi", "rdi", "rbp", "rsp", "eax", "ebx", "ecx", "edx", "esi", "edi", "ebp", "esp",
+        "ax", "bx", "cx", "dx", "si", "di", "bp", "sp", "al", "bl", "cl", "dl", "ah", "bh", "ch", "dh",
+        "sil", "dil", "bpl", "spl", "cs", "ds", "es", "fs", "gs", "ss", NULL };
+    if (pic_word_is(t, n, names)) return 1;
+    if (n >= 2 && n <= 4 && t[0] == 'r' && isdigit((unsigned char)t[1])) {
+        int k = (n > 2 && isdigit((unsigned char)t[2])) ? 3 : 2;
+        return k == n || (k == n - 1 && (t[k] == 'd' || t[k] == 'w' || t[k] == 'b'));
+    }
+    return 0;
+}
+
+static int pic_is_kw(const char* t, int n) {
+    static const char* const kw[] = { "rel", "abs", "rip", "byte", "word", "dword", "qword", "tword", "oword", "yword",
+        "short", "near", "far", "strict", "to", "seg", "wrt", "nosplit", NULL };
+    return pic_word_is(t, n, kw);
+}
+
+// The labels of the assembly: `name:` at the start of a line. Open addressing.
+typedef struct { char** k; size_t cap; } PicSet;
+
+static size_t pic_hash(const char* s, int n) {
+    size_t h = 5381;
+    for (int i = 0; i < n; i++) h = h * 33 + (unsigned char)s[i];
+    return h;
+}
+
+static void pic_set_add(PicSet* s, const char* t, int n) {
+    size_t h = pic_hash(t, n) & (s->cap - 1);
+    while (s->k[h]) {
+        if (!strncmp(s->k[h], t, (size_t)n) && !s->k[h][n]) return;
+        h = (h + 1) & (s->cap - 1);
+    }
+    s->k[h] = strndup(t, (size_t)n);
+}
+
+static int pic_set_has(const PicSet* s, const char* t, int n) {
+    size_t h = pic_hash(t, n) & (s->cap - 1);
+    while (s->k[h]) {
+        if (!strncmp(s->k[h], t, (size_t)n) && !s->k[h][n]) return 1;
+        h = (h + 1) & (s->cap - 1);
+    }
+    return 0;
+}
+
+// Length of the label at the start of `p` ("name:"), 0 if the line defines none.
+static int pic_label_len(const char* p) {
+    int n = 0;
+    if (!(isalpha((unsigned char)p[0]) || p[0] == '_' || p[0] == '.')) return 0;
+    while (pic_idch((unsigned char)p[n])) n++;
+    return p[n] == ':' ? n : 0;
+}
+
+// Net count of label references in an expression: a label adds, one after '-' subtracts.
+// *nlab is how many there are, *has_reg whether a register (other than rip) is in it.
+// `first` receives the first label's name.
+static int pic_expr_net(const PicSet* labs, const char* s, int len, int* nlab, int* has_reg, char* first, int firstcap) {
+    int net = 0, sign = 1, i = 0;
+    *nlab = 0;
+    *has_reg = 0;
+    while (i < len) {
+        unsigned char c = (unsigned char)s[i];
+        if (c == '-') { sign = -sign; i++; continue; }
+        if (c == '"' || c == '\'') {
+            char q = (char)c;
+            i++;
+            while (i < len && s[i] != q) i++;
+            i++;
+            continue;
+        }
+        if (isdigit(c)) {
+            while (i < len && pic_idch((unsigned char)s[i])) i++;
+            sign = 1;
+            continue;
+        }
+        if (c == '$') {
+            int j = i;
+            while (j < len && s[j] == '$') j++;
+            net += sign;
+            (*nlab)++;
+            if (!first[0]) snprintf(first, (size_t)firstcap, "%.*s", j - i, s + i);
+            i = j;
+            sign = 1;
+            continue;
+        }
+        if (pic_idch(c)) {
+            int j = i;
+            while (j < len && pic_idch((unsigned char)s[j])) j++;
+            if (pic_is_reg(s + i, j - i)) *has_reg = 1;
+            else if (!pic_is_kw(s + i, j - i) && pic_set_has(labs, s + i, j - i)) {
+                net += sign;
+                (*nlab)++;
+                if (!first[0]) snprintf(first, (size_t)firstcap, "%.*s", j - i, s + i);
+            }
+            i = j;
+            sign = 1;
+            continue;
+        }
+        i++;
+    }
+    return net;
+}
+
+static int pic_has_word(const char* b, const char* e, const char* w) {
+    size_t wl = strlen(w);
+    for (const char* t = b; t + wl <= e; t++)
+        if ((t == b || !pic_idch((unsigned char)t[-1])) && !strncmp(t, w, wl) && !pic_idch((unsigned char)t[wl])) return 1;
+    return 0;
+}
+
+// Why this line holds an absolute address of a label of the image, or NULL. `name` gets the label.
+static const char* pic_check_line(const PicSet* labs, const char* line, char* name, int namecap) {
+    const char* p = line;
+    name[0] = 0;
+    while (*p == ' ' || *p == '\t') p++;
+    int ll = pic_label_len(p);
+    if (ll) {
+        p += ll + 1;
+        while (*p == ' ' || *p == '\t') p++;
+    }
+    if (!*p) return NULL;
+    for (;;) {   // an instruction prefix
+        int n = 0;
+        while (isalnum((unsigned char)p[n])) n++;
+        static const char* const pre[] = { "rep", "repe", "repz", "repne", "repnz", "lock", NULL };
+        if (!pic_word_is(p, n, pre)) break;
+        p += n;
+        while (*p == ' ' || *p == '\t') p++;
+    }
+    int mn = 0;
+    while (pic_idch((unsigned char)p[mn])) mn++;
+    if (!mn) return NULL;
+    static const char* const skip[] = { "section", "segment", "bits", "org", "default", "align", "alignb", "times",
+        "resb", "resw", "resd", "resq", "global", "extern", "use16", "use32", "use64", "incbin", "cpu", "absolute", NULL };
+    static const char* const data[] = { "db", "dw", "dd", "dq", NULL };
+    static const char* const loops[] = { "call", "jmp", "loop", "loope", "loopne", "loopz", "loopnz", NULL };
+    if (pic_word_is(p, mn, skip)) return NULL;
+    {   // `name equ ...` and `name: equ ...`: a constant, not an address
+        const char* q = p + mn;
+        while (*q == ' ' || *q == '\t') q++;
+        if (!strncmp(q, "equ", 3) && !pic_idch((unsigned char)q[3])) return NULL;
+    }
+    int is_data = pic_word_is(p, mn, data);
+    int is_branch = pic_word_is(p, mn, loops) || p[0] == 'j';
+    const char* ops = p + mn;
+    int n = (int)strlen(ops);
+    while (n && (ops[n - 1] == '\n' || ops[n - 1] == '\r' || ops[n - 1] == ' ' || ops[n - 1] == '\t')) n--;
+    {   // cut a trailing comment
+        int inq = 0;
+        char q = 0;
+        for (int i = 0; i < n; i++) {
+            if (inq) { if (ops[i] == q) inq = 0; }
+            else if (ops[i] == '"' || ops[i] == '\'') { inq = 1; q = ops[i]; }
+            else if (ops[i] == ';') { n = i; break; }
+        }
+    }
+    int i = 0;
+    while (i < n) {
+        while (i < n && (ops[i] == ' ' || ops[i] == '\t' || ops[i] == ',')) i++;
+        if (i >= n) break;
+        int st = i, depth = 0, inq = 0, has_br = 0;
+        char q = 0;
+        for (; i < n; i++) {
+            char c = ops[i];
+            if (inq) { if (c == q) inq = 0; continue; }
+            if (c == '"' || c == '\'') { inq = 1; q = c; continue; }
+            if (c == '[') { depth++; has_br = 1; }
+            else if (c == ']') depth--;
+            else if (c == ',' && depth == 0) break;
+        }
+        const char* o = ops + st;
+        int ol = i - st, nlab, has_reg;
+        if (has_br) {   // a memory operand
+            const char* b = memchr(o, '[', (size_t)ol);
+            const char* e = memchr(o, ']', (size_t)ol);
+            if (!b || !e || e < b) continue;
+            int rel = pic_has_word(b + 1, e, "rel");
+            int abs_kw = pic_has_word(b + 1, e, "abs");
+            (void)pic_expr_net(labs, b + 1, (int)(e - b - 1), &nlab, &has_reg, name, namecap);
+            if (nlab && abs_kw) return "[abs label] is the absolute address of the label";
+            if (nlab && has_reg) return rel ? "[rel label + register] cannot be relative to RIP"
+                                            : "[label + register] is an absolute address; load the label with lea first";
+            continue;
+        }
+        if (is_branch) continue;   // call label / jmp label are rel32
+        int net = pic_expr_net(labs, o, ol, &nlab, &has_reg, name, namecap);
+        if (nlab && net != 0)
+            return is_data ? "this data holds the absolute address of a label; store a difference of labels instead"
+                           : "an immediate that is the absolute address of a label; use lea reg, [rel label]";
+    }
+    return NULL;
+}
+
+// Reads the assembly back. Every line it refuses is an error; the result is how many.
+static int pic_audit(const char* path) {
+    FILE* f = fopen(path, "r");
+    char* text;
+    long len;
+    int bad = 0, lineno = 0;
+    if (!f) return 0;
+    fseek(f, 0, SEEK_END);
+    len = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    text = malloc((size_t)len + 1);
+    if (!text) { fclose(f); return 0; }
+    len = (long)fread(text, 1, (size_t)len, f);
+    text[len] = 0;
+    fclose(f);
+    PicSet labs;
+    long nl = 0;
+    for (long i = 0; i < len; i++) if (text[i] == '\n') nl++;
+    for (labs.cap = 1024; labs.cap < (size_t)(nl + 16) * 2; labs.cap *= 2) {}
+    labs.k = calloc(labs.cap, sizeof *labs.k);
+    for (char* s = text; *s; ) {
+        char* e = strchr(s, '\n');
+        size_t sl = e ? (size_t)(e - s) : strlen(s);
+        int ll = pic_label_len(s);
+        if (ll) pic_set_add(&labs, s, ll);
+        s += sl + (e ? 1 : 0);
+    }
+    for (char* s = text; *s; ) {
+        char* e = strchr(s, '\n');
+        size_t sl = e ? (size_t)(e - s) : strlen(s);
+        char* ln = strndup(s, sl);
+        char name[128];
+        const char* why = pic_check_line(&labs, ln, name, sizeof name);
+        lineno++;
+        if (why) {
+            const char* a = ln;
+            while (*a == ' ' || *a == '\t') a++;
+            size_t al = strlen(a);
+            while (al && (a[al - 1] == ' ' || a[al - 1] == '\t')) al--;
+            PicAsm* hit = NULL;
+            for (int i = 0; i < g_pic_nasm; i++)
+                if (strlen(g_pic_asm[i].text) == al && !strncmp(g_pic_asm[i].text, a, al)) { hit = &g_pic_asm[i]; break; }
+            if (hit) {
+                focus_file(hit->file);
+                diag_error(hit->line, hit->col, "--pic: asm(\"%s\") uses '%s' as an address that depends on the load address: %s",
+                           hit->text, name, why);
+            } else {
+                fprintf(stderr, COMPILER_BIN ": error: internal: --pic left an absolute address of '%s' in the assembly "
+                                "(line %d: %s): %s;\n  this is a compiler bug, please report it\n", name, lineno, a, why);
+                g_error_count++;
+            }
+            bad++;
+        }
+        free(ln);
+        s += sl + (e ? 1 : 0);
+    }
+    for (size_t i = 0; i < labs.cap; i++) free(labs.k[i]);
+    free(labs.k);
+    free(text);
+    return bad;
+}
+
 static void usage(FILE* o) {
     fprintf(o,
         "Usage: " COMPILER_BIN " [options] <file" SRC_EXT "> [file" SRC_EXT " ...]\n"
@@ -21938,6 +22329,9 @@ static void usage(FILE* o) {
         "  --axe2              with --flat 0x400000: the AXE2 file (32-byte header + image), data on\n"
         "                      the page after the text; 1 to 16 pages, _start inside the text\n"
         "  --sizes             with --flat: print text=, data=, bss= (bytes) on stdout\n"
+        "  --pic               with --flat: the code reaches globals, strings, data blocks and\n"
+        "                      functions relative to RIP, so the image runs at any address;\n"
+        "                      refused with --boot, --elf, --axe1 and --axe2\n"
         "  --elf               with --flat: ELF64 executable of that image (not a raw binary);\n"
         "                      named sections keep their load address; several files are one image\n"
         "  --boot              boot sector: --flat 0x7C00, pad to 512 bytes, signature 0xAA55;\n"
@@ -21949,6 +22343,12 @@ static void usage(FILE* o) {
 
 static int run_cmd(const char* fmt, const char* a, const char* b) {
     char cmd[4096];
+    char fmt2[256];
+    // --pic: a literal address (an MMIO register) stays absolute on purpose; nasm need not warn.
+    if (g_pic && !strncmp(fmt, "nasm -f bin", 11) && strlen(fmt) < 200) {
+        snprintf(fmt2, sizeof fmt2, "nasm -w-ea-absolute%s", fmt + 4);
+        fmt = fmt2;
+    }
     snprintf(cmd, sizeof(cmd), fmt, a, b);
     return system(cmd);
 }
@@ -22698,6 +23098,7 @@ int main(int argc, char** argv) {
         else if (!strcmp(a, "--axe2")) g_axe2 = 1;
         else if (!strcmp(a, "--axe1")) g_axe1 = 1;
         else if (!strcmp(a, "--sizes")) g_sizes = 1;
+        else if (!strcmp(a, "--pic")) g_pic = 1;
         else if (!strcmp(a, "--flat")) {
             if (i + 1 >= argc) { fprintf(stderr, COMPILER_BIN ": error: --flat needs a load address\n"); return 2; }
             if (g_boot) { fprintf(stderr, COMPILER_BIN ": error: --flat and --boot cannot be combined\n"); return 2; }
@@ -22749,6 +23150,16 @@ int main(int argc, char** argv) {
     if (axe_opt && strtoull(g_flat_org, NULL, 0) != AXE2_BASE) {
         fprintf(stderr, COMPILER_BIN ": error: %s images load at 0x400000; use --flat 0x400000 (got --flat %s)\n", axe_opt, g_flat_org);
         return 2;
+    }
+    if (g_pic) {
+        const char* why = !g_flat_org ? "needs --flat <addr>: a position-independent image is a flat binary"
+            : g_boot ? "cannot be combined with --boot: the BIOS loads a boot sector at 0x7C00"
+            : g_flat_elf ? "cannot be combined with --elf: that ELF file has a fixed load address"
+            : axe_opt ? "cannot be combined with --axe1 or --axe2: those images load at 0x400000" : NULL;
+        if (why) {
+            fprintf(stderr, COMPILER_BIN ": error: --pic %s\n", why);
+            return 2;
+        }
     }
     if (g_native && g_nasm) {
         fprintf(stderr, COMPILER_BIN ": error: --native and --nasm cannot be combined\n");
@@ -22825,6 +23236,7 @@ int main(int argc, char** argv) {
     int via_mem = !only_asm && !g_flat_org && !g_nasm;
     StringTable* strtab = strtab_new();
     codegen(ast, via_mem ? NULL : asm_out, strtab, types);
+    if (g_pic && g_error_count == 0) pic_audit(asm_out);
 
     if (g_error_count > 0) {
         fprintf(stderr, "%d error%s, compilation failed\n", g_error_count, g_error_count == 1 ? "" : "s");
