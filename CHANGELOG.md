@@ -34,6 +34,7 @@ Pedido de LapageriaOS / AtomicOS (HR-01 punto 3): no había forma de producir un
 ## [Sin versión]
 
 ### Docs
+- **Autoalojamiento, fase S0** (`docs/SELFHOST_S0.md`, actualiza `docs/DESIGN_SELFHOST.md` §2, §3, §4 y §6): inventario de `copihue.c` por bloques de líneas y orden de portado (el chequeo de tipos, la monomorfización y la generación son un solo bloque, no pasadas separadas); corpus de igualdad de 236 programas × `-O0`/`-O2` (ELF byte a byte); lista cerrada de huecos de S1 (devolver `str`/`[]T` y `str`/`[]T` como campo; `vec` en structs queda fuera y se cubre con un `Vec<T>` genérico); hallazgos de sondas de compilación, entre ellos que `p->campo[i]` como valor hace caer al bootstrap C con segfault (no corregido: solo documentación). `tools/selfhost/corpus-list.sh` y `tools/selfhost/corpus.txt` son solo el listado del corpus. Sin cambios en el compilador ni en `LANG_VERSION`.
 - `docs/DESIGN_SELFHOST.md`: plan de autoalojamiento (Copihue se compila a sí mismo, sin C, `nasm` ni `ld` en el camino hosted), aprobado el 2026-11-05. Fases S0 (inventario, corpus de igualdad y huecos del lenguaje) a S5 (C solo como arranque). Enlazado desde el README. Sin cambios en el compilador.
 
 ## [0.44.7] - 2026-11-05
