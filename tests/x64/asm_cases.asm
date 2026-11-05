@@ -2458,3 +2458,20 @@ y:	dq	x
 
 section .bss
 z:	resb	8	; eight
+;---
+; stack probe loop (prologue of a frame of 4096 bytes or more): backward ja, mov r11 imm32, or qword [rsp]
+section .text
+big:
+    push rbp
+    mov rbp, rsp
+    mov r11, 65616
+.Lprobe_big:
+    sub rsp, 4096
+    or qword [rsp], 0
+    sub r11, 4096
+    cmp r11, 4096
+    ja .Lprobe_big
+    sub rsp, r11
+    or qword [rsp], 0
+    leave
+    ret

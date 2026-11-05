@@ -1,0 +1,19 @@
+// Stack probing (0.44.2). The frame of `big` is 65616 bytes (a local array takes 8 bytes per
+// element), so its prologue touches every page; `small` is 2128 bytes and keeps the plain
+// `sub rsp, __frame_small`. tests/run_tests.sh reads the assembly of this file in every mode.
+fn big(n: i64) -> i64 {
+    let b: [u8; 8192];
+    b[0] = 1;
+    b[8191] = 2;
+    return b[0] + b[8191] + n;
+}
+
+fn small(n: i64) -> i64 {
+    let b: [u8; 256];
+    b[0] = 1;
+    return b[0] + n;
+}
+
+fn main() -> i64 {
+    return big(1) + small(1);
+}

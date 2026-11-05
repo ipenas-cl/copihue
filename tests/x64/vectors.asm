@@ -412,3 +412,9 @@ movq xmm9, r10
 movdqu xmm2, [rel foo]
 movdqu xmm2, [rel foo+16]
 pshufd xmm2, [rel foo], 3
+mov r11, 8272
+mov r11, 65616
+sub r11, 4096
+cmp r11, 4096
+sub rsp, r11
+or qword [rsp], 0
