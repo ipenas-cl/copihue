@@ -1,8 +1,8 @@
 # Diseño: autoalojamiento (Copihue se compila a sí mismo)
 
-**Estado: aprobado el 2026-11-05 por Ignacio Peña.** Todavía no está implementado: no hay código de autoalojamiento en este árbol. La aprobación cubre el plan y autoriza empezar por la fase S0 (§6); cada fase siguiente arranca solo con su criterio de aceptación anterior en verde.
+**Estado: aprobado el 2026-11-05 por Ignacio Peña. S0 entregada (pendiente de su revisión), S1 no empezada.** Todavía no está implementado: no hay código de autoalojamiento en este árbol. La aprobación cubre el plan y autoriza empezar por la fase S0 (§6); cada fase siguiente arranca solo con su criterio de aceptación anterior en verde. El inventario, el corpus y la lista de huecos de S0 están en [SELFHOST_S0.md](SELFHOST_S0.md).
 
-Corte de referencia: Copihue **0.44.7** (`compiler/bootstrap-c/copihue.c`, `LANG_VERSION`; commit de `main` `53dfca7`). El paso 1 del camino nativo (escribir el ELF hosted sin `nasm` ni `ld`) está cerrado en [DESIGN_NATIVE.md](DESIGN_NATIVE.md) (M1–M6). Este documento es el **paso siguiente**: que el compilador deje de depender de C como implementación, y no solo de `nasm`/`ld` como herramientas externas.
+Corte de referencia: Copihue **0.44.8** (`compiler/bootstrap-c/copihue.c`, `LANG_VERSION`; commit de `main` `c4a4036`). El paso 1 del camino nativo (escribir el ELF hosted sin `nasm` ni `ld`) está cerrado en [DESIGN_NATIVE.md](DESIGN_NATIVE.md) (M1–M6). Este documento es el **paso siguiente**: que el compilador deje de depender de C como implementación, y no solo de `nasm`/`ld` como herramientas externas.
 
 Velocidad: solo con mediciones ([`bench/RESULTS.md`](../bench/RESULTS.md), [`examples/lowlat/RESULTS.md`](../examples/lowlat/RESULTS.md)). Este plan no afirma tiempos ni tamaños nuevos. Los dos niveles de sintaxis (fácil / explícito, [DESIGN_TWO_LEVELS.md](DESIGN_TWO_LEVELS.md)) son meta de lenguaje aparte; aquí solo importan si un hueco de ese diseño bloquea expresar el compilador.
 
@@ -21,17 +21,17 @@ Hay autoalojamiento cuando, en un corpus acordado de programas `.lap` (como mín
 
 Hasta que (1)–(4) estén verdes en CI Linux, **no** se borra ni se deja de construir `compiler/bootstrap-c/copihue.c`.
 
-## 2. Estado actual (0.44.7)
+## 2. Estado actual (0.44.8)
 
 Hechos verificables en el árbol y en la documentación vigente; no se inventan cifras de corridas nuevas aquí.
 
 | Pieza | Dónde | Estado |
 |---|---|---|
-| Bootstrap del compilador | `compiler/bootstrap-c/copihue.c` (un solo archivo C; 23.323 líneas según `wc -l` en 0.44.7) | Es la implementación. `make` construye `./copihue` con `gcc`. |
+| Bootstrap del compilador | `compiler/bootstrap-c/copihue.c` (un solo archivo C; 23.590 líneas según `wc -l` en 0.44.8; mapa por bloques en [SELFHOST_S0.md](SELFHOST_S0.md) §1) | Es la implementación. `make` construye `./copihue` con `gcc`. |
 | Camino nativo hosted | `compiler/native/` (`x64`, `asm`, `elf`) | M1–M6 hechos ([DESIGN_NATIVE.md](DESIGN_NATIVE.md)): por defecto el compilador arma el texto NASM en memoria, lo ensambla y escribe el ELF (`ET_EXEC` o `-c` `ET_REL`) **sin** `nasm` ni `ld`. `--nasm` queda el camino viejo. |
 | Suite nativa | `make native-test`, `tests/run_tests.sh` por la ruta nativa | Criterios y coberturas en DESIGN_NATIVE (corpus hosted, igualdad con nasm en bytes/relocaciones/símbolos, pasada que ejecuta en Linux). |
 | Lo que aún cae a `nasm`/`ld` | `asm("...")`, `naked` / `interrupt` / `syscall`, `bits 16`/`32`, `--freestanding -c`, `--flat`, `--boot` | Documentado en el README: el ensamblador nativo no los toma; con aviso caen al camino viejo, o `--native` estricto los rechaza. |
-| Formatos de kernel | `--flat ADDR`, `--axe1`, `--axe2`, `--pic`, `--boot` | `--flat`, `--axe1`, `--axe2`, `--pic`, `--sizes`, `align(N)` en `fn` y `let`, `ms64 fn` (0.44.1–0.44.7, CHANGELOG / README). Sirven a LapageriaOS; **no** son requisito del autoalojamiento hosted. |
+| Formatos de kernel | `--flat ADDR`, `--axe1`, `--axe2`, `--pic`, `--boot` | `--flat`, `--axe1`, `--axe2`, `--pic`, `--pe-efi`, `--sizes`, `align(N)` en `fn` y `let`, `ms64 fn` (0.44.1–0.44.8, CHANGELOG / README). Sirven a LapageriaOS; **no** son requisito del autoalojamiento hosted. |
 | Lenguaje usable hoy | enums, `match`, `Result`/`?`, generics, traits, `str` como `[]u8`, `vec`/`own` locales, módulos, `-c`, atomics, hilos hosted | Cortes 0.36–0.44.x (incluye `const`, globales con inicializador constante, error al asignar a un no-lvalue) y notas `DESIGN_*.md`. Suficiente para programas grandes, **no** aún para expresar el compilador entero sin los huecos de la §3. |
 | Autoalojamiento | — | **No empezado.** El README lo dice con claridad: *Self-hosting … are not started.* Material viejo bajo `docs/archive/` (era Chronos) **no** cuenta; no se reutiliza como estado. |
 
@@ -40,6 +40,8 @@ Relación con el paso 1: DESIGN_NATIVE cierra «emitir código máquina y ELF pr
 ## 3. Huecos del lenguaje que bloquean expresar el compilador
 
 Lista **honesta**, tomada de lo que ya marcan REFERENCE, STATUS, README y los `DESIGN_*.md`. No se inventan features ni se prometen APIs nuevas más allá de lo que el plan histórico ya nombró (memoria dinámica, tablas de símbolos, structs y `str` devolvibles, y lo mínimo que falte).
+
+**Cerrado en S0** ([SELFHOST_S0.md](SELFHOST_S0.md) §3, con sondas de compilación): S1 abre **dos** de estos huecos, devolver `str`/`[]T` y `str`/`[]T` como campo de struct. `vec T` como campo, parámetro, retorno o global **no** entra en S1: una tabla que crece se escribe con un `Vec<T>` genérico de la biblioteca del compilador (`struct Vec<T> { ptr: *T, len: i64, cap: i64 }`), que compila hoy con `T` entero o struct. El texto de salida y los mensajes usan un `Buf` de esa biblioteca, no `append` de `str`. La tabla de abajo es el punto de partida y se deja como estaba escrita.
 
 ### 3.1 Bloquean de frente (hay que cerrarlos antes o al empezar a portar)
 
@@ -75,6 +77,8 @@ Orden ya planteado y que esta propuesta respeta:
 Cada fase es pequeña, tiene criterio de aceptación observable y no arranca la siguiente sin ese criterio en verde. Los nombres S0, S1, … evitan chocar con M1–M6 de DESIGN_NATIVE.
 
 ### S0 — Inventario y corpus (sin reescribir el compilador)
+
+**Estado: entregada el 2026-11-05, pendiente de revisión.** Lo cerrado está en [SELFHOST_S0.md](SELFHOST_S0.md): inventario de bloques de `copihue.c` y orden de portado (§1), corpus de 236 programas × `-O0`/`-O2` con su lista en `tools/selfhost/corpus.txt` (§2), huecos de S1 y el idiom de tablas y mensajes (§3), y las cinco decisiones que quedan para Ignacio (§4).
 
 **Qué.** Cerrar por escrito, en este mismo documento o en un anexo corto bajo `docs/`:
 
@@ -138,10 +142,13 @@ Una sola fase, acotada: **S0**.
 
 Entregable: inventario de módulos + corpus de igualdad + lista cerrada de huecos que alimentan S1, escrito y acordado (actualización de este documento). Sin árbol `compiler/self/`, sin cambios de lenguaje, sin commits de reescritura.
 
-Cuando S0 esté firmado, el siguiente ticket es **S1** (devolver `str`/`[]T` y campos slice / `vec` en structs según esa lista).
+**Hecho (2026-11-05), falta la firma:** el entregable está en [SELFHOST_S0.md](SELFHOST_S0.md) y en `tools/selfhost/`. No hay `compiler/self/`, no hubo cambios de lenguaje ni de compilador, `LANG_VERSION` sigue en 0.44.8. S0 queda cerrada cuando Ignacio revise el anexo y resuelva sus decisiones (§4 del anexo).
+
+Cuando S0 esté firmado, el siguiente ticket es **S1**: devolver `str`/`[]T` y `str`/`[]T` como campo de struct (la lista cerrada del anexo §3.1; `vec` en structs queda fuera y se cubre con `Vec<T>`). Antes de S2 queda pendiente el segfault del bootstrap C con `p->campo[i]` (anexo §3.4).
 
 ## 7. Referencias
 
+- [SELFHOST_S0.md](SELFHOST_S0.md) — fase S0: inventario de módulos, corpus de igualdad y huecos de S1.
 - [DESIGN_NATIVE.md](DESIGN_NATIVE.md) — ELF sin `nasm`/`ld` (M1–M6).
 - [DESIGN_NATIVE_X64.md](DESIGN_NATIVE_X64.md) — codificador x86-64.
 - [DESIGN_STRINGS.md](DESIGN_STRINGS.md), [DESIGN_SLICES.md](DESIGN_SLICES.md) — `str` / `[]T` y lo que aún no se puede devolver ni guardar en un struct.

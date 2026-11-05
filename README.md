@@ -157,7 +157,7 @@ Copihue is slower on recursive code (`fib`), on the matching engine, and on a gr
 - Generic bodies in `-c` objects: the same monomorphized body emitted in two objects fails at `ld`.
 - The compiler does not emit GDT, page tables or the `STAR`/`LSTAR`/`EFER` writes; the kernel does.
 - Speed: recursion, the matching engine and `vec_push` against Rust (see above).
-- Self-hosting and other targets (ARM64) are not started. The self-hosting plan (phases S0–S5) was approved on 2026-11-05: [docs/DESIGN_SELFHOST.md](docs/DESIGN_SELFHOST.md). `nasm` and `ld` are no longer needed for hosted programs and `-c` objects, but they still build programs with user assembly or `naked`/`interrupt`/`syscall` functions, `--freestanding -c`, `--flat` and `--boot`. The author's development machine (macOS) cannot run Linux ELF files, so running what the compiler writes is the CI's job ([docs/DESIGN_NATIVE.md](docs/DESIGN_NATIVE.md)).
+- Self-hosting and other targets (ARM64) are not started. The self-hosting plan (phases S0–S5) was approved on 2026-11-05: [docs/DESIGN_SELFHOST.md](docs/DESIGN_SELFHOST.md). Phase S0 (module inventory, equality corpus, language gaps for S1) is written and waits for review: [docs/SELFHOST_S0.md](docs/SELFHOST_S0.md); no self-hosted code exists yet. `nasm` and `ld` are no longer needed for hosted programs and `-c` objects, but they still build programs with user assembly or `naked`/`interrupt`/`syscall` functions, `--freestanding -c`, `--flat` and `--boot`. The author's development machine (macOS) cannot run Linux ELF files, so running what the compiler writes is the CI's job ([docs/DESIGN_NATIVE.md](docs/DESIGN_NATIVE.md)).
 
 Plans: [ROADMAP.md](ROADMAP.md) and [docs/VISION.md](docs/VISION.md).
 
