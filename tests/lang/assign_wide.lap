@@ -1,6 +1,7 @@
 // 0.44.4: a store into a wider field, element or pointee takes the arithmetic at that
 // width, as `x = e` does for a variable. Before, `w.x = a + b` with u32 operands was
-// cut to 32 bits. A destination as narrow as the operands still wraps.
+// cut to 32 bits. A destination as narrow as the operands still wraps. Wide results are
+// printed divided by 1000 because the test runner masks numbers of 9 or more digits.
 struct W { x: i64, y: u64, z: i32, w: u8 }
 
 fn main() -> i64 {
@@ -19,25 +20,25 @@ fn main() -> i64 {
     let q: *W = &w;
 
     w.x = a + b;
-    print_int(w.x);
+    print_int(w.x / 1000);
     println("");
     w.y = a * 3;
-    print_int(w.y);
+    print_int(w.y / 1000);
     println("");
     arr[1] = a + b;
-    print_int(arr[1]);
+    print_int(arr[1] / 1000);
     println("");
     arr[2] = c + d;
     print_int(arr[2]);
     println("");
     uarr[0] = a + b;
-    print_int(uarr[0]);
+    print_int(uarr[0] / 1000);
     println("");
     p[3] = a + b;
-    print_int(arr[3]);
+    print_int(arr[3] / 1000);
     println("");
     q.x = m + n;
-    print_int(w.x);
+    print_int(w.x / 1000);
     println("");
     arr[0] = e - f;
     print_int(arr[0]);

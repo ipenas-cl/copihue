@@ -23,12 +23,12 @@ fn main() -> i64 {
     println("");
     print_int(cells[2]);
     println("");
-    print_int(cells[3]);
+    print_int(cells[3] / 1000);  // /1000: the test runner masks numbers of 9+ digits
     println("");
 
     print_int(cell(1)[1]);
     println("");
-    print_int(vcell(3)[0]);
+    print_int(vcell(3)[0] / 1000);
     println("");
 
     let pr: Pair;
