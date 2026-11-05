@@ -1,0 +1,16 @@
+// Same as store_call.lap for --flat and --freestanding: no OS, the entry is _start.
+fn mem(off: i64) -> *volatile u32 {
+    return (0x100000 + off) as *volatile u32;
+}
+
+fn half(off: i64) -> *u16 {
+    return (0x100000 + off) as *u16;
+}
+
+fn _start() -> i64 {
+    mem(8)[0] = 5;
+    *mem(16) = 7;
+    half(2)[1] = 9;
+    while (mem(8)[0] == 0) { }
+    return 0;
+}

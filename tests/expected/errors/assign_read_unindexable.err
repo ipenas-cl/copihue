@@ -1,0 +1,10 @@
+tests/errors/assign_read_unindexable.lap:8:18: error: cannot index 'g': it is not an array or a pointer (declare it as e.g. 'g: *i8')
+      8 |     let a: i64 = g[1];
+        |                  ^
+tests/errors/assign_read_unindexable.lap:9:18: error: use of undeclared variable 'zz'
+      9 |     let b: i64 = zz[2];
+        |                  ^
+tests/errors/assign_read_unindexable.lap:10:22: error: cannot index this expression: the expression has type i64, not a pointer
+     10 |     let c: i64 = f(3)[0];
+        |                      ^
+3 errors, compilation failed

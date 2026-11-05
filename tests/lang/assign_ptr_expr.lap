@@ -1,0 +1,44 @@
+// 0.44.4: indexing or dereferencing a pointer that is a value (a call result) designates
+// memory, like a pointer variable. The store happens, at the width of the pointee.
+struct Pair { a: i64, b: u32 }
+
+let cells: [u32; 4];
+
+fn cell(i: i64) -> *u32 { return &cells[i]; }
+fn vcell(i: i64) -> *volatile u32 { return &cells[i]; }
+fn same(p: *Pair) -> *Pair { return p; }
+
+fn main() -> i64 {
+    cells[2] = 99;
+    cell(1)[0] = 5;
+    print_int(cells[1]);
+    println("");
+    print_int(cells[2]);     // a 4-byte store: the neighbour keeps 99
+    println("");
+
+    *cell(0) = 11;
+    cell(1)[1] = 6;
+    vcell(3)[0] = 4000000000;
+    print_int(cells[0]);
+    println("");
+    print_int(cells[2]);
+    println("");
+    print_int(cells[3]);
+    println("");
+
+    print_int(cell(1)[1]);
+    println("");
+    print_int(vcell(3)[0]);
+    println("");
+
+    let pr: Pair;
+    pr.a = 1;
+    pr.b = 2;
+    same(&pr).a = 40;
+    same(&pr).b = 3;
+    print_int(pr.a);
+    println("");
+    print_int(pr.b);
+    println("");
+    return 0;
+}

@@ -1,0 +1,120 @@
+// Flat kernel at 0x8000 for QEMU, loaded by tests/usermode/boot.lap (see tests/align/kernel.lap
+// for the mode switch). It runs the stores of 0.44.4 for real and reports on COM1:
+// ASSIGN when every check holds, FAIL and the number of the first check that does not otherwise.
+//   - a store through a pointer that is a call result (`cell(1)[0] = 5`, `*cell(0) = 11`)
+//     happens, at the width of the pointee (a u32 store leaves its neighbour alone);
+
+struct Pair { a: i64, b: u32 }
+
+let cells: [u32; 4] = [0, 0, 0, 0];
+
+let bad: i64 = 0;
+
+data gdt {
+    dq 0;
+    dw 0;
+    dw 0;
+    db 0;
+    db 0x9A;
+    db 0x20;
+    db 0;
+    dw 0xFFFF;
+    dw 0;
+    db 0;
+    db 0x92;
+    db 0xCF;
+    db 0;
+}
+
+data gdtr {
+    dw 23;
+    dd gdt;
+}
+
+fn serial_putc(c: i64) -> i64 {
+    let tries = 0;
+    while ((inb(0x3FD) & 0x20) == 0 && tries < 1000) { tries = tries + 1; }
+    outb(0x3F8, c);
+    return 0;
+}
+
+fn cell(i: i64) -> *u32 { return &cells[i]; }
+fn vcell(i: i64) -> *volatile u32 { return &cells[i]; }
+fn same(p: *Pair) -> *Pair { return p; }
+
+fn check(n: i64, ok: i64) -> i64 {
+    if (ok == 0 && bad == 0) { bad = n; }
+    return 0;
+}
+
+fn kmain() -> i64 {
+    cells[2] = 99;
+    cell(1)[0] = 5;
+    check(1, cells[1] == 5);
+    check(2, cells[2] == 99);
+    *cell(0) = 11;
+    cell(1)[1] = 6;
+    vcell(3)[0] = 4000000000;
+    check(3, cells[0] == 11);
+    check(4, cells[2] == 6);
+    check(5, cells[3] == 4000000000);
+    check(6, cell(1)[1] == 6);
+    check(7, vcell(3)[0] == 4000000000);
+
+    let pr: Pair;
+    pr.a = 1;
+    pr.b = 2;
+    same(&pr).a = 40;
+    same(&pr).b = 3;
+    check(8, pr.a == 40);
+    check(9, pr.b == 3);
+
+    if (bad == 0) {
+        serial_putc(65);
+        serial_putc(83);
+        serial_putc(83);
+        serial_putc(73);
+        serial_putc(71);
+        serial_putc(78);
+    } else {
+        serial_putc(70);
+        serial_putc(65);
+        serial_putc(73);
+        serial_putc(76);
+        serial_putc(48 + bad / 10);
+        serial_putc(48 + bad % 10);
+    }
+    while (1) { hlt(); }
+    return 0;
+}
+
+bits 32 naked fn _start() {
+    cli();
+    asm("lgdt [gdtr]");
+    asm("mov ax, 0x10");
+    asm("mov ds, ax");
+    asm("mov es, ax");
+    asm("mov ss, ax");
+    asm("mov esp, 0x6000");
+    asm("cld");
+    asm("xor eax, eax");
+    asm("mov edi, 0x1000");
+    asm("mov ecx, 3072");
+    asm("rep stosd");
+    asm("mov dword [0x1000], 0x2007");
+    asm("mov dword [0x2000], 0x3007");
+    asm("mov dword [0x3000], 0x87");
+    asm("mov eax, cr4");
+    asm("or eax, 0x20");
+    asm("mov cr4, eax");
+    asm("mov eax, 0x1000");
+    asm("mov cr3, eax");
+    asm("mov ecx, 0xC0000080");
+    asm("rdmsr");
+    asm("or eax, 0x100");
+    asm("wrmsr");
+    asm("mov eax, cr0");
+    asm("or eax, 0x80000000");
+    asm("mov cr0, eax");
+    asm("jmp 0x08:kmain");
+}

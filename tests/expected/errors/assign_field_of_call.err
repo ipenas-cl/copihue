@@ -1,0 +1,4 @@
+tests/errors/assign_field_of_call.lap:10:5: error: the assignment target is not assignable: field 'x' of an expression that is not a struct or a pointer to one
+     10 |     f(1).x = 5;
+        |     ^
+1 error, compilation failed

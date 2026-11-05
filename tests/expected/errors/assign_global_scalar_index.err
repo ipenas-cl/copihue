@@ -1,0 +1,4 @@
+tests/errors/assign_global_scalar_index.lap:4:5: error: cannot index 'g': it is not an array or a pointer (declare it as e.g. 'g: *i8')
+      4 |     g[0] = 5;
+        |     ^
+1 error, compilation failed

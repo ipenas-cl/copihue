@@ -1,0 +1,4 @@
+tests/errors/assign_index_int_call.lap:6:5: error: the assignment target is not assignable: the expression has type i64, not a pointer
+      6 |     f(1)[0] = 5;
+        |     ^
+1 error, compilation failed
