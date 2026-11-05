@@ -787,62 +787,10 @@ if ! ( cd "$WORK" &&
   fail=$((fail+1)); failed+=("flat elf"); echo "FAIL flat elf:"; cat "$WORK/err.txt"
 elif ! cmp -s "$WORK/k.bin" "$WORK/k2.bin" || ! cmp -s "$WORK/k.elf" "$WORK/k2.elf"; then
   fail=$((fail+1)); failed+=("flat elf"); echo "FAIL flat elf: -O0 and -O2 images differ"
-elif ! python3 - "$WORK/k.elf" "$WORK/k.bin" << 'PY'
-import sys, struct
-data = open(sys.argv[1], "rb").read()
-raw = open(sys.argv[2], "rb").read()
-assert data[:4] == b"\x7fELF" and data[4] == 2 and data[5] == 1
-e_type, e_machine = struct.unpack_from("<HH", data, 16)
-assert e_type == 2 and e_machine == 62
-e_entry, e_phoff, e_shoff = struct.unpack_from("<QQQ", data, 24)
-e_phentsize, e_phnum, e_shentsize, e_shnum, e_shstrndx = struct.unpack_from("<HHHHH", data, 54)
-assert e_phentsize == 56 and e_shentsize == 64 and e_phnum >= 1 and e_shnum >= 4
-def shdr(i):
-    return struct.unpack_from("<IIQQQQIIQQ", data, e_shoff + i * 64)
-shstr = data[shdr(e_shstrndx)[4]:shdr(e_shstrndx)[4] + shdr(e_shstrndx)[5]]
-def nm(off):
-    return shstr[off:shstr.index(b"\0", off)].decode()
-secs = {}
-for i in range(e_shnum):
-    sh = shdr(i)
-    secs[nm(sh[0])] = sh
-for name in (".text", ".console", ".note", ".data", ".bss"):
-    assert name in secs, name
-assert secs[".console"][3] == 0x12000
-blob = secs[".text"][4]
-assert data[blob:blob + len(raw)] == raw
-for name in (".text", ".console", ".note"):
-    sh = secs[name]
-    assert sh[1] == 1 and sh[5] > 0
-    assert data[sh[4]:sh[4] + sh[5]] == raw[sh[4] - blob:sh[4] - blob + sh[5]]
-sym = secs[".symtab"]
-strtab = data[secs[".strtab"][4]:secs[".strtab"][4] + secs[".strtab"][5]]
-syms = {}
-for i in range(sym[5] // 24):
-    st_name, st_info, st_other, st_shndx, st_value, st_size = struct.unpack_from("<IBBHQQ", data, sym[4] + i * 24)
-    if st_name == 0:
-        continue
-    syms[strtab[st_name:strtab.index(b"\0", st_name)].decode()] = st_value
-assert e_entry == syms["_start"] == secs[".text"][3] == 0x10000
-assert syms["console__putc"] == secs[".console"][3]
-assert syms["console__mark"] > secs[".console"][3]
-assert syms["banner"] == secs[".note"][3]
-assert "console__hidden" in syms
-def file_off(sec, val):
-    sh = secs[sec]
-    return sh[4] + (val - sh[3])
-assert data[file_off(".console", syms["console__mark"]):][:8] == (65).to_bytes(8, "little")
-assert data[file_off(".note", syms["banner"]):][:7] == b"COPIHUE"
-assert secs[".text"][3] + secs[".text"][5] <= secs[".console"][3]
-found = False
-for i in range(e_phnum):
-    p_type, p_flags, p_offset, p_vaddr, p_paddr, p_filesz, p_memsz, p_align = struct.unpack_from("<IIQQQQQQ", data, e_phoff + i * 56)
-    if p_type == 1 and p_vaddr == 0x12000 and p_filesz == secs[".console"][5] and p_align == 1:
-        found = True
-assert found
-PY
+elif ! gcc -O2 -Wall -Werror -o "$WORK/flat_elf_check" "$ROOT/tests/tools/flat_elf_check.c" 2>"$WORK/err.txt" ||
+     ! "$WORK/flat_elf_check" "$WORK/k.elf" "$WORK/k.bin" 2>"$WORK/err.txt"
 then
-  fail=$((fail+1)); failed+=("flat elf"); echo "FAIL flat elf: ELF layout"
+  fail=$((fail+1)); failed+=("flat elf"); echo "FAIL flat elf: ELF layout"; cat "$WORK/err.txt"
 else
   pass=$((pass+1))
 fi
