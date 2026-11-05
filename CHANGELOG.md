@@ -2,6 +2,36 @@
 
 Todos los cambios importantes del proyecto.
 
+## [0.44.5] - 2026-11-05
+
+Pedido de LapageriaOS / AtomicOS (HR-01, punto 2): `let ahci_port: i64 = 0 - 1;` compilaba en Copihue y fallaba en nasm con ``symbol `ahci_port' not defined``. El inicializador de un global solo se emitía si era un número suelto; cualquier otra expresión dejaba el símbolo sin definir (y en un arreglo, `[f(), 2]` ponía un 0 sin avisar).
+
+### Added
+- **Un global puede iniciar con una expresión entera constante**, que se pliega en compilación: literales, `const`, paréntesis, `+ - * / %`, `& | ^ << >>`, `-x`, `~x`, `!x`, comparaciones y `&&`/`||`, `as` entre enteros (envuelve al ancho del destino) y `as *T` sobre un entero, `sizeof(T)` y `offsetof(S, f)`. `let m: u32 = 1 << 31;`, `let k: i64 = N * 4 + 2;`, `let all: u64 = 0 - 1;`, `let vga: *u8 = 0xB8000 + 160;`. Vale también para cada elemento de un arreglo global (`[N, N * 2, 1 << 40]`) y dentro de un `module`. El valor queda en `.data` (`dq -1`, `dq 2147483648`) y es el mismo en `-O0` y `-O2`.
+- `let s: *u8 = "texto";` y `let s = "texto";` en un global: el slot guarda la dirección de los bytes. Antes dejaban el símbolo sin definir si se usaban (`tests/test_global_string_simple.lap` solo compilaba porque nadie leía `msg`).
+
+### Fixed
+- **Lo que no se puede plegar es un error de Copihue en la línea del `let`**, sin archivo de salida y sin llegar a nasm ni al ensamblador propio: `the initializer of global 'x' is not a constant expression: a call` (también `the name 'g', which is not a const` para otro global o una variable, `an address (&x)`, `a struct literal`, `a string literal` en una ranura entera, `a field access`, `an index expression`, `a pointer dereference`). En un arreglo, `element 1 of the initializer of global 'a' is not a constant expression: a call`. Un arreglo iniciado con algo que no es un literal de arreglo ni una cadena (`let f: [i64; 2] = 5;`, que dejaba un solo `dq`) es `must be an array literal or a string`. Cualquier global iniciado que aun así no tuviera nada que emitir es error (`cannot be placed in .data`).
+- **División o módulo por cero** en un inicializador: `the initializer of global 'x' divides by zero`.
+- **Un valor que no cabe** en el tipo declarado: `expected u32, found constant value -1` (`let a: u32 = 0 - 1`), `expected u8, found constant value 300`. Un literal suelto sigue la regla del `let` local (`expected u64, found integer literal -1`). Un `[u8; 3] = [1, 2, 256]` ahora también lo dice (el elemento se aceptaba sin revisar). `i64` y `u64` aceptan cualquier resultado de 64 bits; `x as T` con `T` del ancho del global es una reinterpretación (`let s: i8 = 200 as u8` es -56).
+- La plegadura de `-O1`/`-O2` marca el número que produce (`AF_FOLDED`), para que `0 - 1` valga lo mismo en `-O0` que en `-O2` y no se confunda con el literal `-1`.
+- Los mismos errores en `--freestanding`, `--flat`, `--axe1`, `--axe2`, `--elf`, `--boot`, `-c` y `--nasm`: todos pasan por el mismo código.
+
+### Tests
+- `tests/errors/ginit_call.lap`, `ginit_global.lap`, `ginit_div0.lap`, `ginit_range.lap`, `ginit_other.lap` (con su `.err`, generado por el compilador y revisado a mano).
+- `tests/lang/global_init.lap`: **salida esperada escrita a mano y no ejecutada** (esta Mac no ejecuta ELF de Linux); la CI la ejecuta. Los valores grandes se comparan en el programa y se imprime 1, porque el corredor enmascara los números de 9 o más dígitos. Sus valores se comprobaron en el `.data` del asm (`-S`, `-O0` y `-O2`, idéntico en ambos).
+- `tests/ginit/run.sh` (sección 4h de `tests/run_tests.sh`): cada rechazo en nueve modos (nativo `-O0` y `-O2`, `--nasm`, `-c`, `--freestanding`, `--flat`, `--axe1`, `--axe2`, `--elf`) con el mensaje y la línea del golden y sin archivo de salida; las líneas de `.data` esperadas (`tests/ginit/data_hosted.txt` y `data_kernel.txt`) en el asm de `tests/lang/global_init.lap` y de `tests/ginit/kernel.lap`; el asm del hosted se ensambla con nasm; el ejecutable y el objeto `-c` nativos se construyen; y `tests/ginit/kernel.lap` corre bajo QEMU (`GINIT`, `-O0` y `-O2`) con 24 comprobaciones sobre 19 globales, con valores de más de 32 y de 63 bits. Con un kernel con una expectativa falsa el mismo montaje da `FAIL03`.
+- `tests/ginit/` queda fuera del corpus de programas de `tests/run_tests.sh`, `tools/native/corpus.sh` y `tests/x64/run_text.sh`, como `tests/align/` y `tests/axe1/`.
+- Con el 0.44.4 (compilado de HEAD) `tests/ginit/kernel.lap` y `tests/lang/global_init.lap` no compilan; con el 0.44.5, sí.
+- El asm (`-S`; `-O0`, `-O2`, `--freestanding` y `--flat 0x10000`) de los programas de `tests/` y `examples/` es idéntico byte a byte entre 0.44.4 y 0.44.5, y los diagnósticos anteriores también; las únicas diferencias son los archivos nuevos y `tests/test_global_string_simple.lap`, que ahora define `msg`.
+- `tests/run_tests.sh` en esta Mac (Darwin): 368 pasan, 2 fallan, 2 omitidas (necesitan nasm y ld para enlazar ELF). Los dos fallos (`tests/flat/generic.lap`, `tests/boot/edx_keep.lap`) son de esta máquina (orden de prefijos y `movsxd` de nasm 3.02 frente al codificador propio): el asm de ambos es idéntico byte a byte con el 0.44.4. `make native-test`: el corpus de 488 programas es idéntico a nasm (`.text`, `.data`, `.bss`); su único `DIFF` es el mismo `movsxd rax, eax`. `gcc -O2 -Wall -Werror` (aquí `cc`, clang de Apple) sin advertencias.
+
+### Pendiente
+- Un global `enum` o `struct` sigue sin poder iniciarse con un literal (error); un global de nombre igual a una palabra de NASM (`word`) sigue fallando en nasm.
+- `&x` de otro global como inicializador (una dirección fija en `.data`) no existe todavía; es error.
+- La suma de dos `u8` en un inicializador no se corta a 8 bits antes de comparar con el tipo (`(200 as u8) + (100 as u8)` da 300 y se rechaza para `u8`).
+- No se pudo ejecutar un ELF de Linux aquí: lo ejecutado es el kernel bajo QEMU; `tests/lang/global_init.lap` en hosted lo ejecuta la CI.
+
 ## [0.44.4] - 2026-11-05
 
 Pedido urgente de LapageriaOS / AtomicOS (HR-01, punto 1): `mem(8)[0] = 5;`, con `fn mem(off: i64) -> *volatile u32`, compilaba sin error ni advertencia y el asm solo evaluaba la llamada: no había store. Costó una sesión de depuración en `ahci.lap`. Ningún store se descarta ya en silencio.
