@@ -1,0 +1,52 @@
+// 0.44.4: a store into a wider field, element or pointee takes the arithmetic at that
+// width, as `x = e` does for a variable. Before, `w.x = a + b` with u32 operands was
+// cut to 32 bits. A destination as narrow as the operands still wraps.
+struct W { x: i64, y: u64, z: i32, w: u8 }
+
+fn main() -> i64 {
+    let a: u32 = 3000000000;
+    let b: u32 = 3000000000;
+    let c: u8 = 200;
+    let d: u8 = 100;
+    let m: i32 = 2000000000;
+    let n: i32 = 2000000000;
+    let e: i32 = 3;
+    let f: i32 = 10;
+    let w: W;
+    let arr: [i64; 4];
+    let uarr: [u64; 2];
+    let p: *i64 = &arr;
+    let q: *W = &w;
+
+    w.x = a + b;
+    print_int(w.x);
+    println("");
+    w.y = a * 3;
+    print_int(w.y);
+    println("");
+    arr[1] = a + b;
+    print_int(arr[1]);
+    println("");
+    arr[2] = c + d;
+    print_int(arr[2]);
+    println("");
+    uarr[0] = a + b;
+    print_int(uarr[0]);
+    println("");
+    p[3] = a + b;
+    print_int(arr[3]);
+    println("");
+    q.x = m + n;
+    print_int(w.x);
+    println("");
+    arr[0] = e - f;
+    print_int(arr[0]);
+    println("");
+    w.x = e - f;
+    print_int(w.x);
+    println("");
+    w.w = c + d;
+    print_int(w.w);
+    println("");
+    return 0;
+}

@@ -3,11 +3,14 @@
 // ASSIGN when every check holds, FAIL and the number of the first check that does not otherwise.
 //   - a store through a pointer that is a call result (`cell(1)[0] = 5`, `*cell(0) = 11`)
 //     happens, at the width of the pointee (a u32 store leaves its neighbour alone);
+//   - a store into a wider field or element takes the arithmetic at that width, so
+//     `w.x = a + b` with u32 operands is not cut to 32 bits.
 
 struct Pair { a: i64, b: u32 }
+struct W { x: i64, y: u64, z: i32, e: [i64; 2] }
 
 let cells: [u32; 4] = [0, 0, 0, 0];
-
+let wide: [i64; 4] = [0, 0, 0, 0];
 let bad: i64 = 0;
 
 data gdt {
@@ -68,6 +71,32 @@ fn kmain() -> i64 {
     same(&pr).b = 3;
     check(8, pr.a == 40);
     check(9, pr.b == 3);
+
+    let a: u32 = 3000000000;
+    let b: u32 = 3000000000;
+    let m: i32 = 2000000000;
+    let n: i32 = 2000000000;
+    let e: i32 = 3;
+    let f: i32 = 10;
+    let w: W;
+    let q: *W = &w;
+    let p: *i64 = &wide;
+    w.x = a + b;
+    check(10, w.x == 6000000000);
+    w.y = a * 3;
+    check(11, w.y == 9000000000);
+    wide[1] = a + b;
+    check(12, wide[1] == 6000000000);
+    p[2] = a + b;
+    check(13, wide[2] == 6000000000);
+    q.x = m + n;
+    check(14, w.x == 4000000000);
+    wide[0] = e - f;
+    check(15, wide[0] == 0 - 7);
+    w.x = e - f;
+    check(16, w.x == 0 - 7);
+    w.e[1] = a + b;
+    check(17, w.e[1] == 6000000000);
 
     if (bad == 0) {
         serial_putc(65);

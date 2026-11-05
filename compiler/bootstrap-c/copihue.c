@@ -10876,6 +10876,7 @@ static void gen_ptr_expr_store(Codegen* cg, AstNode* at, AstNode* base, AstNode*
                    "cannot assign a whole struct '%s' through a pointer expression; assign its fields", a.tn);
         return;
     }
+    widen_to_dest(cg, value, a.tn);
     check_types(value, "", ty_from_spelled(cg, a.tn), expr_ty(cg, value));
     {
         int bits = 64, sg = 1;
@@ -10940,6 +10941,7 @@ static void gen_field_store_expr(Codegen* cg, AstNode* n, AstNode* obj, const ch
     {
         char* ft = typetab_field_type(cg->types, (char*)stype, (char*)field);
         int bits = 64, sg = 1;
+        if (ft && ft[0] != '*') widen_to_dest(cg, value, ft);
         if (ft && (ft[0] == '*' || !typetab_lookup(cg->types, ft)))
             check_types(value, "", ty_from_spelled(cg, ft), expr_ty(cg, value));
         if (!ft || !int_name(ft, &bits, &sg)) bits = 64;
@@ -11766,6 +11768,7 @@ static int gen_embedded_array(Codegen* cg, AstNode* field, AstNode* index, AstNo
         return 1;
     }
     if (value) {
+        if (f->type_name && f->type_name[0] != '*') widen_to_dest(cg, value, f->type_name);
         gen_expr(cg, peel_store_cast(value, elem * 8));
         emit(cg, "    push rax\n");
     }
@@ -12788,6 +12791,7 @@ static void gen_mem_store(Codegen* cg, AstNode* n) {
         // The cast type is the pointer (`*u8`). The store is checked against
         // the pointee, so `*(0x1000 as *u8) = 300` is the usual literal error.
         VTy dst = ty_from_spelled(cg, addr->value);
+        if (val) widen_to_dest(cg, val, addr->value);
         if (val) check_types(val, "", dst, expr_ty(cg, val));
     }
     int mvol = 0;
@@ -12803,6 +12807,7 @@ static void gen_mem_store(Codegen* cg, AstNode* n) {
             }
             sz = pa.sz;
             mvol = pa.vol;
+            widen_to_dest(cg, val, pa.tn);
             if (val) check_types(val, "", ty_from_spelled(cg, pa.tn), expr_ty(cg, val));
         }
     }
@@ -14505,6 +14510,11 @@ void gen_expr(Codegen* cg, AstNode* n) {
         // children[0] = array base
         // children[1] = index expression
         // children[2] = value expression
+        // A wider element takes the arithmetic at its width (see widen_arith), as `x = e` does.
+        if (n->children && n->child_count >= 3 && n->children[0]) {
+            char* we = array_elem_type_name(cg, n->children[0]);
+            if (we && we[0] != '*') widen_to_dest(cg, n->children[2], we);
+        }
         if (gen_slice_store(cg, n)) return;
 
         if (!n->children || n->child_count < 3) return;
@@ -14897,6 +14907,12 @@ void gen_expr(Codegen* cg, AstNode* n) {
         char* field_name = n->name;
 
         if (!obj || !field_name) return;
+
+        {
+            char* wrec = obj_record_type(cg, obj);
+            char* wft = wrec ? typetab_field_type(cg->types, wrec, field_name) : NULL;
+            if (wft && wft[0] != '*') widen_to_dest(cg, value_expr, wft);
+        }
 
         if (obj->type == AST_IDENT && (!strcmp(field_name, "ptr") || !strcmp(field_name, "len") ||
                                        !strcmp(field_name, "cap"))) {
