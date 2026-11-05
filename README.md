@@ -10,7 +10,7 @@
 
 A systems programming language with its own compiler, written in C with an x86-64 NASM back end. It produces Linux x86-64 ELF executables **with no libc and no runtime**, and it can also produce freestanding code for kernels and boot sectors. *Formerly Chronos.*
 
-Current version: **0.44.5** (`compiler/bootstrap-c/copihue.c`, `LANG_VERSION`). Release notes are in [CHANGELOG.md](CHANGELOG.md).
+Current version: **0.44.6** (`compiler/bootstrap-c/copihue.c`, `LANG_VERSION`). Release notes are in [CHANGELOG.md](CHANGELOG.md).
 
 > **Status: not production-ready.** It is a tested compiler for a small but real language. Memory safety is partial (checked slices and indexes, `own *T` moves) and there is no borrow checker: a `vec` slice can dangle after a push. Linux x86-64 only. The goal is a language that beats C++, Rust and OCaml; today it does not, and the numbers below say where it stands.
 
@@ -61,6 +61,7 @@ The `-c` object is `ET_REL` with `.text`, `.rodata`, `.data`, `.bss` (those it h
 Two levels of syntax. The **easy level** lets the compiler decide: an omitted parameter type or `->` is `i64`, `let x = e` infers the type, `vec T` grows by itself and frees at the end of the block, `own *T` is an owning pointer that moves on `return` or when passed on. The **explicit level** gives the developer the width of every integer, `*volatile T`, `align(N)`, `packed struct`, atomics, `naked` and `interrupt` functions, and named sections (`section "name" @ addr`). Design: [docs/DESIGN_TWO_LEVELS.md](docs/DESIGN_TWO_LEVELS.md).
 
 - Integers `i8` to `i64` and `u8` to `u64`, with arithmetic at the width of the type, and checked assignments (a wider value needs `as`).
+- Microsoft x64 convention (0.44.6), to call the UEFI firmware or be called by it: `ms64 fn f(...)` defines or declares a function that receives `rcx, rdx, r8, r9` and the stack above 32 bytes of shadow space and keeps `rdi`, `rsi`, `rbx`; `let f: ms64 fn = ...;` (also a global and a parameter) is a function address whose calls pass `rcx, rdx, r8, r9`, then `[rsp+32]`, `[rsp+40]`, ..., reserve the shadow space, and align `rsp` to 16 at the `call`. Integers and pointers only (a struct, a slice, or an enum is an error). `naked ms64 fn` is an assembly routine with that convention. Hosted, `--nasm`, `--freestanding`, `--flat`, `-O0` and `-O2`. See the [reference](docs/REFERENCE.md#microsoft-x64-convention-ms64).
 - Assignment targets: a store is never dropped in silence. `mem(8)[0] = 5;` with `fn mem(off: i64) -> *volatile u32` stores four bytes, volatile, through the pointer the call returns, as it would through a pointer variable; `f(x) = 5`, `3 = x`, `-x = 5` and the like are compile errors with the line. A store into a wider field or element computes `a + b` at the destination's width ([REFERENCE](docs/REFERENCE.md), Assignment targets).
 - Named integer constants: `const N = 8;` at module or function level, usable in `[T; N]` and in any expression, folded at compile time ([REFERENCE](docs/REFERENCE.md), Constants).
 - Global initializers: a constant integer expression (`let p: i64 = 0 - 1;`, `let m: u32 = 1 << 31;`, `let k: i64 = N * 4 + 2;`) is folded into `.data`; anything else is an error on the `let` ([REFERENCE](docs/REFERENCE.md), Initializers of globals).

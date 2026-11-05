@@ -2,6 +2,35 @@
 
 Todos los cambios importantes del proyecto.
 
+## [0.44.6] - 2026-11-05
+
+Pedido de LapageriaOS / AtomicOS (HR-01, punto 4, y HR-02, punto 1): llamar al firmware UEFI con la convención Microsoft x64 se hacía con tres `naked fn` y `asm()` (`efi_call2`, `efi_call4`, `_start`) y con un `efi_call` en ensamblador que movía SysV a MS y ponía el quinto argumento en `[rsp+32]`. Ahora el compilador la conoce.
+
+### Added
+- **`ms64 fn`**, modificador de función como `naked` y `bits` (en cualquier orden con ellos): `ms64 fn f(...) -> i64 { }`, la declaración adelantada `ms64 fn f(a: i64);` y `extern ms64 fn f(...);` con `-c`. Se eligió un modificador y no `extern "ms64"` porque `extern fn` ya significa "el cuerpo está en otro objeto `-c`", y `ms64` dice cómo se llama, no dónde está.
+- **`ms64 fn` como tipo** de un `let` local, de un global y de un parámetro: `let f: ms64 fn = &g;`. Es un `i64` con la dirección de la función; una llamada `f(a, b, ...)` por esa variable usa la convención. En un campo de struct, en un tipo de retorno o en cualquier otro sitio es un error (`'ms64 fn' is the type of a let, a global, or a parameter only`); para llamar a un puntero guardado en un struct se lee antes en un `let f: ms64 fn`.
+- **Lado llamador.** Una llamada a una `ms64 fn` o por una variable `ms64 fn` pasa los argumentos 1 a 4 en `rcx, rdx, r8, r9` y del 5 en adelante en `[rsp+32], [rsp+40], ...` al momento del `call`, reserva los 32 bytes de sombra (también con menos de cuatro argumentos), deja `rsp` múltiplo de 16 en el `call` y recoge el resultado de `rax`. El compilador no sabe cuántos `push` lleva la expresión en ese punto, así que alinea en el sitio: guarda en `r10` el bloque de argumentos ya apilados, abre debajo la zona de salida, redondea `rsp` a 16, carga los registros y la pila, guarda `r10` en una celda sobre esa zona, llama y restaura `rsp`. Los argumentos que son llamadas también se alinean. Hasta 16 argumentos.
+- **Lado llamado.** Una `ms64 fn` con cuerpo recibe en `rcx, rdx, r8, r9` y `[rsp+40]...` y preserva `rdi`, `rsi`, `rbx`, `rbp` y `r12`–`r15`. El símbolo `name` es un adaptador (guarda `rbp`, `rdi`, `rsi` y `rbx`, mueve los argumentos MS a donde los lee el cuerpo, copia la pila de una función de más de seis parámetros, llama a `__ms64_name` y restaura); `__ms64_name` es el cuerpo, una función normal, igual en `-O0`, `-O2`, `--flat`, `--freestanding` y hospedado. `rbx` se guarda porque el código del compilador lo usa como temporal y la convención MS lo conserva.
+- **`naked ms64 fn`**: sin adaptador y sin marco; la convención es la que ven los llamadores y los parámetros son los registros entrantes (`rcx, rdx, r8, r9`). Se permiten más de cuatro parámetros (hasta 16); del quinto en adelante no son variables, el ensamblador los lee en `[rsp+40]...`.
+- Errores de Copihue, con archivo:línea:columna: struct, slice, enum o `own *T` como parámetro o argumento de una `ms64`; retorno de enum; `ms64` con `interrupt`, `syscall`, `bits 16` o `bits 32`; `ms64` repetido; cuenta de argumentos de una llamada directa. Copihue no tiene tipo flotante, así que no hay flotantes que rechazar.
+
+### Tests
+- `tests/lang/ms64_call.lap`: callees `naked ms64 fn` con `asm()` que leen `rcx, rdx, r8, r9, [rsp+40]...`, escriben en la sombra, comprueban `rsp` mod 16 == 8 a la entrada y destruyen todos los volátiles; 0, 1, 4, 5, 6 y 8 argumentos, llamadas anidadas y con una llamada como argumento, por variable local y por global; `ms64 fn` de Copihue de ida y vuelta (0, 1, 4, 5, 6, 8 y 9 argumentos, recursión, puntero como parámetro, cruce con una función SysV de 7 argumentos) y un `preserve` que llena `rdi, rsi, rbx, r13` con marcas y comprueba que vuelven. **Salida esperada escrita a mano y no ejecutada** (esta Mac no ejecuta ELF de Linux; además el programa tiene `naked` y se enlaza con `ld`); la CI la ejecuta. Los mismos valores y las mismas llamadas pasan bajo QEMU (abajo).
+- `tests/lang/ms64_fn.lap`: solo funciones de Copihue, así que lo construye el ensamblador propio (sin nasm); también **salida esperada escrita a mano y no ejecutada**. Los valores se imprimen con menos de 9 dígitos.
+- `tests/ms64/kernel.lap`: kernel `--flat` en QEMU con las mismas comprobaciones (28), `-O0` y `-O2`; escribe `MS64` por COM1. Pasa en esta Mac (QEMU 64 bits) a `-O0` y `-O2`. Se comprobó que detecta fallos: con `and rsp, -16` cambiado a `and rsp, -1` en el asm escribe `FAIL01`.
+- `tests/errors/ms64_*.lap` (9, con su `.err`, generado por el compilador y revisado a mano).
+- `tests/ms64/run.sh` (sección 4i de `tests/run_tests.sh`): los rechazos en seis modos (nativo `-O0` y `-O2`, `--nasm`, `-c`, `--freestanding`, `--flat`), las líneas de la secuencia de llamada en el asm de `ms64_fn.lap` (`-O0` y `-O2`), que `call_args.lap`, `eight_args.lap` y `hello.lap` no tienen ni `and rsp, -16` ni `__ms64_`, nasm acepta el asm, el ELF y el `-c` nativos de `ms64_fn.lap`, y QEMU (con `CMP_REQUIRE=1` es obligatorio). 88 comprobaciones aquí.
+- `tests/ms64/` queda fuera del corpus de `tests/run_tests.sh`, `tools/native/corpus.sh` y `tests/x64/run_text.sh`.
+- Una llamada SysV no cambió: el asm (`-S`; `-O0`, `-O2`, `--freestanding -O2` y `--flat 0x8000 -O2`) de los 752 pares programa/modo de `tests/` y `examples/` que compilan es idéntico byte a byte (salvo la línea de versión) entre el 0.44.5 (compilado de 10c8689) y el 0.44.6, y también coincide el éxito o el fallo de los demás.
+- `tests/run_tests.sh` en esta Mac (Darwin): 378 pasan, 2 fallan, 3 omitidas. Los dos fallos (`tests/flat/generic.lap`, `tests/boot/edx_keep.lap`) son de esta máquina (orden de prefijos de este nasm) y los produce igual el 0.44.5: los `.bin` de ambos compiladores son idénticos.
+- `gcc -O2 -Wall -Werror` sin advertencias.
+
+### Pendiente
+- No se ejecutó aquí ningún ELF de Linux: `ms64_call` y `ms64_fn` quedan para la CI. Tampoco se enlazó un `extern ms64 fn` contra otro objeto.
+- Flotantes y structs por valor: Copihue no tiene flotantes, y un struct por valor es error. Un puntero de función guardado en un campo de struct se lee antes a una variable `ms64 fn`.
+- Una llamada por puntero a `ms64` no comprueba la cuenta de argumentos (como cualquier llamada por variable).
+- Un `efi_main` real (arranque, `SystemTable`, `AllocatePages` contra firmware) no se probó; solo el contrato de registros, pila, sombra y alineación.
+
 ## [0.44.5] - 2026-11-05
 
 Pedido de LapageriaOS / AtomicOS (HR-01, punto 2): `let ahci_port: i64 = 0 - 1;` compilaba en Copihue y fallaba en nasm con ``symbol `ahci_port' not defined``. El inicializador de un global solo se emitía si era un número suelto; cualquier otra expresión dejaba el símbolo sin definir (y en un arreglo, `[f(), 2]` ponía un 0 sin avisar).
