@@ -6573,20 +6573,6 @@ static void check_user_args(Codegen* cg, AstNode* n, AstNode* fn) {
                        "expected []%s, found %s", want_e, found);
             continue;
         }
-        // A struct parameter takes a struct of that type (0.45.1). The callee
-        // copies the parameter's size from the address it gets: an integer
-        // was read as that address, and another struct was read past its end.
-        if (!par->is_pointer && par->value && is_record(cg, par->value) && arg) {
-            const char* got = arg->type == AST_STRUCT_LITERAL ? arg->struct_type : struct_value_type(cg, arg);
-            if (!got || strcmp(got, par->value)) {
-                char found[160];
-                if (got) snprintf(found, sizeof found, "%s", got);
-                else found_spelling(cg, arg, found, (int)sizeof found);
-                diag_error(arg->line, arg->col, "argument %d of '%s': expected %s, found %s", i + 1,
-                           n->name ? n->name : "(call)", par->value, found);
-            }
-            continue;
-        }
         VTy dst = ty_decl(cg, 0, par->is_pointer, par->value);
         check_arg(cg, n->children[i], i, n->name, dst);
     }
