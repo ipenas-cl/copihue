@@ -95,14 +95,14 @@ Tras un `diag_error` el generador emite `xor rax, rax` y sigue, para juntar más
 - **Dos enums distintos:** no se comparan (ni dos del mismo tipo: §2.4). Pasar un enum de otro tipo a un parámetro es `argument 1 of 'use_hash': expected Hash, found Locked` (`t14_enum_newtype.lap`). Un enum de una sola variante (`enum Hash { H(*u8) }`) ya funciona como newtype nominal: se pasa, se devuelve por el puntero oculto y se desarma con `match`.
 - **Dos structs distintos:** asignar uno al otro es error (`cannot assign struct 'Locked' to struct 'Hash'`, `copihue.c:12005`; `t8_struct_assign.lap`). Pero:
   - **`h == k` compila**, sean del mismo tipo o no (`t6_struct_eq.lap`, `t7_struct_same.lap`). Compara las **direcciones** de los dos locales (`lea rax, [rbp-8]` / `lea rax, [rbp-16]` / `cmp`), no el contenido. Un struct usado como valor es su dirección (`copihue.c:14074`, `gen_expr`).
-  - **Pasar un `Locked` a un parámetro `h: Hash` compila** (`t13_newtype.lap`). El chequeo de argumentos mira enteros, punteros, slices, enums y `own`; un struct no (`check_user_args`, `copihue.c:6414`).
+  - **Pasar un `Locked` a un parámetro `h: Hash` compila** (`t13_newtype.lap`). `check_types` vuelve sin comparar nada cuando cualquiera de los dos lados es un struct (`copihue.c:6221`), así que tampoco se rechaza un `*u8` pasado a un parámetro struct.
   - Por eso un struct de un campo **no** sirve hoy como newtype seguro.
 
 ### 2.7 Hallazgos que no se esperaban
 
 Ninguno se corrigió en esta sesión (solo documentación).
 
-1. **`malloc` compara el resultado de `mmap` contra -1** (`copihue.c:9657`, y lo mismo en `emit_malloc_rax`, `copihue.c:9961`, que usa `vec_push`). La syscall cruda de Linux no devuelve -1: devuelve `-errno` (por ejemplo, -12 para `ENOMEM`). Con -12 el salto no se toma, se escribe el tamaño en la dirección -12 y el proceso cae por segmentación en vez de devolver el centinela o escribir `out of memory`. Leído en el código; no ejecutado.
+1. **`malloc` compara el resultado de `mmap` contra -1** (`copihue.c:9657`, y lo mismo en `emit_malloc_rax`, `copihue.c:9961`, que usa `vec_push`). La syscall cruda de Linux no devuelve -1: devuelve `-errno` (por ejemplo, -12 para `ENOMEM`). Con -12 el salto no se toma, se escribe el tamaño en la dirección -12 y el proceso cae por segmentación en vez de devolver el centinela o escribir `out of memory`. El mismo `vec_push` sí trata bien a `mremap` (`test rax, rax` / `js`, `copihue.c:10103`), así que los dos caminos no son coherentes. Leído en el código; no ejecutado.
 2. **`==` entre structs compara direcciones** (§2.6).
 3. **Un struct de otro tipo pasa como argumento** (§2.6).
 4. **`return p` de un struct local devuelve la dirección de su slot en el frame** (`lea rax, [rbp-8]`, `leave`, `ret` en `t13_newtype.lap`). La referencia dice que el tipo de retorno struct "is parsed and is not checked" ([REFERENCE.md](REFERENCE.md), Declarations). `tests/test_struct_return.lap` usa esa forma: llama `make_point(10, 20)` y `make_point(99, 88)`, y su salida esperada (`tests/expected/tests/test_struct_return.out`) guarda `p1.x = 7`, `p1.y = 7`, `p2.x = 7`, `p2.y = 7`. Esa salida no corresponde al programa: el golden guardó lo que quedó en la memoria. Esto contradice [SELFHOST_S0.md](SELFHOST_S0.md) §3.3, que da ese archivo como prueba de que un struct "sí se devuelve por valor" (estilo de respaldo `struct Str`). No se ejecutó aquí.
@@ -139,7 +139,7 @@ Recuento usado abajo: una copia instrumentada del bootstrap, solo en `build/s19/
 - **Falta:** cerrar los dos agujeros de structs. `h == k` entre structs compila y compara direcciones; un struct de otro tipo pasa como argumento.
 - **Cómo, en el bootstrap C:**
   - En `gen_expr`, un `AST_COMPARE` cuyo operando es un struct (local, global o campo; no un arreglo) da `a struct is not a scalar; compare the fields`, con el mismo estilo que `an enum is not a scalar; match it` (`copihue.c:14069`). `&h == &k` sigue valiendo: es comparar punteros, y se escribe a propósito.
-  - En `check_user_args`, un parámetro struct exige el mismo struct: `argument 1 of 'f': expected Hash, found Locked`, como ya hace con enums.
+  - En `check_types` (`copihue.c:6221`), un destino struct exige el mismo struct, como ya se hace con enums dos líneas antes: `argument 1 of 'f': expected Hash, found Locked`, como ya hace con enums.
   - En el compilador en Copihue, la misma regla vive en el módulo de chequeo que S3 porta; la igualdad con el C cubre los `.err` de las pruebas de error.
 - **Fácil:** modelar los estados con un enum; el compilador impide mezclarlos. **Explícito:** comparar los campos uno por uno, o comparar direcciones con `&`.
 - **Rompe:** `==` entre structs, 0 programas (recuento instrumentado). El chequeo de argumentos struct no se contó; habría que contarlo con la misma técnica antes de implementarlo.
@@ -155,7 +155,7 @@ Recuento usado abajo: una copia instrumentada del bootstrap, solo en `build/s19/
   - (a) Solo los de forma `Ok(T)` / `Err(E)`, con la misma prueba estructural que ya usa `?` (no mira el nombre `Result`, [DESIGN_ERRORS.md](DESIGN_ERRORS.md)).
   - (b) Cualquier enum devuelto. Un enum devuelto es casi siempre una decisión; un `Option` descartado a propósito se escribe con `let _`.
   - Recomiendo (b): una regla más simple y sin excepciones por forma. Las dos rompen 0 programas del corpus.
-- **Descarte explícito:** `let _ = check(5);`. Hoy `let _` es un local común llamado `_` (un segundo `let _` en el mismo bloque es `redeclaration of '_'`, `t15_let_underscore.lap`). La propuesta: `let _ = e;` evalúa `e`, no crea nombre y se puede repetir. `_` ya es el comodín de `match`, así que encaja con el lenguaje. El corpus no usa `_` como nombre de variable (`grep` de `let _` y `_ =`: 0).
+- **Descarte explícito:** `let _ = check(5);`. Hoy `let _` es un local común llamado `_` (un segundo `let _` en el mismo bloque es `redeclaration of '_'`, `t15_let_underscore.lap`). La propuesta: `let _ = e;` evalúa `e`, no crea nombre y se puede repetir. `_` ya es el comodín de `match`, así que encaja con el lenguaje. El corpus no usa `_` como nombre de variable (`grep` de `let _` y `_ =`: 0). La otra forma posible es `_ = check(5);`: hoy es `assignment to undeclared variable '_'` (`u1_result_enum_err.lap`), así que esa sintaxis está libre y no rompería nada. Recomiendo `let _`, que se lee como una declaración y no como una asignación.
 - **Fácil:** el resultado hay que usarlo; si no, no compila. **Explícito:** `let _ =` deja constancia de que se ignoró a propósito.
 - **Rompe:** 0 programas de `tests/` y `examples/` (recuento instrumentado y `grep`). Cambia una frase de REFERENCE ("A discarded `give();` allocates a temporary").
 - **Fase:** SEC-1, con R2.
@@ -221,7 +221,7 @@ Recuento usado abajo: una copia instrumentada del bootstrap, solo en `build/s19/
 Hay tres tensiones, que dejo como preguntas y no resuelvo:
 
 1. **`Result` no es un tipo del compilador.** R1 aplicado a los builtins necesitaría que el compilador devuelva un `Result` que el programa no declaró. Eso contradice la primera línea del diseño de errores.
-2. **`Err` no puede llevar un enum.** DESIGN_ERRORS lo deja fuera ("Un `Ok` cuyo campo sea un enum"; un campo de enum no puede ser un enum). Con esa limitación, el tipo de error de R1 es un código `i64` dentro de `Err`. No es un centinela del dominio, porque vive en la otra variante, pero pierde lo que `match` daría con un enum de errores.
+2. **`Err` no puede llevar un enum.** DESIGN_ERRORS lo deja fuera ("Un `Ok` cuyo campo sea un enum"; un campo de enum no puede ser un enum). Comprobado: `Result<i64, AuthErr>` con `AuthErr` un enum es `type argument 'AuthErr' is not an integer, a pointer, or a struct` (`u1_result_enum_err.lap`). Con esa limitación, el tipo de error de R1 es un código `i64` dentro de `Err`. No es un centinela del dominio, porque vive en la otra variante, pero pierde lo que `match` daría con un enum de errores.
 3. **`?` exige `Ok` y `Err`.** Un enum de dominio como `Crypt { Digest, TooLong, BadSetting }` expresa mejor los estados, pero no se propaga con `?`.
 
 ## 5. Ejemplo SSHole en Copihue
