@@ -134,5 +134,6 @@ Vistos durante 0.45.1 y no corregidos (no estaban en su lista):
 12. **Un literal de struct en `let` y como elemento de un literal de arreglo no se pone en cero**: `let p: P = P { y: 9 }` deja `p.x` con lo que hubiera en el frame. Como argumento, en `return` y en cualquier otro temporal sí se pone en cero. No escribe fuera; es un valor sin iniciar.
 13. **`p = P { ... }`** (asignar un literal a un struct ya declarado) es `cannot assign struct '(non-struct)' to struct 'P'`: es error, pero el mensaje no dice qué escribir (`let t: P = P { ... }; p = t`).
 14. `at` (una macro de nasm) como nombre de función rompe el camino de nasm (`--flat`, `--nasm`), como el hallazgo 5.
+15. **El mensaje del trap de límites termina en una barra invertida, no en un salto de línea.** Un índice fuera de rango en hosted escribe `Array bounds error\` (19 bytes, el último es `\`) y el programa sale con 1. Los golden lo guardan así (`o2_stride_oob.lap`, `addr_elem_oob.lap`). Es solo el texto; no se tocó.
 
 El segfault de `p->campo[i]` del bootstrap ([SELFHOST_S0.md](SELFHOST_S0.md) §3.4) está **corregido en 0.45.1** (`tests/lang/ptr_field_index.lap`). Siguen abiertos SEC-1 y SEC-2 de [DESIGN_SECURITY.md](DESIGN_SECURITY.md).
