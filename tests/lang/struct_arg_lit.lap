@@ -1,0 +1,54 @@
+// A struct literal passed as an argument (0.45.1). It is built in a zeroed
+// temporary of the caller's frame and its address is passed, as for a local.
+// Before, it was built over the last local declared: `keep` and `other` printed
+// 4 and 3 at -O0. Every value is small and printed on its own line.
+
+struct P { x: i64, y: i64 }
+packed struct Tri { a: u8, b: u8, c: u8 }
+struct Q { a: i64, p: P, b: u8 }
+
+fn sum(p: P) -> i64 { return p.x + p.y; }
+fn tri(t: Tri) -> i64 { return t.a * 100 + t.b * 10 + t.c; }
+fn two(a: P, b: P) -> i64 { return a.x * 1000 + a.y * 100 + b.x * 10 + b.y; }
+fn seven(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, p: P) -> i64 {
+    return a + b + c + d + e + f + p.x * p.y;
+}
+fn qsum(q: Q) -> i64 { return q.a + q.p.x + q.p.y + q.b; }
+
+fn main() -> i32 {
+    let keep: i64 = 77;
+    let other: i64 = 55;
+    print_int(sum(P { x: 3, y: 4 }));
+    println("");
+    print_int(keep);
+    println("");
+    print_int(other);
+    println("");
+    print_int(sum(P { y: 9 }));          // x is zero
+    println("");
+    print_int(two(P { x: 1, y: 2 }, P { x: 3, y: 4 }));
+    println("");
+    print_int(seven(1, 2, 3, 4, 5, 6, P { x: 6, y: 7 }));   // 21 + 42, the literal on the stack
+    println("");
+    let t: Tri;
+    t.a = 2;
+    t.b = 1;
+    t.c = 4;
+    print_int(tri(Tri { a: 1, b: 2, c: 3 }));
+    println("");
+    print_int(tri(t));                  // the local next to the temporary is untouched
+    println("");
+    print_int(qsum(Q { a: 1, p: P { x: 20, y: 300 }, b: 4 }));
+    println("");
+    let i: i64 = 0;
+    let acc: i64 = 0;
+    while (i < 3) {
+        acc = acc + sum(P { x: i, y: 10 });
+        i = i + 1;
+    }
+    print_int(acc);                     // 10 + 11 + 12
+    println("");
+    print_int(keep + other);
+    println("");
+    return 0;
+}

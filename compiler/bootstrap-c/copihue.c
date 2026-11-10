@@ -475,6 +475,9 @@ static void gen_vec_push(Codegen* cg, AstNode* n);
 static int gen_struct_addr(Codegen* cg, AstNode* n);
 static void emit_copy_mem(Codegen* cg, const char* dst_reg, const char* src_reg, int sz);
 
+// 1 while `let x = T { ... }` / `let a: [T; N] = [...]` generates its initializer:
+// the literal is built in the local just declared (0.45.1).
+static int g_lit_let = 0;
 // Kind of the function currently being generated (for return/epilogue).
 static int g_fn_flags = 0;
 static int g_fn_bits = 0;   // 0 or 64: rax. 16 or 32: eax (legacy mode)
@@ -6949,6 +6952,33 @@ static int enum_passed_by_addr(Codegen* cg, AstNode* a) {
 }
 
 static int gen_enum_arg(Codegen* cg, AstNode* a);
+static int frame_temp_zeroed(Codegen* cg, int size);
+static void gen_struct_literal_at(Codegen* cg, AstNode* n, int base);
+
+// A struct literal as an argument (0.45.1). Before, it was built over the last
+// local of the frame.
+static int struct_arg_by_addr(Codegen* cg, AstNode* a) {
+    if (!a || !cg) return 0;
+    return a->type == AST_STRUCT_LITERAL;
+}
+
+// The address of such an argument in rax. A literal is built in a zeroed
+// temporary of this frame, the way `return T { ... }` is. The callee copies.
+static void gen_struct_arg_addr(Codegen* cg, AstNode* a) {
+    StructType* st = a->struct_type ? typetab_lookup(cg->types, a->struct_type) : NULL;
+    int off;
+    if (!st || !cg->symtab || legacy_bits() || (g_fn_flags & AF_NAKED)) {
+        diag_error(a->line, a->col,
+                   "this struct literal cannot be passed as an argument; pass a local: let t: %s = ...; f(t)",
+                   a->struct_type ? a->struct_type : "T");
+        emit(cg, "    xor rax, rax\n");
+        return;
+    }
+    emit(cg, "    ; struct literal %s\n", a->struct_type);
+    off = frame_temp_zeroed(cg, st->size);
+    gen_struct_literal_at(cg, a, off);
+    emit(cg, "    lea rax, [rbp%+d]\n", off);
+}
 
 // Evaluate one call argument into rax. A struct value is passed as its address;
 // the callee copies it. An enum is the same: the address of the tag and payload.
@@ -6968,6 +6998,8 @@ static void gen_one_arg(Codegen* cg, AstNode* a) {
     if (is_struct_value_arg(cg, a)) {
         Symbol* asym = symtab_lookup_symbol(cg->symtab, a->name);
         emit(cg, "    lea rax, [rbp%d]\n", asym->offset);
+    } else if (struct_arg_by_addr(cg, a)) {
+        gen_struct_arg_addr(cg, a);
     } else {
         gen_expr(cg, a);
     }
@@ -7051,6 +7083,7 @@ static int args_all_direct(Codegen* cg, AstNode* n, int argc) {
     if (!o2_hosted() || argc > 6) return 0;
     for (int i = 0; i < argc; i++) {
         if (is_struct_value_arg(cg, n->children[i])) return 0;
+        if (struct_arg_by_addr(cg, n->children[i])) return 0;
         if (enum_passed_by_addr(cg, n->children[i])) return 0;
         if (slice_operand_elem(cg, n->children[i])) return 0;
         if (!can_place(cg, n->children[i], regs[i])) return 0;
@@ -8503,7 +8536,7 @@ static void gen_ms64_call(Codegen* cg, AstNode* n, int indirect) {
     for (int i = 0; i < argc; i++) {
         AstNode* a = n->children[i];
         if (enum_passed_by_addr(cg, a) || local_slice(cg, a) || global_slice(cg, a) ||
-            expr_struct_type(cg, a)) {
+            expr_struct_type(cg, a) || struct_arg_by_addr(cg, a)) {
             diag_error(a->line, a->col,
                        "an ms64 call takes integers and pointers; argument %d is a struct, a slice, or an enum",
                        i + 1);
@@ -15127,6 +15160,25 @@ void gen_expr(Codegen* cg, AstNode* n) {
     } else if (n->type == AST_INDEX) {
         gen_array_index(cg, n);
     } else if (n->type == AST_STRUCT_LITERAL) {
+        int into_let = g_lit_let;
+        g_lit_let = 0;
+        if (!into_let) {
+            // 0.45.1: only `let x: T = T { ... }` builds the literal in the local
+            // it declares (the last one). Anywhere else the last local is some
+            // other variable, and the literal wrote over it.
+            StructType* lst = n->struct_type ? typetab_lookup(cg->types, n->struct_type) : NULL;
+            if (!lst || !cg->symtab || legacy_bits() || (g_fn_flags & AF_NAKED)) {
+                diag_error(n->line, n->col, "a struct literal is a value only in 'let', 'return', a field of another literal, or an argument; use a local: let t: %s = ...",
+                           n->struct_type ? n->struct_type : "T");
+                emit(cg, "    xor rax, rax\n");
+                return;
+            }
+            emit(cg, "    ; struct literal %s\n", n->struct_type);
+            int toff = frame_temp_zeroed(cg, lst->size);
+            gen_struct_literal_at(cg, n, toff);
+            emit(cg, "    lea rax, [rbp%+d]\n", toff);
+            return;
+        }
         emit(cg, "    ; struct literal %s\n", n->struct_type);
         if (cg->symtab && cg->symtab->count > 0) {
             // The offset, not the Symbol*: a slice field adds a temporary local.
@@ -15135,6 +15187,14 @@ void gen_expr(Codegen* cg, AstNode* n) {
             emit(cg, "    lea rax, [rbp%d]\n", lit_off);
         }
     } else if (n->type == AST_FIELD_ACCESS) {
+        if (n->child_count == 1 && n->children[0] && n->children[0]->type == AST_STRUCT_LITERAL) {
+            // Before 0.45.1 this built the literal over the last local and
+            // read nothing: the value was the literal's address.
+            diag_error(n->line, n->col, "a field of a struct literal cannot be read; use a local: let t: %s = ...; t.%s",
+                       n->children[0]->struct_type ? n->children[0]->struct_type : "T", n->name ? n->name : "f");
+            emit(cg, "    xor rax, rax\n");
+            return;
+        }
         if (gen_slice_field(cg, n)) return;
         {
             StructField* sf = access_field(cg, n);
@@ -19347,7 +19407,16 @@ void gen_stmt(Codegen* cg, AstNode* n) {
                         else
                             gen_struct_call_into(cg, n->children[0],
                                                  cg->symtab->symbols[cg->symtab->count - 1].offset);
-                    } else if (n->children[0]->type == AST_STRUCT_LITERAL || !expr_struct_type(cg, n->children[0])) {
+                    } else if (n->children[0]->type == AST_STRUCT_LITERAL) {
+                        AstNode* lit = n->children[0];
+                        if (lit->struct_type && strcmp(lit->struct_type, n->struct_type))
+                            mismatch(lit, "", n->struct_type, lit->struct_type);
+                        else {
+                            g_lit_let = 1;
+                            gen_expr(cg, lit);
+                            g_lit_let = 0;
+                        }
+                    } else if (!expr_struct_type(cg, n->children[0])) {
                         gen_expr(cg, n->children[0]);
                     } else {
                         AstNode dst;
@@ -19371,7 +19440,9 @@ void gen_stmt(Codegen* cg, AstNode* n) {
                 StructType* st = typetab_lookup(cg->types, type_name);
                 if (st) {
                     symtab_add_struct(cg->symtab, n->name, type_name, st->size);
+                    g_lit_let = 1;
                     gen_expr(cg, n->children[0]);
+                    g_lit_let = 0;
                     return;
                 }
             } else if (!n->value && !n->is_pointer && !n->struct_type) {
