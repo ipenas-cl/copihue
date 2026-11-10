@@ -1,0 +1,9 @@
+// `g->f[i]` with g a global pointer: before 0.45.1 the compiler crashed (rc 139).
+// `->` takes a local pointer, as for `g->n`; the message says so.
+struct B { ptr: *u8, n: i64 }
+
+let gb: *B = 0;
+
+fn get(i: i64) -> u8 { return gb->ptr[i]; }
+
+fn main() -> i32 { return 0; }

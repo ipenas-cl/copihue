@@ -1,0 +1,8 @@
+# Programs of 0.45.1 (silent memory corruption): built by tests/memfix/run.sh in every mode.
+tests/lang/struct_arg_lit.lap
+tests/lang/struct_arg_place.lap
+tests/lang/ptr_field_index.lap
+tests/lang/addr_elem.lap
+tests/lang/addr_elem_oob.lap
+tests/lang/arr_lit_narrow.lap
+tests/lang/slice_return.lap

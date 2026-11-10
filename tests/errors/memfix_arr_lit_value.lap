@@ -1,0 +1,12 @@
+// An array literal outside `let a: [T; N] = [...]` (0.45.1). Before, its values
+// were stored in the slots of the last local declared, here `keep`.
+fn first(p: *i64) -> i64 { return p[0]; }
+
+fn main() -> i32 {
+    let keep: i64 = 77;
+    take(first([1, 2, 3]));
+    take(keep);
+    return 0;
+}
+
+fn take(v: i64) -> i64 { return v; }

@@ -1,0 +1,71 @@
+// `let a: [T; N] = [...]` of a local array (0.45.1): each element is stored at
+// the stride a[i] reads with and at its own width. Before, every element was a
+// qword at i*8, so b[1] of a [u8; 3] read a byte of the first element (0) and
+// a str over it saw "a" and two zero bytes. Struct elements are built or copied.
+// A global array literal was already right (db/dw/dd) and is read here too.
+
+struct P { x: i32, y: i32 }
+packed struct Tri { a: u8, b: u8, c: u8 }
+
+let gb: [u8; 3] = [97, 98, 99];
+let gh: [i16; 2] = [-4, 5];
+
+fn first(s: str) -> u8 { return s[0]; }
+
+fn main() -> i32 {
+    let b: [u8; 3] = [97, 98, 99];
+    print_int(b[0]);
+    println("");
+    print_int(b[1]);
+    println("");
+    print_int(b[2]);
+    println("");
+    let c: [u8; 2] = [1, 2];
+    print_int(c[0] + c[1]);
+    println("");
+    let s: str = b;
+    print(s);
+    println("");
+    let h: [i16; 3] = [-1, 2, 300];
+    print_int(h[0] + h[1] + h[2]);
+    println("");
+    let w: [i32; 2] = [70000, -5];
+    print_int(w[0] + w[1]);
+    println("");
+    let u: [u32; 2] = [7, 8];
+    print_int(u[1] * 10 + u[0]);
+    println("");
+    let q: [i64; 2] = [5, 6];
+    print_int(q[0] * 10 + q[1]);
+    println("");
+    let x: i64 = 4;
+    let v: [u8; 2] = [x, x + 1];
+    print_int(v[0] * 10 + v[1]);
+    println("");
+    let p: P;
+    p.x = 5;
+    p.y = 6;
+    let ps: [P; 3] = [P { x: 1, y: 2 }, p, P { y: 9 }];
+    print_int(ps[0].x * 100 + ps[0].y * 10 + ps[1].x);
+    println("");
+    print_int(ps[1].y * 10 + ps[2].y);
+    println("");
+    let t: Tri;
+    t.a = 4;
+    t.b = 5;
+    t.c = 6;
+    let ts: [Tri; 2] = [t, Tri { a: 1, b: 2, c: 3 }];
+    print_int(ts[0].a + ts[0].b + ts[0].c);
+    println("");
+    print_int(ts[1].a * 100 + ts[1].b * 10 + ts[1].c);
+    println("");
+    print_int(t.a + t.b + t.c);         // the local before the array is untouched
+    println("");
+    print_int(first(s));
+    println("");
+    print_int(gb[1]);
+    println("");
+    print_int(gh[0] + gh[1]);
+    println("");
+    return 0;
+}

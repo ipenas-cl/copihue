@@ -1,0 +1,7 @@
+tests/errors/memfix_lit_type.lap:10:18: error: expected P, found Q
+     10 |     let p: P = Q { a: 1, b: 2, c: 3 };
+        |                  ^
+tests/errors/memfix_lit_type.lap:12:23: error: field 'a' of R: expected P, found Q
+     12 |     let r: R = R { a: q, n: 1 };
+        |                       ^
+2 errors, compilation failed

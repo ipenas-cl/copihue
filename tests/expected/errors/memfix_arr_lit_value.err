@@ -1,0 +1,4 @@
+tests/errors/memfix_arr_lit_value.lap:7:16: error: an array literal is a value only in 'let a: [T; N] = [...]'; declare the array first
+      7 |     take(first([1, 2, 3]));
+        |                ^
+1 error, compilation failed

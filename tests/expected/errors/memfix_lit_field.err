@@ -1,0 +1,4 @@
+tests/errors/memfix_lit_field.lap:7:27: error: a field of a struct literal cannot be read; use a local: let t: P = ...; t.x
+      7 |     take(P { x: 1, y: 2 }.x);
+        |                           ^
+1 error, compilation failed

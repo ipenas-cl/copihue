@@ -1,0 +1,12 @@
+// A field of a struct literal is not read (0.45.1). Before, the literal was built
+// over the last local declared and the value was its address.
+struct P { x: i64, y: i64 }
+
+fn main() -> i32 {
+    let keep: i64 = 77;
+    take(P { x: 1, y: 2 }.x);
+    take(keep);
+    return 0;
+}
+
+fn take(v: i64) -> i64 { return v; }

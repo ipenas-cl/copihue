@@ -1,0 +1,101 @@
+// A struct passed by value from a place that is not a local name (0.45.1): a
+// field (`r.a`, `w.r.a`, `q->a`), a global, a field of a global, `*q`, an element
+// (of an array, of a slice, of a [P; N] field, through a pointer field), and the
+// struct a call returns. The caller passes the address of the bytes and the
+// callee copies them. Before, a field, a global and `*q` passed their first
+// qword as the address (`sum(r.a)` crashed). A literal of an outer struct copies
+// such a value into its field, exactly its size.
+
+struct P { x: i64, y: i64 }
+struct R { a: P, n: i64 }
+struct W { r: R, k: i64 }
+struct H { two: [P; 2], items: []P, ps: *P }
+packed struct Tri { a: u8, b: u8, c: u8 }
+packed struct Pair { t: Tri, z: u8 }
+
+let g: P;
+let gr: R;
+
+fn sum(p: P) -> i64 { return p.x * 10 + p.y; }
+fn mk(a: i64, b: i64) -> P {
+    let p: P;
+    p.x = a;
+    p.y = b;
+    return p;
+}
+fn mr() -> R {
+    let r: R;
+    r.a.x = 6;
+    r.a.y = 1;
+    r.n = 3;
+    return r;
+}
+fn through(q: *R) -> i64 { return sum(q->a); }
+fn elems(h: *H, i: i64) -> i64 { return sum(h->ps[i]) + sum(h->two[i]) + sum(h->items[i]); }
+
+fn main() -> i32 {
+    let r: R;
+    r.a.x = 3;
+    r.a.y = 4;
+    r.n = 9;
+    print_int(sum(r.a));
+    println("");
+    print_int(r.n);
+    println("");
+    let w: W;
+    w.r.a.x = 5;
+    w.r.a.y = 6;
+    print_int(sum(w.r.a));
+    println("");
+    g.x = 1;
+    g.y = 2;
+    print_int(sum(g));
+    println("");
+    gr.a.x = 2;
+    gr.a.y = 7;
+    print_int(sum(gr.a));
+    println("");
+    let q: *R = &r;
+    print_int(through(q));
+    println("");
+    let pp: *P = &r.a;
+    print_int(sum(*pp));
+    println("");
+    let arr: [P; 2];
+    arr[0].x = 1;
+    arr[0].y = 1;
+    arr[1].x = 4;
+    arr[1].y = 2;
+    let i: i64 = 1;
+    print_int(sum(arr[i]));
+    println("");
+    print_int(sum(mk(7, 3)));
+    println("");
+    print_int(sum(mr().a));
+    println("");
+    let h: H;
+    h.items = arr;
+    h.ps = &arr[0];
+    let sl: []P = arr;
+    print_int(sum(sl[i]) + sum(h.items[0]));
+    println("");
+    print_int(elems(&h, 0) - sum(h.two[0]));
+    println("");
+    let k: R = R { a: g, n: 1 };
+    print_int(sum(k.a) + k.n);
+    println("");
+    let m: R = R { a: *pp, n: 2 };
+    print_int(sum(m.a) + m.n);
+    println("");
+    let o: W = W { r: mr(), k: 5 };
+    print_int(sum(o.r.a) + o.r.n + o.k);
+    println("");
+    let t: Tri;
+    t.a = 1;
+    t.b = 2;
+    t.c = 3;
+    let pr: Pair = Pair { t: t, z: 9 };
+    print_int(pr.t.a + pr.t.b + pr.t.c + pr.z);
+    println("");
+    return 0;
+}

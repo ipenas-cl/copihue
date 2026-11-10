@@ -1,0 +1,74 @@
+// `p->f[i]` as a value (0.45.1): the compiler crashed on it (rc 139). It reads
+// the same element as `p.f[i]`: the field is loaded through the pointer and
+// indexed with the width of its pointee. Writes `p->f[i] = x` compiled before
+// and still go to the same place.
+
+struct P { x: i64, y: i64 }
+struct B { ptr: *u8, n: i64, w: *i64, h: *i16, ps: *P }
+
+fn get(b: *B, i: i64) -> u8 { return b->ptr[i]; }
+fn wide(b: *B, i: i64) -> i64 { return b->w[i] + b->h[i]; }
+fn elem_y(b: *B, i: i64) -> i64 { return b->ps[i].y; }
+fn put(b: *B, i: i64, x: u8) -> i64 {
+    b->ptr[i] = x;
+    b->w[i] = 50;
+    b->h[i] = 7;
+    return 0;
+}
+fn total(b: *B) -> i64 {
+    let s: i64 = 0;
+    let i: i64 = 0;
+    while (i < b->n) {
+        s = s + b->ptr[i];
+        i = i + 1;
+    }
+    return s;
+}
+
+fn main() -> i32 {
+    let buf: [u8; 4];
+    buf[0] = 1;
+    buf[1] = 2;
+    buf[2] = 3;
+    buf[3] = 4;
+    let ws: [i64; 3];
+    ws[0] = 10;
+    ws[1] = 20;
+    ws[2] = 30;
+    let hs: [i16; 3];
+    hs[0] = 100;
+    hs[1] = 200;
+    hs[2] = 300;
+    let pz: [P; 2];
+    pz[0].x = 5;
+    pz[0].y = 6;
+    pz[1].x = 7;
+    pz[1].y = 8;
+    let b: B;
+    b.ptr = &buf;
+    b.n = 4;
+    b.w = &ws;
+    b.h = &hs;
+    b.ps = &pz;
+    let bp: *B = &b;
+    print_int(get(bp, 2));
+    println("");
+    let c = bp->ptr[1];
+    print_int(c);
+    println("");
+    let d: i64 = bp->w[2] * 2 + bp->ptr[3];
+    print_int(d);
+    println("");
+    print_int(wide(bp, 1));
+    println("");
+    print_int(elem_y(bp, 1));
+    println("");
+    print_int(total(bp));
+    println("");
+    put(bp, 0, 9);
+    print_int(buf[0] + ws[0] + hs[0]);
+    println("");
+    print_int(bp->ptr[0] + buf[1]);
+    println("");
+    return 0;
+}

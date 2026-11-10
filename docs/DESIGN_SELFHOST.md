@@ -148,9 +148,11 @@ Entregable: inventario de módulos + corpus de igualdad + lista cerrada de hueco
 
 **Hecho (2026-11-05), falta la firma:** el entregable está en [SELFHOST_S0.md](SELFHOST_S0.md) y en `tools/selfhost/`. No hay `compiler/self/`, no hubo cambios de lenguaje ni de compilador, `LANG_VERSION` sigue en 0.44.8. S0 queda cerrada cuando Ignacio revise el anexo y resuelva sus decisiones (§4 del anexo).
 
-Cuando S0 esté firmado, el siguiente ticket es **S1**: devolver `str`/`[]T` y `str`/`[]T` como campo de struct (la lista cerrada del anexo §3.1; `vec` en structs queda fuera y se cubre con `Vec<T>`). Antes de S2 queda pendiente el segfault del bootstrap C con `p->campo[i]` (anexo §3.4).
+Cuando S0 esté firmado, el siguiente ticket es **S1**: devolver `str`/`[]T` y `str`/`[]T` como campo de struct (la lista cerrada del anexo §3.1; `vec` en structs queda fuera y se cubre con `Vec<T>`). Antes de S2 queda pendiente el segfault del bootstrap C con `p->campo[i]` (anexo §3.4; corregido en 0.45.1).
 
 **S1 hecha (2026-11-10), falta la revisión:** Copihue 0.45.0, rama `selfhost/s1`. Detalle en [DESIGN_SELFHOST_S1.md](DESIGN_SELFHOST_S1.md). Antes de S2 siguen pendientes el segfault de `p->campo[i]`, SEC-1 ([DESIGN_SECURITY.md](DESIGN_SECURITY.md)) y los hallazgos de [DESIGN_SELFHOST_S1.md](DESIGN_SELFHOST_S1.md) §7 que afecten al código del compilador en Copihue (un literal de struct como argumento y un campo struct pasado por valor generan código incorrecto sin error).
+
+**0.45.1 (2026-11-10), rama `fix/mem-corruption`:** el segfault de `p->campo[i]` está corregido y **ya no bloquea S2**; también los hallazgos 1, 2, 3 y 9 de [DESIGN_SELFHOST_S1.md](DESIGN_SELFHOST_S1.md) §7 (literal de arreglo local, literal de struct como argumento, struct por valor desde un campo, `&a[i]` de un arreglo local). Antes de S2 siguen pendientes SEC-1 y la decisión sobre los argumentos de línea de comandos y el oráculo (anexo S0 §4); los hallazgos 4–7 de S1 §7 no estaban en la lista de 0.45.1 y quedan anotados (el 4, `x.y` sobre algo que no es struct, da un valor falso sin aviso y conviene cerrarlo antes de que el compilador en Copihue lo pise).
 
 ## 7. Referencias
 

@@ -248,6 +248,8 @@ Restricciones de estilo que el compilador en Copihue tiene que respetar (todas c
 
 **Defecto del bootstrap C encontrado, sin tocar:** `p->campo[i]` usado como valor (`let c = b->ptr[i];`, `return b->ptr[i];`) **termina con segfault el propio compilador**, con `-O0` y con `-O2`, con cualquier nombre de campo (probado `ptr` y `data`; la forma `b.ptr[i]`, y `let q = b->ptr; q[i]`, compilan; la escritura `n->kids[0] = n` también compila). Se reprodujo con el binario `gcc -O2 -Wall -Werror` en esta máquina (Darwin); no se miró la causa ni se probó en Linux. Los tests existentes usan `.` sobre el puntero (`cont.ptr[0]`, `tests/test_ptr_to_struct_field_ptr_index.lap`), por eso la suite no lo toca. Hay que arreglarlo en el C en un ticket aparte, antes de que el código en Copihue lo use por accidente; mientras tanto, el compilador en Copihue usa `.` o un local.
 
+**Corregido en 0.45.1.** La causa: en `p->f[i]` el objeto del campo es `*p`, que no tiene nombre, y `gen_array_index` buscaba ese nombre (`strcmp` con `NULL`). Ahora `p->f[i]` va por el nombre `p` y lee lo mismo que `p.f[i]`, con el ancho del apuntado (`*u8`, `*i16`, `*i64`, `*Struct`; `p->f[i].y` lee el campo). La escritura no cambió. Con un puntero global (`g->f[i]`) da el error de siempre de `->` (`'->f' needs a variable of pointer-to-struct type on the left`), como `g->n`. Pruebas: `tests/lang/ptr_field_index.lap`, `tests/errors/memfix_arrow_global.lap` y `tests/memfix/kernel.lap` (QEMU).
+
 Hueco que el §3.1 original no listaba: **el hosted no expone `argc`/`argv`** (`_start` hace `call main`; el lenguaje no tiene forma de leerlos, y ningún test los usa). El compilador en Copihue necesita el nombre de los archivos de entrada y las opciones. Salida sin tocar el lenguaje: leer `/proc/self/cmdline` con los builtins `open`/`read` existentes (solo Linux; no probado aquí). La alternativa es un builtin nuevo. Es decisión de S2 (§4), no de S1.
 
 ---
@@ -257,7 +259,7 @@ Hueco que el §3.1 original no listaba: **el hosted no expone `argc`/`argv`** (`
 1. **S1 con dos huecos** (devolver y campo `str`/`[]T`) y `vec` de lenguaje fuera, con `Vec<T>` en P0. Si se prefiere cerrar también `vec` como campo, S1 crece; no hace falta para compilar.
 2. **Argumentos:** `/proc/self/cmdline` (sin cambio de lenguaje) o un builtin. Se decide al empezar S2.
 3. **Oráculo del lexer y del parser** en S2/S3: una bandera de volcado en el C (cambio de comportamiento, con test) o comparar el ELF de un driver. Hasta decidirlo, S2 no empieza.
-4. **El segfault de `p->campo[i]`** en el bootstrap C: ticket aparte, previo a S2.
+4. **El segfault de `p->campo[i]`** en el bootstrap C: ticket aparte, previo a S2. Corregido en 0.45.1 (§3.4).
 5. **Corpus ampliable** (§2.4): errores `.err` desde P3 y objetos `-c` desde S3.
 
 ## 5. Qué no se tocó

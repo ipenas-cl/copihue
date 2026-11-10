@@ -1,0 +1,4 @@
+tests/errors/memfix_arr_lit_extra.lap:5:22: error: 3 values for an array of 2 elements
+      5 |     let s: [u8; 2] = [1, 2, 3];
+        |                      ^
+1 error, compilation failed

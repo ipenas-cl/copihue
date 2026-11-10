@@ -104,8 +104,7 @@ fn main() -> i32 {
     print_int(m.len); println("");
     print_int(m[0] + m[1]); println("");
     let arr: [i64; 3] = [7, 8, 9];
-    let base: *i64 = &arr;          // no &arr[0]: ver DESIGN_SELFHOST_S1 §7, hallazgo 9
-    let v: []i64 = view(base, 3);
+    let v: []i64 = view(&arr[0], 3);
     print_int(v[2]); println("");
     arr[2] = 90;
     print_int(v[2]); println("");

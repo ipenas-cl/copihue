@@ -1,0 +1,12 @@
+// `&x[i]` of something that is neither an array nor a pointer (0.45.1). Before,
+// a scalar local gave an address in the frame next to x, and an expression
+// with no pointer type gave whatever rax held.
+struct B { n: i64 }
+
+fn main() -> i32 {
+    let x: i64 = 5;
+    let p: *i64 = &x[1];
+    let b: B;
+    let q: *i64 = &b.n[0];
+    return 0;
+}

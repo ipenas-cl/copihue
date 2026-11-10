@@ -1,0 +1,14 @@
+// A struct literal of another type in `let`, and a struct value of another type
+// in a field of a literal (0.45.1). Before, Q's 24 bytes were written into the
+// 16 of p, over the local before it, and a Q was copied into the field a: P.
+struct P { x: i64, y: i64 }
+struct Q { a: i64, b: i64, c: i64 }
+struct R { a: P, n: i64 }
+
+fn main() -> i32 {
+    let keep: i64 = 77;
+    let p: P = Q { a: 1, b: 2, c: 3 };
+    let q: Q;
+    let r: R = R { a: q, n: 1 };
+    return 0;
+}

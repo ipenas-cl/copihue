@@ -1,0 +1,256 @@
+// Flat kernel at 0x8000 for QEMU, loaded by tests/usermode/boot.lap (see tests/align/kernel.lap
+// for the mode switch). It runs, for real, the fixes of 0.45.1: a struct literal as an argument
+// (checks 1-6), a struct by value from a field, a global, `*q`, `q->a`, an element and a call
+// (7-16), `p->f[i]` as a value (17-21), `&a[i]` (22-28) and array literals of narrow and struct
+// elements (29-36). It reports on COM1: MEMOK when every check holds, FAIL and the number of the
+// first check that does not otherwise. The bounds of `&a[i]` are run by tests/memfix/kernel_addr.lap
+// (with --checked this one does not fit). The image has to stay within the 16 sectors the boot
+// sector reads.
+
+struct P { x: i64, y: i64 }
+struct R { a: P, n: i64 }
+struct B { ptr: *u8, n: i64, w: *i64, h: *i16, ps: *P }
+struct S { k: i64, arr: [i32; 4] }
+struct Q { x: i32, y: i32 }
+packed struct Tri { a: u8, b: u8, c: u8 }
+
+let g: P;
+let gr: R;
+let garr: [i64; 3];
+let gp: *i64 = 0;
+let bad: i64 = 0;
+
+data gdt {
+    dq 0;
+    dw 0;
+    dw 0;
+    db 0;
+    db 0x9A;
+    db 0x20;
+    db 0;
+    dw 0xFFFF;
+    dw 0;
+    db 0;
+    db 0x92;
+    db 0xCF;
+    db 0;
+}
+
+data gdtr {
+    dw 23;
+    dd gdt;
+}
+
+fn serial_putc(c: i64) -> i64 {
+    let tries = 0;
+    while ((inb(0x3FD) & 0x20) == 0 && tries < 1000) { tries = tries + 1; }
+    outb(0x3F8, c);
+    return 0;
+}
+
+fn check(n: i64, ok: i64) -> i64 {
+    if (ok == 0 && bad == 0) { bad = n; }
+    return 0;
+}
+
+fn sum(p: P) -> i64 { return p.x * 10 + p.y; }
+fn two(a: P, b: P) -> i64 { return a.x * 1000 + a.y * 100 + b.x * 10 + b.y; }
+fn seven(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, p: P) -> i64 {
+    return a + b + c + d + e + f + p.x * p.y;
+}
+fn tri(t: Tri) -> i64 { return t.a * 100 + t.b * 10 + t.c; }
+fn mk(a: i64, b: i64) -> P {
+    let p: P;
+    p.x = a;
+    p.y = b;
+    return p;
+}
+fn mr() -> R {
+    let r: R;
+    r.a.x = 6;
+    r.a.y = 1;
+    r.n = 3;
+    return r;
+}
+fn through(q: *R) -> i64 { return sum(q->a); }
+fn get(b: *B, i: i64) -> u8 { return b->ptr[i]; }
+fn wide(b: *B, i: i64) -> i64 { return b->w[i] + b->h[i]; }
+fn elem_y(b: *B, i: i64) -> i64 { return b->ps[i].y; }
+fn total(b: *B) -> i64 {
+    let s: i64 = 0;
+    let i: i64 = 0;
+    while (i < b->n) {
+        s = s + b->ptr[i];
+        i = i + 1;
+    }
+    return s;
+}
+fn peek(p: *u8, i: i64) -> u8 { return p[i]; }
+
+fn kmain() -> i64 {
+    // 1. A struct literal as an argument.
+    let keep: i64 = 77;
+    let other: i64 = 55;
+    check(1, sum(P { x: 3, y: 4 }) == 34);
+    check(2, keep == 77 && other == 55);
+    check(3, sum(P { y: 9 }) == 9);
+    check(4, two(P { x: 1, y: 2 }, P { x: 3, y: 4 }) == 1234);
+    check(5, seven(1, 2, 3, 4, 5, 6, P { x: 6, y: 7 }) == 63);
+    let t: Tri;
+    t.a = 2;
+    t.b = 1;
+    t.c = 4;
+    check(6, tri(Tri { a: 1, b: 2, c: 3 }) == 123 && tri(t) == 214);
+
+    // 2. A struct by value from a place that is not a local name.
+    let r: R;
+    r.a.x = 3;
+    r.a.y = 4;
+    r.n = 9;
+    check(7, sum(r.a) == 34 && r.n == 9);
+    g.x = 1;
+    g.y = 2;
+    check(8, sum(g) == 12);
+    gr.a.x = 2;
+    gr.a.y = 7;
+    check(9, sum(gr.a) == 27);
+    check(10, through(&r) == 34);
+    let pp: *P = &r.a;
+    check(11, sum(*pp) == 34);
+    let arr: [P; 2];
+    arr[1].x = 4;
+    arr[1].y = 2;
+    let i: i64 = 1;
+    check(12, sum(arr[i]) == 42);
+    check(13, sum(mk(7, 3)) == 73 && sum(mr().a) == 61);
+    let k: R = R { a: g, n: 1 };
+    check(14, sum(k.a) == 12 && k.n == 1);
+    let m: R = R { a: *pp, n: 2 };
+    check(15, sum(m.a) == 34 && m.n == 2);
+    let sl: []P = arr;
+    check(16, sum(sl[i]) == 42);
+
+    // 3. p->f[i] as a value.
+    let buf: [u8; 4];
+    buf[0] = 1;
+    buf[1] = 2;
+    buf[2] = 3;
+    buf[3] = 4;
+    let ws: [i64; 3];
+    ws[0] = 10;
+    ws[1] = 20;
+    ws[2] = 30;
+    let hs: [i16; 3];
+    hs[0] = 100;
+    hs[1] = 200;
+    hs[2] = 300;
+    let b: B;
+    b.ptr = &buf[0];
+    b.n = 4;
+    b.w = &ws[0];
+    b.h = &hs[0];
+    b.ps = &arr[0];
+    let bp: *B = &b;
+    check(17, get(bp, 2) == 3);
+    let c = bp->ptr[1];
+    check(18, c == 2);
+    check(19, bp->w[2] * 2 + bp->ptr[3] == 64 && wide(bp, 1) == 220);
+    check(20, elem_y(bp, 1) == 2 && total(bp) == 10);
+    bp->ptr[0] = 9;
+    check(21, buf[0] == 9 && bp->ptr[0] == 9);
+
+    // 4. &a[i].
+    let a3: [i64; 3];
+    a3[0] = 10;
+    a3[1] = 20;
+    a3[2] = 30;
+    let p1: *i64 = &a3[1];
+    check(22, *p1 == 20);
+    let q3: *u8 = &buf[3];
+    q3[0] = 44;
+    check(23, buf[3] == 44 && peek(&buf[1], 2) == 44);
+    let r2: *i16 = &hs[2];
+    r2[0] = 99;
+    check(24, hs[0] + hs[1] + hs[2] == 399);
+    let p0: *i64 = &a3[0];
+    let pq: *i64 = &p0[2];
+    check(25, *pq == 30);
+    garr[1] = 2;
+    gp = &garr[0];
+    let gq: *i64 = &gp[1];
+    check(26, *gq == 2);
+    check(27, peek(&bp->ptr[1], 0) == 2 && peek(&b.ptr[3], 0) == 44);
+    let s: S;
+    s.arr[2] = 13;
+    let sp: *i32 = &s.arr[2];
+    check(28, sp[0] == 13);
+
+    // 5. Array literals.
+    let lb: [u8; 3] = [97, 98, 99];
+    check(29, lb[0] == 97 && lb[1] == 98 && lb[2] == 99);
+    let lc: [u8; 2] = [1, 2];
+    check(30, lc[0] + lc[1] == 3);
+    let lh: [i16; 3] = [-1, 2, 300];
+    check(31, lh[0] + lh[1] + lh[2] == 301);
+    let lw: [i32; 2] = [70000, -5];
+    check(32, lw[0] + lw[1] == 69995);
+    let lq: [i64; 2] = [5, 6];
+    check(33, lq[0] * 10 + lq[1] == 56);
+    let qq: Q;
+    qq.x = 5;
+    qq.y = 6;
+    let lp: [Q; 3] = [Q { x: 1, y: 2 }, qq, Q { x: 7, y: 9 }];
+    check(34, lp[0].x == 1 && lp[0].y == 2 && lp[1].x == 5 && lp[2].y == 9);
+    let lt: [Tri; 2] = [t, Tri { a: 1, b: 2, c: 3 }];
+    check(35, lt[0].a == 2 && lt[0].c == 4 && lt[1].b == 2 && lt[1].c == 3);
+    let str_b: str = lb;
+    check(36, str_b.len == 3 && str_b[1] == 98 && t.a == 2 && keep == 77);
+
+    if (bad == 0) {
+        serial_putc(77);
+        serial_putc(69);
+        serial_putc(77);
+        serial_putc(79);
+        serial_putc(75);
+    } else {
+        serial_putc(70);
+        serial_putc(65);
+        serial_putc(73);
+        serial_putc(76);
+        serial_putc(48 + bad / 10);
+        serial_putc(48 + bad % 10);
+    }
+    while (1) { hlt(); }
+    return 0;
+}
+
+bits 32 naked fn _start() {
+    cli();
+    asm("lgdt [gdtr]");
+    asm("mov ax, 0x10");
+    asm("mov ds, ax");
+    asm("mov es, ax");
+    asm("mov ss, ax");
+    asm("mov esp, 0x6000");
+    asm("cld");
+    asm("xor eax, eax");
+    asm("mov edi, 0x1000");
+    asm("mov ecx, 3072");
+    asm("rep stosd");
+    asm("mov dword [0x1000], 0x2007");
+    asm("mov dword [0x2000], 0x3007");
+    asm("mov dword [0x3000], 0x87");
+    asm("mov eax, cr4");
+    asm("or eax, 0x20");
+    asm("mov cr4, eax");
+    asm("mov eax, 0x1000");
+    asm("mov cr3, eax");
+    asm("mov ecx, 0xC0000080");
+    asm("rdmsr");
+    asm("or eax, 0x100");
+    asm("wrmsr");
+    asm("mov eax, cr0");
+    asm("or eax, 0x80000000");
+    asm("mov cr0, eax");
+    asm("jmp 0x08:kmain");
+}

@@ -1,0 +1,144 @@
+// Flat kernel at 0x8000 for QEMU, loaded by tests/usermode/boot.lap, like tests/memfix/kernel.lap.
+// It runs `&a[i]` (0.45.1) and tests/memfix/run.sh builds it with --checked as well, so the
+// bounds of `&a[i]` and `a[i]` are compiled in: a check against a wrong length (0 for an array
+// of integers before 0.45.1) ends in `syscall`, which faults here and COM1 stays empty.
+// COM1: MEMOK when every check holds, FAIL and the number of the first one that does not.
+
+struct B { ptr: *u8, n: i64 }
+struct S { k: i64, arr: [i32; 4] }
+
+let garr: [i64; 3];
+let gp: *i64 = 0;
+let bad: i64 = 0;
+
+data gdt {
+    dq 0;
+    dw 0;
+    dw 0;
+    db 0;
+    db 0x9A;
+    db 0x20;
+    db 0;
+    dw 0xFFFF;
+    dw 0;
+    db 0;
+    db 0x92;
+    db 0xCF;
+    db 0;
+}
+
+data gdtr {
+    dw 23;
+    dd gdt;
+}
+
+fn serial_putc(c: i64) -> i64 {
+    let tries = 0;
+    while ((inb(0x3FD) & 0x20) == 0 && tries < 1000) { tries = tries + 1; }
+    outb(0x3F8, c);
+    return 0;
+}
+
+fn check(n: i64, ok: i64) -> i64 {
+    if (ok == 0 && bad == 0) { bad = n; }
+    return 0;
+}
+
+fn peek(p: *u8, i: i64) -> u8 { return p[i]; }
+
+fn kmain() -> i64 {
+    let a3: [i64; 3];
+    a3[0] = 10;
+    a3[1] = 20;
+    a3[2] = 30;
+    let p1: *i64 = &a3[1];
+    check(1, *p1 == 20);
+    let i: i64 = 2;
+    let p2: *i64 = &a3[i];
+    *p2 = 31;
+    check(2, a3[2] == 31);
+    let buf: [u8; 4];
+    buf[0] = 1;
+    buf[1] = 2;
+    buf[2] = 3;
+    buf[3] = 4;
+    let q3: *u8 = &buf[3];
+    q3[0] = 44;
+    check(3, buf[3] == 44 && peek(&buf[1], 2) == 44 && buf[2] == 3);
+    let hs: [i16; 3];
+    hs[0] = 100;
+    hs[1] = 200;
+    hs[2] = 300;
+    let r2: *i16 = &hs[2];
+    r2[0] = 99;
+    check(4, hs[0] + hs[1] + hs[2] == 399);
+    let ws: [u32; 2];
+    ws[0] = 5;
+    ws[1] = 6;
+    let wp: *u32 = &ws[1];
+    check(5, wp[0] == 6);
+    let p0: *i64 = &a3[0];
+    let pq: *i64 = &p0[2];
+    check(6, *pq == 31);
+    garr[1] = 2;
+    gp = &garr[0];
+    let gq: *i64 = &gp[1];
+    check(7, *gq == 2);
+    let b: B;
+    b.ptr = &buf[0];
+    b.n = 4;
+    let bp: *B = &b;
+    check(8, peek(&bp->ptr[1], 0) == 2 && peek(&b.ptr[3], 0) == 44);
+    let s: S;
+    s.arr[2] = 13;
+    let sp: *i32 = &s.arr[2];
+    check(9, sp[0] == 13);
+
+    if (bad == 0) {
+        serial_putc(77);
+        serial_putc(69);
+        serial_putc(77);
+        serial_putc(79);
+        serial_putc(75);
+    } else {
+        serial_putc(70);
+        serial_putc(65);
+        serial_putc(73);
+        serial_putc(76);
+        serial_putc(48 + bad / 10);
+        serial_putc(48 + bad % 10);
+    }
+    while (1) { hlt(); }
+    return 0;
+}
+
+bits 32 naked fn _start() {
+    cli();
+    asm("lgdt [gdtr]");
+    asm("mov ax, 0x10");
+    asm("mov ds, ax");
+    asm("mov es, ax");
+    asm("mov ss, ax");
+    asm("mov esp, 0x6000");
+    asm("cld");
+    asm("xor eax, eax");
+    asm("mov edi, 0x1000");
+    asm("mov ecx, 3072");
+    asm("rep stosd");
+    asm("mov dword [0x1000], 0x2007");
+    asm("mov dword [0x2000], 0x3007");
+    asm("mov dword [0x3000], 0x87");
+    asm("mov eax, cr4");
+    asm("or eax, 0x20");
+    asm("mov cr4, eax");
+    asm("mov eax, 0x1000");
+    asm("mov cr3, eax");
+    asm("mov ecx, 0xC0000080");
+    asm("rdmsr");
+    asm("or eax, 0x100");
+    asm("wrmsr");
+    asm("mov eax, cr0");
+    asm("or eax, 0x80000000");
+    asm("mov cr0, eax");
+    asm("jmp 0x08:kmain");
+}

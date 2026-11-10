@@ -1,0 +1,7 @@
+tests/errors/memfix_addr_elem.lap:8:21: error: cannot take the address of an element: 'x' is not an array or a pointer
+      8 |     let p: *i64 = &x[1];
+        |                     ^
+tests/errors/memfix_addr_elem.lap:10:23: error: cannot take the address of an element: the expression has type i64, not a pointer
+     10 |     let q: *i64 = &b.n[0];
+        |                       ^
+2 errors, compilation failed
