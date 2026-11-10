@@ -1,6 +1,6 @@
 // A struct passed by value from a place that is not a local name (0.45.1): a
 // field (`r.a`, `w.r.a`, `q->a`), a global, a field of a global, `*q`, an element
-// (of an array, of a slice or of a [P; N] field), and the
+// (of an array, of a slice, of a [P; N] field, through a pointer field), and the
 // struct a call returns. The caller passes the address of the bytes and the
 // callee copies them. Before, a field, a global and `*q` passed their first
 // qword as the address (`sum(r.a)` crashed). A literal of an outer struct copies
@@ -31,7 +31,7 @@ fn mr() -> R {
     return r;
 }
 fn through(q: *R) -> i64 { return sum(q->a); }
-fn elems(h: *H, i: i64) -> i64 { return sum(h->two[i]) + sum(h->items[i]); }
+fn elems(h: *H, i: i64) -> i64 { return sum(h->ps[i]) + sum(h->two[i]) + sum(h->items[i]); }
 
 fn main() -> i32 {
     let r: R;

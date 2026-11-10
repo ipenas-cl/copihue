@@ -11689,7 +11689,16 @@ void gen_array_index(Codegen* cg, AstNode* n) {
         AstNode* obj = arr->children[0];
         char* field_name = arr->name;
 
-        Symbol* sym = symtab_lookup_symbol(cg->symtab, obj->name);
+        // `p->f[i]` is (*p).f[i]: through the name p, the same as `p.f[i]`.
+        // Before 0.45.1 the deref has no name and the lookup crashed the compiler.
+        int through = 0;
+        if (obj && obj->type == AST_DEREF && obj->child_count == 1 && obj->children[0] &&
+            obj->children[0]->type == AST_IDENT) {
+            obj = obj->children[0];
+            through = 1;
+        }
+        Symbol* sym = (obj && obj->type == AST_IDENT && obj->name) ? symtab_lookup_symbol(cg->symtab, obj->name) : NULL;
+        if (through && sym && (!sym->type_name || sym->type_name[0] != '*')) sym = NULL;
         if (sym && sym->type_name) {
             // Get struct type (remove pointer if present)
             char* struct_type = sym->type_name;
@@ -15471,6 +15480,10 @@ void gen_expr(Codegen* cg, AstNode* n) {
                         AstNode* struct_obj = base->children[0];
                         char* field_name_inner = base->name;  // "tokens"
 
+                        // p->tokens[0].value: the name p, as in gen_array_index (0.45.1).
+                        if (struct_obj && struct_obj->type == AST_DEREF && struct_obj->child_count == 1 &&
+                            struct_obj->children[0] && struct_obj->children[0]->type == AST_IDENT)
+                            struct_obj = struct_obj->children[0];
                         if (struct_obj->type == AST_IDENT) {
                             // Look up the struct variable
                             Symbol* struct_sym = symtab_lookup_symbol(cg->symtab, struct_obj->name);

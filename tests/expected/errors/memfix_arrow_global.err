@@ -1,0 +1,4 @@
+tests/errors/memfix_arrow_global.lap:7:35: error: '->ptr' needs a variable of pointer-to-struct type on the left
+      7 | fn get(i: i64) -> u8 { return gb->ptr[i]; }
+        |                                   ^
+1 error, compilation failed
