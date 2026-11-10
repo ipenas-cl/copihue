@@ -113,6 +113,7 @@ tests/lang/strings.lap
 tests/lang/struct_assign.lap
 tests/lang/struct_by_value.lap
 tests/lang/struct_pointer_param.lap
+tests/lang/struct_return.lap
 tests/lang/struct_width.lap
 tests/lang/threads.lap
 tests/lang/trait.lap

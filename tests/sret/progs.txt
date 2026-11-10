@@ -1,0 +1,4 @@
+# Programs of the suite that use the hidden-pointer returns of 0.45.0. tests/sret/run.sh builds
+# each one in every mode (native, -c, -S, --freestanding, --flat).
+tests/test_struct_return.lap
+tests/lang/struct_return.lap

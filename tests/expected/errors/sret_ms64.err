@@ -1,0 +1,4 @@
+tests/errors/sret_ms64.lap:4:9: error: an ms64 function returns an integer or a pointer, not a struct
+      4 | ms64 fn f(a: i64) -> P {
+        |         ^
+1 error, compilation failed

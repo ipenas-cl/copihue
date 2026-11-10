@@ -209,6 +209,8 @@ Es un portado mecánico de 1.537 + 495 llamadas, no una función del lenguaje. `
 
 **Si el hueco 1 o el 2 se retrasara** (no es el plan): el estilo de respaldo es el que ya compila hoy, `struct Str { ptr: *u8, len: i64 }` definido por el programa, que sí se devuelve por valor (`tests/test_struct_return.lap`), a cambio de perder `==`, `[i]` comprobado y `print(s)` sobre ese tipo. S1 es comodidad y seguridad, no una condición de existencia del compilador en Copihue; está dicho aquí para que nadie crea lo contrario.
 
+**Corrección (0.45.0).** El párrafo anterior estaba mal: en 0.44.8 un struct **no** se devolvía por valor. `return p` de un struct local dejaba en `rax` la dirección de su slot en el frame, y `tests/test_struct_return.lap` imprimía `7` cuatro veces en Linux; su golden había guardado esa basura ([DESIGN_SECURITY.md](DESIGN_SECURITY.md) §2.7 punto 4). Desde 0.45.0 el struct se devuelve con el puntero oculto del enum (destino en `rdi`), y el golden dice 10, 20, 99 y 88. Con los dos huecos de S1 abiertos, el respaldo deja de hacer falta.
+
 ### 3.4 Hallazgos del sondeo (solo compilación)
 
 Se escribieron programas chicos en `build/s18/` (ignorado) y se compilaron con `-S`; **nada se ejecutó** (esta máquina es macOS y los ELF son de Linux). Los mensajes son los del compilador.

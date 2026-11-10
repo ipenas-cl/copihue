@@ -1,0 +1,7 @@
+tests/errors/sret_field.lap:17:18: error: struct 'P' has no field 'z'
+     17 |     let a = mk().z;
+        |                  ^
+tests/errors/sret_field.lap:18:17: error: 'n' does not return a struct; it has no field 'x'
+     18 |     let b = n().x;
+        |                 ^
+2 errors, compilation failed

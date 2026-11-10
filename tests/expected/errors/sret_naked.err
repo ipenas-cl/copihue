@@ -1,0 +1,4 @@
+tests/errors/sret_naked.lap:4:10: error: a struct cannot be returned from a naked, interrupt, syscall, or bits 16/32 function
+      4 | naked fn f() -> P {
+        |          ^
+1 error, compilation failed

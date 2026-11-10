@@ -1,0 +1,7 @@
+tests/errors/sret_let.lap:13:16: error: expected P, found Q
+     13 |     let p: P = mk();
+        |                ^
+tests/errors/sret_let.lap:15:7: error: cannot assign struct 'Q' to struct 'P'
+     15 |     r = mk();
+        |       ^
+2 errors, compilation failed

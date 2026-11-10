@@ -1,0 +1,17 @@
+// The declared struct of the local and the struct the call returns differ.
+struct P { x: i64, y: i64 }
+struct Q { x: i64, y: i64 }
+
+fn mk() -> Q {
+    let q: Q;
+    q.x = 1;
+    q.y = 2;
+    return q;
+}
+
+fn main() -> i32 {
+    let p: P = mk();
+    let r: P;
+    r = mk();
+    return 0;
+}

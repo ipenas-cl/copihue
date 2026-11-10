@@ -1,0 +1,12 @@
+// The Microsoft x64 convention returns in rax; a struct does not fit that here.
+struct P { x: i64, y: i64 }
+
+ms64 fn f(a: i64) -> P {
+    let p: P;
+    p.x = a;
+    return p;
+}
+
+fn main() -> i32 {
+    return 0;
+}

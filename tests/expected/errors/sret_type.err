@@ -1,0 +1,4 @@
+tests/errors/sret_type.lap:5:12: error: return value: expected P, found i64
+      5 |     return 5;
+        |            ^
+1 error, compilation failed
