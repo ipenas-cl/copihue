@@ -48,8 +48,11 @@ tests/global/test_global_return.lap
 tests/global/test_global_simple.lap
 tests/global/test_global_zero.lap
 tests/hello.lap
+tests/lang/addr_elem_oob.lap
+tests/lang/addr_elem.lap
 tests/lang/align_fn.lap
 tests/lang/align64.lap
+tests/lang/arr_lit_narrow.lap
 tests/lang/assign_cast.lap
 tests/lang/assign_ptr_expr.lap
 tests/lang/assign_wide.lap
@@ -97,6 +100,7 @@ tests/lang/o2_tail.lap
 tests/lang/option_gen.lap
 tests/lang/own_move.lap
 tests/lang/packed_idt.lap
+tests/lang/ptr_field_index.lap
 tests/lang/ptr_literal.lap
 tests/lang/ptr_return.lap
 tests/lang/queues.lap
@@ -111,6 +115,8 @@ tests/lang/str_oob.lap
 tests/lang/str_range_oob.lap
 tests/lang/str.lap
 tests/lang/strings.lap
+tests/lang/struct_arg_lit.lap
+tests/lang/struct_arg_place.lap
 tests/lang/struct_assign.lap
 tests/lang/struct_by_value.lap
 tests/lang/struct_pointer_param.lap

@@ -37,6 +37,9 @@
 # 4l. Hidden-pointer returns (0.45.0): tests/errors/sret_*.lap are refused in every way the compiler builds; the
 #    programs of tests/sret/progs.txt build in every mode; QEMU runs tests/sret/kernel.lap. All of it in
 #    tests/sret/run.sh.
+# 4m. Silent memory corruption (0.45.1): tests/errors/memfix_*.lap are refused in every way the compiler builds;
+#    the programs of tests/memfix/progs.txt build in every mode; QEMU runs tests/memfix/kernel.lap and
+#    kernel_addr.lap. All of it in tests/memfix/run.sh.
 # 5. Boot sectors: tests/boot/*.lap, and QEMU must print COPIHUE.
 # 6. User mode: tests/usermode, and QEMU must print USER.
 # 7. Context switch: tests/ctx, and QEMU must print COPIHUE.
@@ -118,7 +121,7 @@ check() {  # $1 = name, $2 = golden file, $3 = actual file
   else fail=$((fail+1)); failed+=("$1"); echo "FAIL $1"; [ -f "$2" ] && diff "$2" "$3" | head -10; fi
 }
 
-for src in $(ls tests/*.lap tests/*/*.lap examples/*.lap examples/*/*.lap examples/*/*/*.lap | grep -v -e '^tests/errors/' -e '^tests/freestanding/' -e "^tests/flat/" -e "^tests/boot/" -e '^tests/usermode/' -e '^tests/ctx/' -e '^tests/native/' -e '^tests/align/' -e '^tests/assign/' -e '^tests/axe1/' -e '^tests/ginit/' -e '^tests/ms64/' -e '^tests/sret/' -e '^tests/pic/' -e '^tests/efi/' -e '^tests/axe2/' -e '^tests/tools/'); do
+for src in $(ls tests/*.lap tests/*/*.lap examples/*.lap examples/*/*.lap examples/*/*/*.lap | grep -v -e '^tests/errors/' -e '^tests/freestanding/' -e "^tests/flat/" -e "^tests/boot/" -e '^tests/usermode/' -e '^tests/ctx/' -e '^tests/native/' -e '^tests/align/' -e '^tests/assign/' -e '^tests/axe1/' -e '^tests/ginit/' -e '^tests/ms64/' -e '^tests/sret/' -e '^tests/memfix/' -e '^tests/pic/' -e '^tests/efi/' -e '^tests/axe2/' -e '^tests/tools/'); do
   case "$SKIP" in *" $src "*) continue ;; esac
   golden=tests/expected/${src%.lap}.out
   FELL=0
@@ -1202,6 +1205,16 @@ if sr=$(bash "$ROOT/tests/sret/run.sh" "$CC" 2>&1); then
   pass=$((pass+1)); echo "$sr" | grep -E '^skip|^tests/sret:'
 else
   fail=$((fail+1)); failed+=("tests/sret"); echo "$sr" | head -40
+fi
+
+# 4m. Silent memory corruption (0.45.1): struct arguments, p->f[i], &a[i], array literals. The refusals
+# (tests/errors/memfix_*.lap) in every way the compiler builds, the programs in every mode, and two
+# kernels that run the fixes under QEMU at -O0 and -O2 (one also with --checked). The details are in
+# tests/memfix/run.sh.
+if mf=$(bash "$ROOT/tests/memfix/run.sh" "$CC" 2>&1); then
+  pass=$((pass+1)); echo "$mf" | grep -E '^skip|^tests/memfix:'
+else
+  fail=$((fail+1)); failed+=("tests/memfix"); echo "$mf" | head -40
 fi
 
 rm -f "$CC"
