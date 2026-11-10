@@ -1,0 +1,92 @@
+// `&a[i]` (0.45.1). Of a local array it is checked against the declared length
+// and steps by the element size: before, an array of integers was checked
+// against length 0 (`&arr[1]` ended with "Array bounds error") and an array of
+// u8, i16 or i32 stepped 8 bytes. `&p[i]` with p: *T is p plus i elements (it was
+// the address of p's own slot). A pointer global, a pointer field (`&b->ptr[i]`,
+// `&b.ptr[i]`) and a [T; N] field (`&s.arr[i]`) give the element's address; they
+// gave nothing before. A global array is unchanged.
+
+struct B { ptr: *u8, n: i64 }
+struct S { k: i64, arr: [i32; 4] }
+
+let garr: [i64; 3];
+let gp: *i64 = 0;
+
+fn second(p: *i64) -> i64 { return *p; }
+fn peek(p: *u8, i: i64) -> u8 { return p[i]; }
+
+fn main() -> i32 {
+    let arr: [i64; 3];
+    arr[0] = 10;
+    arr[1] = 20;
+    arr[2] = 30;
+    let p: *i64 = &arr[1];
+    print_int(*p);
+    println("");
+    *p = 21;
+    print_int(arr[1]);
+    println("");
+    let i: i64 = 2;
+    print_int(second(&arr[i]));
+    println("");
+
+    let b: [u8; 5];
+    b[0] = 1;
+    b[1] = 2;
+    b[2] = 3;
+    b[3] = 4;
+    b[4] = 5;
+    let q: *u8 = &b[3];
+    print_int(q[0]);
+    println("");
+    q[0] = 44;
+    print_int(b[3] + b[4]);
+    println("");
+    print_int(peek(&b[1], 2));
+    println("");
+
+    let h: [i16; 3];
+    h[0] = 7;
+    h[1] = 8;
+    h[2] = 9;
+    let r: *i16 = &h[2];
+    r[0] = 99;
+    print_int(h[0] + h[1] + h[2]);
+    println("");
+
+    let w: [u32; 2];
+    w[0] = 5;
+    w[1] = 6;
+    let wp: *u32 = &w[1];
+    print_int(wp[0]);
+    println("");
+
+    let pp: *i64 = &arr[0];
+    let pq: *i64 = &pp[2];
+    print_int(*pq);
+    println("");
+
+    garr[0] = 1;
+    garr[1] = 2;
+    garr[2] = 3;
+    gp = &garr[0];
+    let gq: *i64 = &gp[1];
+    print_int(*gq + *(&garr[2]));
+    println("");
+
+    let bb: B;
+    bb.ptr = &b[0];
+    bb.n = 5;
+    let bp: *B = &bb;
+    print_int(peek(&bp->ptr[1], 0) + peek(&bb.ptr[4], 0));
+    println("");
+
+    let s: S;
+    s.arr[0] = 11;
+    s.arr[1] = 12;
+    s.arr[2] = 13;
+    let sp: *i32 = &s.arr[2];
+    print_int(sp[0]);
+    println("");
+    return 0;
+}

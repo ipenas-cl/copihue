@@ -11352,6 +11352,11 @@ static void emit_mov_ptr(Codegen* cg, Symbol* sym, const char* dest);
 static int gen_field_addr(Codegen* cg, AstNode* obj, const char* field);
 
 // Helper: Generate address-of operator (&)
+typedef struct { int sz; int vol; int rec; char tn[160]; } PtrAcc;
+static int ptr_expr_access(Codegen* cg, AstNode* base, PtrAcc* a);
+static void gen_ptr_expr_addr(Codegen* cg, AstNode* base, AstNode* index, const PtrAcc* a);
+static void diag_not_pointer(Codegen* cg, AstNode* at, AstNode* base, const char* what);
+
 void gen_addr_of(Codegen* cg, AstNode* n) {
     if (!n->children || n->child_count == 0) return;
     AstNode* var = n->children[0];
@@ -11406,9 +11411,54 @@ void gen_addr_of(Codegen* cg, AstNode* n) {
         if (gen_slice_index(cg, var, 1)) return;
         if (!var->children || var->child_count < 2) return;
         AstNode* arr = var->children[0];
-        if (!arr || !arr->name) return;
+        if (!arr) return;
+        // 0.45.1: an element of something that is not a name. Before, nothing was
+        // emitted and the value was whatever rax held.
+        if (arr->type != AST_IDENT || !arr->name) {
+            StructField* ef = arr->type == AST_FIELD_ACCESS ? access_field(cg, arr) : NULL;
+            PtrAcc pa;
+            if (ef && ef->array_len > 0 && ef->size > 0 && ef->size % ef->array_len == 0) {
+                // &x.a[i] with a: [T; N], the same address the element load uses.
+                gen_expr(cg, var->children[1]);
+                emit_scale_reg(cg, "rax", ef->size / ef->array_len);
+                emit(cg, "    push rax\n");
+                if (!gen_field_addr(cg, arr->children[0], arr->name)) {
+                    emit(cg, "    pop rax\n");
+                    diag_error(var->line, var->col, "cannot take the address of an element of field '%s'", arr->name);
+                    return;
+                }
+                emit(cg, "    pop rbx\n");
+                emit(cg, "    add rax, rbx\n");
+            } else if (ptr_expr_access(cg, arr, &pa)) {
+                // &p->f[i], &x.f[i], &f()[i] with a pointer: the pointer plus i elements.
+                gen_ptr_expr_addr(cg, arr, var->children[1], &pa);
+                emit(cg, "    mov rax, rbx\n");
+            } else {
+                diag_not_pointer(cg, var, arr, "cannot take the address of an element");
+                emit(cg, "    xor rax, rax\n");
+            }
+            return;
+        }
 
         Symbol* sym = symtab_lookup_symbol(cg->symtab, arr->name);
+        if (sym && (sym->is_pointer || (sym->type_name && sym->type_name[0] == '*' && !sym->is_array))) {
+            // &p[i] with p: *T is p + i elements, as p[i] reads. Before 0.45.1 it was
+            // the address of p's own slot plus i qwords, checked against length 0.
+            int is_st = 0;
+            int el = elem_layout(cg, sym->type_name ? after_star(sym->type_name) : NULL, &is_st);
+            gen_expr(cg, var->children[1]);
+            if (el > 1) emit_scale_reg(cg, "rax", el);
+            emit(cg, "    push rax\n");
+            emit_mov_ptr(cg, sym, "rax");
+            emit(cg, "    pop rbx\n");
+            emit(cg, "    add rax, rbx\n");
+            return;
+        }
+        if (sym && !sym->is_array) {
+            diag_error(var->line, var->col, "cannot take the address of an element: '%s' is not an array or a pointer", arr->name);
+            emit(cg, "    xor rax, rax\n");
+            return;
+        }
         if (!sym) {
             // &global_array[index]
             GlobalVar* gvar = global_symtab_lookup(cg->global_symtab, arr->name);
@@ -11427,23 +11477,29 @@ void gen_addr_of(Codegen* cg, AstNode* n) {
                 if (elem_size > 1) emit_scale_reg(cg, "rax", elem_size);
                 emit(cg, "    lea rbx, [%s]\n", gvar->name);
                 emit(cg, "    add rax, rbx\n");
+            } else if (gvar && gvar->is_pointer) {
+                // &g[i] with g: *T (0.45.1; before, nothing was emitted).
+                int is_st = 0;
+                int el = elem_layout(cg, gvar->pointee_type, &is_st);
+                gen_expr(cg, var->children[1]);
+                if (el > 1) emit_scale_reg(cg, "rax", el);
+                emit(cg, "    mov rbx, [%s]\n", gvar->name);
+                emit(cg, "    add rax, rbx\n");
+            } else {
+                diag_error(var->line, var->col, "cannot take the address of an element: '%s' is not an array or a pointer", arr->name);
+                emit(cg, "    xor rax, rax\n");
             }
             return;
         }
         if (sym) {
             gen_expr(cg, var->children[1]);  // Index expression
 
-            // Bounds checking for address-of. Primitive arrays keep the
-            // historical count (slot count / 8). A struct array uses the
-            // declared length so &table[0] is valid for a short table.
+            // Bounds checking for address-of, against the declared length.
+            // Before 0.45.1 an array of integers was checked against its slot
+            // count / 8 (0 for fewer than 8 elements), so &a[1] always trapped.
+            int array_count = sym->array_len > 0 ? sym->array_len : sym->size / 8;
             if (sym->size > 0 && array_checks() &&
-                !hosted_array_check_skipped(var->children[1],
-                    (sym->is_array && sym->array_len > 0) ? sym->array_len : (sym->size / 8))) {
-                int array_count = sym->size / 8;
-                if (sym->is_array && sym->type_name && sym->array_len > 0) {
-                    StructType* est = typetab_lookup(cg->types, sym->type_name);
-                    if (est && est->size > 0) array_count = sym->array_len;
-                }
+                !hosted_array_check_skipped(var->children[1], array_count)) {
                 int ok_label = new_label(cg);
 
                 emit(cg, "    test rax, rax\n");
@@ -11466,14 +11522,10 @@ void gen_addr_of(Codegen* cg, AstNode* n) {
                 emit(cg, ".Lbounds_ok_%d:\n", ok_label);
             }
 
-            // Address: rbp + offset + index * stride. Primitive arrays stay
-            // at stride 8 (the historical layout). Struct arrays use the
-            // struct's real size so packed records stay contiguous.
-            int stride = 8;
-            if (sym->is_array && sym->type_name) {
-                StructType* est = typetab_lookup(cg->types, sym->type_name);
-                if (est && est->size > 0) stride = est->size;
-            }
+            // Address: rbp + offset + index * stride, the element size that
+            // a[i] reads with. Before 0.45.1 an array of u8, i16 or i32 used 8.
+            int is_st = 0;
+            int stride = elem_layout(cg, sym->type_name, &is_st);
             emit_scale_reg(cg, "rax", stride);
             emit(cg, "    lea rbx, [rbp%d]\n", sym->offset);
             emit(cg, "    add rax, rbx\n");
@@ -11493,8 +11545,6 @@ void gen_addr_of(Codegen* cg, AstNode* n) {
 // type of the expression; `*volatile T` keeps its mark. An expression without a
 // pointer type (an integer, an untyped address from `p + 8`) is not indexed in
 // silence: the compiler asks for a cast.
-typedef struct { int sz; int vol; int rec; char tn[160]; } PtrAcc;
-
 static int ptr_expr_access(Codegen* cg, AstNode* base, PtrAcc* a) {
     VTy t = expr_ty(cg, base);
     if (t.kind != VK_PTR || t.disp[0] != '*') return 0;

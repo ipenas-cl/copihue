@@ -1,0 +1,17 @@
+// `&a[i]` of a local array past its declared length still ends the program
+// (0.45.1 checks against the real length, 3, not 0). The last valid index
+// passes; the next one traps.
+fn main() -> i64 {
+    let arr: [u8; 3];
+    let i: i64 = 2;
+    let p: *u8 = &arr[i];
+    p[0] = 7;
+    print_int(arr[2]);
+    println("");
+    i = i + 1;
+    let q: *u8 = &arr[i];
+    q[0] = 1;
+    print_int(9);
+    println("");
+    return 0;
+}
