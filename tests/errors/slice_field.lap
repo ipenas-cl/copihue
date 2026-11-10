@@ -1,0 +1,18 @@
+// A str / []T field is a slice: not a scalar, read-only .ptr and .len, and the
+// same element rules as a slice local.
+enum Option { None, Some(i64) }
+
+struct Tok { kind: i64, text: str }
+struct Bad { volatile s: str, o: []Option }
+
+fn main() -> i32 {
+    let t: Tok;
+    let nums: [i64; 2] = [1, 2];
+    let n = t.text + 1;
+    let x: i64 = t.text;
+    t.text.len = 3;
+    t.text = 5;
+    t.text = nums;
+    let c = t.text.cap;
+    return 0;
+}

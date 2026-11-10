@@ -1,6 +1,6 @@
-tests/errors/slice.lap:2:5: error: a slice cannot be a struct field
-      2 |     s: []i64
-        |     ^
+tests/errors/slice.lap:2:12: error: a slice cannot be an array element
+      2 |     s: [str; 2]
+        |            ^
 tests/errors/slice.lap:9:9: error: an array parameter is a pointer or a slice; use *T or []T
       9 | fn take(a: [i64; 2]) -> i64 {
         |         ^

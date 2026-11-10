@@ -1,22 +1,22 @@
-tests/errors/sret_slice_use.lap:8:9: error: a slice must be declared as []u8
-      8 |     let a = palabra();
+tests/errors/sret_slice_use.lap:12:9: error: a slice must be declared as []u8
+     12 |     let a = palabra();
         |         ^
-tests/errors/sret_slice_use.lap:9:9: error: a slice must be declared as []u8
-      9 |     let n: i64 = palabra();
+tests/errors/sret_slice_use.lap:13:9: error: a slice must be declared as []u8
+     13 |     let n: i64 = palabra();
         |         ^
-tests/errors/sret_slice_use.lap:11:16: error: a slice is not a scalar; read .ptr or .len
-     11 |     let same = palabra() == s;
+tests/errors/sret_slice_use.lap:15:16: error: a slice is not a scalar; read .ptr or .len
+     15 |     let same = nums() == nums();
         |                ^
-tests/errors/sret_slice_use.lap:11:29: error: a slice is not a scalar; read .ptr or .len
-     11 |     let same = palabra() == s;
-        |                             ^
-tests/errors/sret_slice_use.lap:12:20: error: expected []i64, found []u8
-     12 |     let t: []i64 = palabra();
+tests/errors/sret_slice_use.lap:15:26: error: a slice is not a scalar; read .ptr or .len
+     15 |     let same = nums() == nums();
+        |                          ^
+tests/errors/sret_slice_use.lap:16:20: error: expected []i64, found []u8
+     16 |     let t: []i64 = palabra();
         |                    ^
-tests/errors/sret_slice_use.lap:13:15: error: argument 1 of 'print_int': expected i64, found []u8
-     13 |     print_int(palabra());
+tests/errors/sret_slice_use.lap:17:15: error: argument 1 of 'print_int': expected i64, found []u8
+     17 |     print_int(palabra());
         |               ^
-tests/errors/sret_slice_use.lap:13:15: error: a slice is not a scalar; read .ptr or .len
-     13 |     print_int(palabra());
+tests/errors/sret_slice_use.lap:17:15: error: a slice is not a scalar; read .ptr or .len
+     17 |     print_int(palabra());
         |               ^
 7 errors, compilation failed

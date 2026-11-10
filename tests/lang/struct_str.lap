@@ -1,0 +1,131 @@
+// `str` and `[]T` as struct fields (0.45.0). A field is 16 bytes, the pointer
+// then the i64 length, aligned to 8. It is read, indexed, compared, assigned,
+// and copied with the struct. Small values, one per line.
+
+struct Tok { kind: i64, text: str, line: i32 }
+struct Pair { a: []i64, b: str }
+packed struct Pk { tag: u8, s: str }
+struct Holder { t: Tok, n: i64 }
+struct List { items: []Tok }
+
+let gtok: Tok;
+let gtoks: [Tok; 2];
+let gnums: [i64; 3] = [7, 8, 9];
+
+fn mk(kind: i64, text: str, line: i32) -> Tok {
+    return Tok { kind: kind, text: text, line: line };
+}
+
+fn text_of(t: Tok) -> str {
+    return t.text;
+}
+
+fn tlen(t: *Tok) -> i64 {
+    return t.text.len;
+}
+
+fn same_text(a: Tok, b: Tok) -> i64 {
+    if (a.text == b.text) { return 1; }
+    return 0;
+}
+
+fn count(s: str) -> i64 {
+    return s.len;
+}
+
+fn main() -> i32 {
+    let src: str = "let x = 42";
+    let t: Tok;
+    t.kind = 1;
+    t.text = src[0..3];
+    t.line = 7;
+    print_int(t.text.len); println("");
+    println(t.text);
+    print_int(t.text[1]); println("");
+    print_int(t.line); println("");
+    print_int(sizeof(Tok)); println("");
+    print_int(offsetof(Tok, line)); println("");
+    print_int(sizeof(Pk)); println("");
+
+    // Returned in a struct, copied with it, and changed in the copy only.
+    let x: str = src[4..5];
+    let u = mk(2, x, 9);
+    println(u.text);
+    let v: Tok = u;
+    v.text = src[8..10];
+    println(u.text);
+    println(v.text);
+
+    // == and != between a field and a local, and between two fields.
+    let ft: str = "42";
+    if (v.text == ft) { println("igual"); }
+    if (u.text == v.text) { println("mal"); } else { println("distinto"); }
+    if (u.text != v.text) { println("ne"); }
+    print_int(same_text(u, v)); println("");
+    print_int(same_text(v, v)); println("");
+    // A call that returns the slice, or the struct that holds it.
+    if (text_of(v) == ft) { println("llamada"); }
+    if (mk(3, ft, 0).text == v.text) { println("campo de llamada"); }
+
+    // As an argument, as a return value, and through a pointer.
+    print_int(count(v.text)); println("");
+    let w: str = text_of(v);
+    println(w);
+    let p: *Tok = &v;
+    print_int(tlen(p)); println("");
+    p.text = src[0..3];
+    println(v.text);
+
+    // A global struct, an array of structs, a struct inside a struct.
+    gtok.text = src[4..5];
+    println(gtok.text);
+    gtoks[1].text = src[8..10];
+    print_int(gtoks[1].text[1]); println("");
+    let h: Holder;
+    h.t = v;
+    h.n = 3;
+    println(h.t.text);
+
+    // []i64: a view of a global array; a literal into a str field.
+    let pr: Pair;
+    pr.a = gnums;
+    print_int(pr.a.len); println("");
+    print_int(pr.a[2]); println("");
+    pr.a[0] = 70;
+    print_int(gnums[0]); println("");
+    pr.b = "hola";
+    println(pr.b);
+
+    let q = Tok { kind: 5, text: ft, line: 1 };
+    println(q.text);
+    let k: Pk;
+    k.tag = 1;
+    k.s = ft;
+    println(k.s);
+
+    let sum = 0;
+    for c in v.text { sum = sum + c; }
+    print_int(sum); println("");
+
+    // A store through the field reaches the bytes it views.
+    let buf: [u8; 3];
+    buf[0] = 97;
+    buf[1] = 98;
+    buf[2] = 99;
+    let bs: str = buf;
+    let m: Tok;
+    m.text = bs;
+    m.text[0] = 122;
+    println(m.text);
+    println(bs);
+
+    // A slice of structs that hold slices.
+    let ts: []Tok = gtoks;
+    print_int(ts[1].text.len); println("");
+    let l: List;
+    l.items = gtoks;
+    print_int(l.items[1].text.len); println("");
+    l.items[0].kind = 4;
+    print_int(gtoks[0].kind); println("");
+    return 0;
+}

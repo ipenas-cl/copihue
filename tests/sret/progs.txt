@@ -3,3 +3,4 @@
 tests/test_struct_return.lap
 tests/lang/struct_return.lap
 tests/lang/slice_return.lap
+tests/lang/struct_str.lap

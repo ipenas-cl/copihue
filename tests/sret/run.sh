@@ -7,7 +7,8 @@
 #    and leaves no output.
 # 2. The positive programs (tests/sret/progs.txt) build in each of those ways, and the assembly of
 #    each (-S -O0 and -O2, --freestanding, --flat) assembles with nasm.
-# 3. QEMU runs tests/sret/kernel.lap at -O0 and -O2 (--flat 0x8000, freestanding code generation).
+# 3. QEMU runs tests/sret/kernel.lap (returns) and tests/sret/kernel_field.lap (str / []T fields)
+#    at -O0 and -O2 (--flat 0x8000, freestanding code generation).
 #    Without qemu-system-x86_64 and perl it is skipped; CMP_REQUIRE=1 (the CI) makes that a failure.
 # The hosted executables are Linux ELF files and are not run here; tests/run_tests.sh runs them on
 # Linux and compares them with tests/expected/tests/lang.
@@ -66,15 +67,18 @@ while IFS= read -r src; do
     fi
   done
 done < tests/sret/progs.txt
-# The kernel is the freestanding and flat case (print needs the hosted runtime).
-for opt in -O0 -O2; do
-  "$CC" --freestanding $opt -o "$WORK/f.asm" tests/sret/kernel.lap 2>"$WORK/err.txt" || bad "kernel --freestanding $opt: $(head -3 "$WORK/err.txt")"
-  ( cd "$WORK" && "$CC" --flat 0x8000 -S $opt -o fl.asm "$ROOT/tests/sret/kernel.lap" ) 2>"$WORK/err.txt" || bad "kernel --flat -S $opt: $(head -3 "$WORK/err.txt")"
-  ok
-  if [ $HAVE_NASM = 1 ] && [ -s "$WORK/f.asm" ]; then
-    nasm -f elf64 -o "$WORK/f.o" "$WORK/f.asm" 2>"$WORK/err.txt" || bad "kernel --freestanding $opt: nasm refused it: $(head -3 "$WORK/err.txt")"
+# The kernels are the freestanding and flat case (print needs the hosted runtime).
+KERNELS="tests/sret/kernel.lap tests/sret/kernel_field.lap"
+for k in $KERNELS; do
+  for opt in -O0 -O2; do
+    "$CC" --freestanding $opt -o "$WORK/f.asm" "$k" 2>"$WORK/err.txt" || bad "$k --freestanding $opt: $(head -3 "$WORK/err.txt")"
+    ( cd "$WORK" && "$CC" --flat 0x8000 -S $opt -o fl.asm "$ROOT/$k" ) 2>"$WORK/err.txt" || bad "$k --flat -S $opt: $(head -3 "$WORK/err.txt")"
     ok
-  fi
+    if [ $HAVE_NASM = 1 ] && [ -s "$WORK/f.asm" ]; then
+      nasm -f elf64 -o "$WORK/f.o" "$WORK/f.asm" 2>"$WORK/err.txt" || bad "$k --freestanding $opt: nasm refused it: $(head -3 "$WORK/err.txt")"
+      ok
+    fi
+  done
 done
 
 # 3. QEMU
@@ -82,11 +86,12 @@ if command -v qemu-system-x86_64 >/dev/null 2>&1 && command -v perl >/dev/null 2
   if ! ( cd "$WORK" && "$CC" --boot -o boot.bin "$ROOT/tests/usermode/boot.lap" 2>err.txt ); then
     bad "boot sector: $(cat "$WORK/err.txt")"
   else
+    for k in $KERNELS; do
     for opt in -O0 -O2; do
-      if ! ( cd "$WORK" && "$CC" $opt --flat 0x8000 -o kern.bin "$ROOT/tests/sret/kernel.lap" 2>err.txt ); then
-        bad "kernel $opt: $(cat "$WORK/err.txt")"; continue
+      if ! ( cd "$WORK" && "$CC" $opt --flat 0x8000 -o kern.bin "$ROOT/$k" 2>err.txt ); then
+        bad "$k $opt: $(cat "$WORK/err.txt")"; continue
       fi
-      if [ "$(wc -c < "$WORK/kern.bin" | tr -d ' ')" -gt 8192 ]; then bad "kernel $opt: larger than the 16 sectors the boot sector reads"; continue; fi
+      if [ "$(wc -c < "$WORK/kern.bin" | tr -d ' ')" -gt 8192 ]; then bad "$k $opt: larger than the 16 sectors the boot sector reads"; continue; fi
       dd if=/dev/zero of="$WORK/pad.bin" bs=8192 count=1 2>/dev/null
       dd if="$WORK/kern.bin" of="$WORK/pad.bin" conv=notrunc 2>/dev/null
       cat "$WORK/boot.bin" "$WORK/pad.bin" > "$WORK/disk.img"
@@ -94,8 +99,9 @@ if command -v qemu-system-x86_64 >/dev/null 2>&1 && command -v perl >/dev/null 2
       perl -e 'my $p = fork(); if (!$p) { exec @ARGV; exit 127 } $SIG{ALRM} = sub { kill "KILL", $p }; alarm 8; waitpid($p, 0);' \
         qemu-system-x86_64 -display none -boot a -drive file="$WORK/disk.img",format=raw,if=floppy,index=0 \
         -serial file:"$WORK/serial.txt" </dev/null >/dev/null 2>&1 || true
-      grep -q SRET "$WORK/serial.txt" 2>/dev/null || bad "kernel $opt: COM1 should be SRET, got '$(cat "$WORK/serial.txt" 2>/dev/null)'"
+      grep -q SRET "$WORK/serial.txt" 2>/dev/null || bad "$k $opt: COM1 should be SRET, got '$(cat "$WORK/serial.txt" 2>/dev/null)'"
       ok
+    done
     done
   fi
 elif [ "${CMP_REQUIRE:-0}" = 1 ]; then
