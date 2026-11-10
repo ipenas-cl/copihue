@@ -141,6 +141,7 @@ Copihue is slower on recursive code (`fib`), on the matching engine, and on a gr
 - `examples/`: example programs; `examples/lowlat/` has the low-latency cases
 - `bench/`: benchmarks outside `make test`
 - `docs/REFERENCE.md`: language reference; `docs/DESIGN_*.md`: one note per feature
+- `docs/DESIGN_SECURITY.md`: security rules proposed after the SSHole bug (errors are not domain values, unused `Result` is an error, constant-time compare); a proposal, not implemented: [docs/DESIGN_SECURITY.md](docs/DESIGN_SECURITY.md)
 - `docs/STATUS.md`, `docs/KERNELS.md`: detailed limits, test inventory and kernel modes
 - `compiler/native/x64.c`: x86-64 instruction encoder, the first piece of writing the ELF without `nasm` and `ld`; `make native-test` compares it with `nasm`. Inventory and design: [docs/DESIGN_NATIVE.md](docs/DESIGN_NATIVE.md)
 - `compiler/native/asm.c`: assembler for the NASM text the compiler emits (labels, jump relaxation, `call`, `.data`/`.rodata`/`.bss`, `extern` in `-c` objects); `make native-test` checks the bytes, the `.bss` size and the relocations against `nasm -f elf64` on all the corpus programs. Used by `copihue`: [docs/DESIGN_NATIVE.md](docs/DESIGN_NATIVE.md)
