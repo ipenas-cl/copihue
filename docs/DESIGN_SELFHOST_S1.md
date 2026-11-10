@@ -98,7 +98,7 @@ Errores: usar el campo como escalar (`x.f + 1`) es `a slice is not a scalar; rea
 
 ## 6. Pruebas y qué se verificó dónde
 
-Programas (golden escrito a mano, no ejecutados aquí; los corre `tests/run_tests.sh` en Linux):
+Programas (golden escrito a mano, no ejecutados aquí; los corre `tests/run_tests.sh` en Linux): después se ejecutaron en Linux (Debian, gcc 14.2) y los cuatro goldens coinciden a `-O0` y `-O2` con `tests/run_tests.sh`, `--nasm` y `--native`.
 
 - `tests/test_struct_return.lap`: golden corregido a 10, 20, 99, 88.
 - `tests/lang/struct_return.lap`: struct chico (`i32`, `i32`) y grande (6 campos de 1, 2, 4, 8 bytes con relleno, 32 bytes), seis argumentos (el sexto por la pila), llamadas anidadas (`add(add(...), add(...))`), recursión (`fibp(10)` = 55, 89), el resultado usado dos veces y después de una función que escribe 64 qwords en su frame, asignación a local, campo, elemento y global, `f().y`, argumento, todas las formas de `return`, caer al final (ceros) y un `packed struct` de 3 bytes en el elemento del medio de un arreglo sin tocar a los vecinos.
@@ -124,6 +124,7 @@ Se vieron durante S1; ninguno se tocó (son de antes y no son parte de la lista)
 5. **Una función llamada como una palabra de NASM** (`word`, `byte`, `dword`...) rompe el camino que pasa por `nasm` (`--flat`, `--boot`, `--nasm`): `call word` no ensambla. El nombre no se decora.
 6. **`-O0` y `-O2` difieren al tipar `0 - 3` como argumento `i16`:** a `-O0` es `expected i16, found i64`; a `-O2` el plegado lo vuelve literal y compila.
 7. **Un struct de tamaño impar desalinea los slots siguientes** del frame (`[rbp-441]` después de un `packed struct` de 17 bytes). Funciona en x86; no se midió si cuesta.
-8. En esta máquina `gcc` es el clang de Apple: `gcc -O2 -Wall -Werror` y `clang -O2 -Wall -Werror` compilan el bootstrap sin advertencias, pero no se probó con un GCC real.
+8. `gcc -O2 -Wall -Werror` compila el bootstrap sin advertencias con gcc 14.2 (Debian) y con el clang de Apple.
+9. **`&a[i]` de un arreglo local da `Array bounds error` en hosted.** La comprobación de límites de `&arr[i]` compara contra 0, no contra el largo del arreglo: `let arr: [i64; 3]; let p: *i64 = &arr[1];` termina con `Array bounds error` a `-O0` y a `-O2`, también en 0.44.8. Con un arreglo global (`examples/binary_search.lap`) y con `&arr` no pasa. `tests/lang/slice_return.lap` usa `&arr` por eso.
 
 Siguen abiertos de antes: el segfault de `p->campo[i]` del bootstrap ([SELFHOST_S0.md](SELFHOST_S0.md) §3.4; `p->text[0]` con un campo `str` no lo toca: va por el camino nuevo), SEC-1 y SEC-2 de [DESIGN_SECURITY.md](DESIGN_SECURITY.md).
