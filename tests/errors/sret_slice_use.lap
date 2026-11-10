@@ -1,0 +1,15 @@
+// What a returned slice is not: an untyped let, an integer, a scalar operand,
+// or a slice of another element.
+fn palabra() -> str {
+    return "abc";
+}
+
+fn main() -> i32 {
+    let a = palabra();
+    let n: i64 = palabra();
+    let s: str = palabra();
+    let same = palabra() == s;
+    let t: []i64 = palabra();
+    print_int(palabra());
+    return 0;
+}

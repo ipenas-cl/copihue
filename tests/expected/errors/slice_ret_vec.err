@@ -1,0 +1,4 @@
+tests/errors/slice_ret_vec.lap:6:12: error: 's' views memory of this function (a local array, a local vec, or the address of a local) and cannot be returned
+      6 |     return s;
+        |            ^
+1 error, compilation failed

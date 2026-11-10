@@ -1,0 +1,4 @@
+tests/errors/sret_slice_local.lap:4:12: error: a slice of local array 'a' cannot be returned; the array ends with the function
+      4 |     return a;
+        |            ^
+1 error, compilation failed

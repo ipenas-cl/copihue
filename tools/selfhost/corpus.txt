@@ -105,6 +105,7 @@ tests/lang/result.lap
 tests/lang/signed_division.lap
 tests/lang/slice_neg.lap
 tests/lang/slice_oob.lap
+tests/lang/slice_return.lap
 tests/lang/slice.lap
 tests/lang/str_oob.lap
 tests/lang/str_range_oob.lap

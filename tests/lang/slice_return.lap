@@ -1,0 +1,126 @@
+// Returning a slice (0.45.0): `-> str` and `-> []T` use the hidden pointer of an
+// enum. The caller passes 16 bytes of destination in rdi; the callee writes the
+// pointer and the length there. What comes back is a view: a literal, a global,
+// or memory of the caller, never a local of the callee.
+
+let gtab: [i64; 4] = [10, 20, 30, 40];
+
+fn palabra(i: i64) -> str {
+    if (i == 0) { return "cero"; }
+    if (i == 1) { return "uno"; }
+    return "muchos";
+}
+
+// A view of the caller's text, up to the first space.
+fn first_word(s: str) -> str {
+    let i = 0;
+    while (i < s.len) {
+        if (s[i] == 32) { return s[0..i]; }
+        i = i + 1;
+    }
+    return s;
+}
+
+fn rest(s: str, n: i64) -> str {
+    let t: str = s[n..s.len];
+    return t;
+}
+
+fn tab() -> []i64 {
+    return gtab;
+}
+
+fn mid(t: []i64) -> []i64 {
+    return t[1..3];
+}
+
+fn view(p: *i64, n: i64) -> []i64 {
+    return slice(p, n);
+}
+
+fn again(s: str) -> str {
+    return first_word(s);
+}
+
+fn pick(b: i64, x: str, y: str) -> str {
+    if (b != 0) { return x; }
+    return y;
+}
+
+// Six parameters: five registers after the hidden pointer, the sixth on the stack.
+fn sixth(a: i64, b: i64, c: i64, d: i64, e: i64, f: str) -> str {
+    return f;
+}
+
+// Off the end without return: a null pointer and length 0.
+fn nothing(n: i64) -> str {
+    if (n > 0) { return "x"; }
+}
+
+fn count(s: str) -> i64 {
+    return s.len;
+}
+
+fn clobber(v: i64) -> i64 {
+    let junk: [i64; 64];
+    for i in 0..64 { junk[i] = v + i; }
+    return junk[63];
+}
+
+fn main() -> i32 {
+    let a: str = palabra(0);
+    println(a);
+    print_int(a.len); println("");
+    let b: str = palabra(5);
+    println(b);
+
+    let line: str = "hola mundo";
+    let w: str = first_word(line);
+    println(w);
+    print_int(w.len); println("");
+    let r: str = rest(line, 5);
+    println(r);
+    let h: str = "hola";
+    if (w == h) { println("igual"); }
+
+    // Used twice, and after another call wrote over the stack.
+    let k: i64 = clobber(7);
+    print_int(k); println("");
+    println(a);
+    println(w);
+
+    // Assigning to an existing str, as an argument, and read straight from the call.
+    w = palabra(1);
+    println(w);
+    print_int(count(palabra(2))); println("");
+    print_int(palabra(0).len); println("");
+    print_int(palabra(1)[0]); println("");
+    println(palabra(2));
+
+    let t: []i64 = tab();
+    print_int(t.len); println("");
+    print_int(t[3]); println("");
+    let m: []i64 = mid(t);
+    print_int(m.len); println("");
+    print_int(m[0] + m[1]); println("");
+    let arr: [i64; 3] = [7, 8, 9];
+    let v: []i64 = view(&arr[0], 3);
+    print_int(v[2]); println("");
+    arr[2] = 90;
+    print_int(v[2]); println("");
+
+    let x: str = again(line);
+    println(x);
+    let si: str = "si";
+    let no: str = "no";
+    let p: str = pick(0, si, no);
+    println(p);
+    let seis: str = "seis";
+    let s6: str = sixth(1, 2, 3, 4, 5, seis);
+    println(s6);
+    let z: str = nothing(0);
+    print_int(z.len); println("");
+    let c: str = palabra(0);
+    if (a == c) { println("iguales"); }
+    return 0;
+}

@@ -1,7 +1,8 @@
 // Flat kernel at 0x8000 for QEMU, loaded by tests/usermode/boot.lap (see tests/align/kernel.lap
 // for the mode switch). It runs, for real, the hidden-pointer returns of 0.45.0: a struct by
-// value. It reports on COM1: SRET when every check holds, FAIL and the number of the first
-// check that does not otherwise.
+// value (checks 1-23) and a slice (24-30). It reports on COM1: SRET when every check holds,
+// FAIL and the number of the first check that does not otherwise. The image has to stay
+// within the 16 sectors the boot sector reads.
 
 struct P { x: i32, y: i32 }
 struct Rec { a: u8, b: i16, c: i32, d: i64, e: u8, f: i64 }
@@ -115,6 +116,31 @@ fn clobber(v: i64) -> i64 {
 
 fn sum(p: P) -> i64 { return p.x + p.y; }
 
+let gtab: [i64; 4] = [10, 20, 30, 40];
+
+fn palabra(i: i64) -> str {
+    if (i == 0) { return "cero"; }
+    return "muchos";
+}
+
+fn fword(s: str) -> str {
+    let i = 0;
+    while (i < s.len) {
+        if (s[i] == 32) { return s[0..i]; }
+        i = i + 1;
+    }
+    return s;
+}
+
+fn again(s: str) -> str { return fword(s); }
+fn tab() -> []i64 { return gtab; }
+fn mid(t: []i64) -> []i64 { return t[1..3]; }
+fn count(s: str) -> i64 { return s.len; }
+
+fn nothing(n: i64) -> str {
+    if (n > 0) { return "x"; }
+}
+
 fn kmain() -> i64 {
     let p1 = mk(10, 20);
     let p2 = mk(99, 88);
@@ -167,6 +193,23 @@ fn kmain() -> i64 {
     ts[2] = tri(7, 8, 9);
     ts[1] = tri(4, 5, 6);
     check(23, ts[0].c == 3 && ts[1].a == 4 && ts[1].c == 6 && ts[2].a == 7);
+
+    {
+        let a: str = palabra(0);
+        check(24, a.len == 4 && a[0] == 99 && a[3] == 111);
+        let line: str = "hola mundo";
+        let w: str = again(line);
+        check(25, w.len == 4 && w[3] == 97 && w.ptr == line.ptr);
+        check(26, clobber(5) == 68 && a.len == 4 && w.len == 4);
+        w = palabra(1);
+        check(27, w.len == 6 && w[5] == 115);
+        check(28, count(palabra(0)) == 4 && palabra(1).len == 6 && palabra(0)[1] == 101);
+        let t: []i64 = tab();
+        let m: []i64 = mid(t);
+        check(29, t.len == 4 && t[3] == 40 && m.len == 2 && m[0] + m[1] == 50);
+        let z: str = nothing(0);
+        check(30, z.len == 0);
+    }
 
     if (bad == 0) {
         serial_putc(83);

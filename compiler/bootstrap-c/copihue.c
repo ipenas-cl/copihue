@@ -374,6 +374,7 @@ typedef struct {
     int is_vec;           // vec T: pointer, i64 length, i64 capacity. 24 bytes
     int drop_kind;        // 0 none, 1 own *T (free the pointer), 2 vec (free the buffer)
     int ms64;             // `ms64 fn` variable: a call through it uses the Microsoft x64 convention
+    int frame_view;       // []T that may view this frame: a local array, a local vec, &local (0.45.0)
 } Symbol;
 
 #define MAX_BLOCK_SCOPE 64
@@ -1139,6 +1140,7 @@ int symtab_add(SymbolTable* st, char* name, int size) {
     st->symbols[st->count - 1].is_vec = 0;
     st->symbols[st->count - 1].drop_kind = 0;
     st->symbols[st->count - 1].ms64 = 0;
+    st->symbols[st->count - 1].frame_view = 0;
     symbol_assign_reg(&st->symbols[st->count - 1]);
     return -st->stack_size;
 }
@@ -1164,6 +1166,7 @@ int symtab_add_struct(SymbolTable* st, char* name, char* type_name, int size_byt
     st->symbols[st->count - 1].is_vec = 0;
     st->symbols[st->count - 1].drop_kind = 0;
     st->symbols[st->count - 1].ms64 = 0;
+    st->symbols[st->count - 1].frame_view = 0;
     symbol_assign_reg(&st->symbols[st->count - 1]);
     return -st->stack_size;
 }
@@ -1224,6 +1227,7 @@ int symtab_add_pointer(SymbolTable* st, char* name) {
     st->symbols[st->count - 1].is_vec = 0;
     st->symbols[st->count - 1].drop_kind = 0;
     st->symbols[st->count - 1].ms64 = 0;
+    st->symbols[st->count - 1].frame_view = 0;
     symbol_assign_reg(&st->symbols[st->count - 1]);
     return -st->stack_size;
 }
@@ -4181,11 +4185,14 @@ AstNode* parse_func(Parser* p) {
     // The value still comes back in rax.
     if (match_tok(p, T_ARROW)) {
         TypeSpec spec = parse_type(p);
-        if (spec.is_slice)
-            diag_error(name.line, name.col, "a slice cannot be returned");
         if (spec.is_vec)
             diag_error(name.line, name.col, "a vec cannot be returned");
-        if (spec.is_own) {
+        if (spec.is_slice) {
+            // 0.45.0: `-> str` and `-> []T` come back through the hidden
+            // pointer of an enum. value is the element, as on a parameter.
+            func->struct_type = strdup("__slice__");
+            func->value = spec.base_type ? spec.base_type : strdup("i64");
+        } else if (spec.is_own) {
             func->flags |= AF_OWN;
             func->is_pointer = spec.is_pointer | (spec.is_mutable << 1) | (spec.is_volatile << 2);
             func->value = type_spec_name(spec);
@@ -5897,6 +5904,7 @@ static VTy ty_indexed(Codegen* cg, AstNode* base) {
     }
     VTy b = expr_ty(cg, base);
     if (b.kind == VK_PTR && b.disp[0] == '*') return ty_from_spelled(cg, after_star(b.disp));
+    if (b.kind == VK_SLICE && b.disp[0] == '[' && b.disp[1] == ']') return ty_from_spelled(cg, b.disp + 2);
     return ty_unk();
 }
 
@@ -5964,6 +5972,16 @@ static VTy ty_field(Codegen* cg, AstNode* n) {
             if (!strcmp(n->name, "cap")) return ty_unk();
             char raw[200];
             snprintf(raw, sizeof raw, "*%s", elem);
+            return ty_from_spelled(cg, raw);
+        }
+    }
+    if (n->children[0] && n->children[0]->type != AST_IDENT &&
+        (!strcmp(n->name, "ptr") || !strcmp(n->name, "len"))) {
+        VTy b = expr_ty(cg, n->children[0]);
+        if (b.kind == VK_SLICE && b.disp[0] == '[' && b.disp[1] == ']') {
+            char raw[200];
+            if (!strcmp(n->name, "len")) return ty_i64();
+            snprintf(raw, sizeof raw, "*%s", b.disp + 2);
             return ty_from_spelled(cg, raw);
         }
     }
@@ -6217,6 +6235,12 @@ static VTy expr_ty(Codegen* cg, AstNode* n) {
         AstNode* fn = cg ? find_func(cg, n->name) : NULL;
         int indirect = (loc || (gv && !fn)) ? 1 : 0;
         if (indirect || !fn) return ty_unk();
+        if (fn_ret_slice(fn)) {
+            VTy t; memset(&t, 0, sizeof t);
+            t.kind = VK_SLICE;
+            snprintf(t.disp, sizeof t.disp, "[]%s", fn->value ? fn->value : "i64");
+            return t;
+        }
         {
             VTy t = ty_decl(cg, 1, fn->is_pointer, fn->value);
             if (fn->flags & AF_OWN) t.own = 1;
@@ -6434,6 +6458,9 @@ static void check_arg(Codegen* cg, AstNode* arg, int idx, const char* fname, VTy
 static Symbol* local_slice(Codegen* cg, AstNode* id);
 static GlobalVar* global_slice(Codegen* cg, AstNode* id);
 static const char* slice_elem_name(Symbol* s, GlobalVar* g);
+static const char* slice_operand_elem(Codegen* cg, AstNode* n);
+static int gen_slice_addr(Codegen* cg, AstNode* n);
+static void gen_struct_call_into(Codegen* cg, AstNode* call, int off);
 static void found_spelling(Codegen* cg, AstNode* a, char* buf, int n);
 
 // An owning local, or a call that returns `own *T`. A raw `*T` is not a source:
@@ -6495,11 +6522,9 @@ static void check_user_args(Codegen* cg, AstNode* n, AstNode* fn) {
         }
         if (par->struct_type && !strcmp(par->struct_type, "__slice__")) {
             const char* want_e = par->value ? par->value : "i64";
-            Symbol* s = local_slice(cg, n->children[i]);
-            GlobalVar* g = s ? NULL : global_slice(cg, n->children[i]);
-            if (s || g) {
-                const char* got = slice_elem_name(s, g);
-                if (!got || !strcmp(got, want_e)) continue;
+            const char* got = slice_operand_elem(cg, n->children[i]);
+            if (got) {
+                if (!strcmp(got, want_e)) continue;
                 diag_error(n->children[i]->line, n->children[i]->col,
                            "expected []%s, found []%s", want_e, got);
                 continue;
@@ -6842,6 +6867,20 @@ static StructType* call_return_struct(Codegen* cg, AstNode* call) {
     return fn_ret_struct(fn);
 }
 
+// The element of the slice a direct call returns (`str` is "u8"), or NULL.
+static const char* call_return_slice(Codegen* cg, AstNode* call) {
+    AstNode* fn;
+    if (!call || call->type != AST_CALL || !call->name || !cg) return NULL;
+    if (call->qual && enum_lookup(call->qual)) return NULL;
+    fn = find_func(cg, call->name);
+    if (fn && fn->ntparams > 0) {
+        if (!monomorphize_call(cg, call)) return NULL;
+        fn = find_func(cg, call->name);
+    }
+    if (!fn || !sret_mode_ok(fn) || !fn_ret_slice(fn)) return NULL;
+    return fn->value ? fn->value : "i64";
+}
+
 static int call_is_indirect(Codegen* cg, AstNode* n) {
     Symbol* loc;
     GlobalVar* gv;
@@ -6890,6 +6929,11 @@ static void gen_one_arg(Codegen* cg, AstNode* a) {
         GlobalVar* gs = ss ? NULL : global_slice(cg, a);
         if (ss) { emit(cg, "    lea rax, [rbp%d]\n", ss->offset); return; }
         if (gs) { emit(cg, "    lea rax, [%s]\n", gs->name); return; }
+    }
+    // A call that returns a slice: the address of its temporary (0.45.0).
+    if (a && a->type != AST_IDENT && slice_operand_elem(cg, a)) {
+        gen_slice_addr(cg, a);
+        return;
     }
     if (is_struct_value_arg(cg, a)) {
         Symbol* asym = symtab_lookup_symbol(cg->symtab, a->name);
@@ -6978,7 +7022,7 @@ static int args_all_direct(Codegen* cg, AstNode* n, int argc) {
     for (int i = 0; i < argc; i++) {
         if (is_struct_value_arg(cg, n->children[i])) return 0;
         if (enum_passed_by_addr(cg, n->children[i])) return 0;
-        if (local_slice(cg, n->children[i]) || global_slice(cg, n->children[i])) return 0;
+        if (slice_operand_elem(cg, n->children[i])) return 0;
         if (!can_place(cg, n->children[i], regs[i])) return 0;
     }
     return 1;
@@ -9580,7 +9624,17 @@ void gen_builtin_call(Codegen* cg, AstNode* n) {
     }
     if (!strcmp(n->name, "print") || !strcmp(n->name, "println")) {
         int nl = !strcmp(n->name, "println");
-        if (n->child_count > 0 && expr_is_u8_slice(cg, n->children[0])) {
+        if (n->child_count > 0 && n->children[0] && n->children[0]->type != AST_IDENT &&
+            expr_is_u8_slice(cg, n->children[0])) {
+            /* print(f()): the call's temporary, evaluated once. write(1, ptr, len). */
+            gen_slice_addr(cg, n->children[0]);
+            emit(cg, "    mov rbx, rax\n");
+            emit(cg, "    mov rsi, [rbx]\n");
+            emit(cg, "    mov rdx, [rbx+8]\n");
+            emit(cg, "    mov rdi, 1\n");
+            emit(cg, "    mov rax, 1\n");
+            emit(cg, "    syscall\n");
+        } else if (n->child_count > 0 && expr_is_u8_slice(cg, n->children[0])) {
             /* Same bytes as write(1, s.ptr, s.len). No __strlen, no libc. */
             AstNode* call = ast_new(AST_CALL);
             AstNode* fd = ast_new(AST_NUMBER);
@@ -10232,12 +10286,78 @@ static const char* slice_elem_name(Symbol* s, GlobalVar* g) {
     return "i64";
 }
 
+// A slice operand that has 16 bytes somewhere (0.45.0): a local, a global, or
+// a call that returns a slice. The element, or NULL when `n` is not one.
+static const char* slice_operand_elem(Codegen* cg, AstNode* n) {
+    Symbol* s = local_slice(cg, n);
+    GlobalVar* g = s ? NULL : global_slice(cg, n);
+    if (s || g) return slice_elem_name(s, g);
+    if (n && n->type == AST_CALL) return call_return_slice(cg, n);
+    return NULL;
+}
+
+// rax = the address of those 16 bytes. A call writes them to a temporary of
+// this frame. 0 when `n` is not a slice operand.
+static int gen_slice_addr(Codegen* cg, AstNode* n) {
+    Symbol* s = local_slice(cg, n);
+    GlobalVar* g = s ? NULL : global_slice(cg, n);
+    if (s) {
+        emit(cg, "    lea rax, [rbp%d]\n", s->offset);
+        return 1;
+    }
+    if (g) {
+        emit(cg, "    lea rax, [%s]\n", g->name);
+        return 1;
+    }
+    if (n && n->type == AST_CALL && call_return_slice(cg, n)) {
+        g_enum_dst_kind = 0;
+        gen_user_call(cg, n, 0);
+        return 1;
+    }
+    return 0;
+}
+
+// The 16 bytes at [rax] go to [rbp+off].
+static void copy16_from_rax(Codegen* cg, int off) {
+    emit(cg, "    mov rbx, rax\n");
+    emit(cg, "    mov rax, [rbx]\n");
+    emit(cg, "    mov [rbp%d], rax\n", off);
+    emit(cg, "    mov rax, [rbx+8]\n");
+    emit(cg, "    mov [rbp%d], rax\n", off + 8);
+}
+
+// The pointer `e` (the first argument of slice()) is memory of this frame: a
+// local array, &local, &local[i], &local.f, or the .ptr of a slice that is.
+static int addr_in_frame(Codegen* cg, AstNode* e) {
+    Symbol* s;
+    if (!e || !cg->symtab) return 0;
+    if (e->type == AST_ADDR_OF && e->child_count == 1) {
+        AstNode* r = e->children[0];
+        while (r && (r->type == AST_INDEX || r->type == AST_FIELD_ACCESS) && r->child_count > 0)
+            r = r->children[0];
+        if (!r || r->type != AST_IDENT || !r->name || r->qual) return 0;
+        s = symtab_lookup_symbol(cg->symtab, r->name);
+        if (!s || s->mem || s->hwreg) return 0;
+        if (s->is_slice) return s->frame_view;
+        if (s->is_vec) return 1;
+        if (s->is_pointer || (s->type_name && s->type_name[0] == '*')) return 0;
+        return 1;
+    }
+    if (e->type == AST_IDENT && e->name && !e->qual) {
+        s = symtab_lookup_symbol(cg->symtab, e->name);
+        return s && s->is_array && !s->mem;
+    }
+    if (e->type == AST_FIELD_ACCESS && e->name && !strcmp(e->name, "ptr") && e->child_count == 1) {
+        s = local_slice(cg, e->children[0]);
+        if (s) return s->frame_view;
+        s = local_fat(cg, e->children[0]);
+        return s && s->is_vec;
+    }
+    return 0;
+}
+
 static int expr_is_u8_slice(Codegen* cg, AstNode* a) {
-    Symbol* s = local_slice(cg, a);
-    GlobalVar* g = s ? NULL : global_slice(cg, a);
-    const char* elem;
-    if (!s && !g) return 0;
-    elem = slice_elem_name(s, g);
+    const char* elem = slice_operand_elem(cg, a);
     return elem && !strcmp(elem, "u8");
 }
 
@@ -10332,6 +10452,28 @@ static int gen_slice_index(Codegen* cg, AstNode* n, int want_addr) {
     }
     arr = n->children[0];
     ix = n->children[1];
+    if (arr && arr->type != AST_IDENT && (elem = slice_operand_elem(cg, arr))) {
+        // f()[i]: the index first, then the call's temporary, checked the
+        // same way as a local (0.45.0).
+        es = elem_layout(cg, elem, &is_struct);
+        do_check = !(n->flags & AF_NOCHECK) && slice_checks();
+        gen_expr(cg, ix);
+        emit(cg, "    push rax\n");
+        gen_slice_addr(cg, arr);
+        if (do_check) emit(cg, "    mov rcx, [rax+8]\n");
+        emit(cg, "    mov rbx, [rax]\n");
+        emit(cg, "    pop rax\n");
+        if (do_check) {
+            int lab = new_label(cg);
+            emit(cg, "    cmp rax, rcx\n");
+            emit(cg, "    jae .Lslice_trap_%d\n", lab);
+            emit_trap_cold(cg, lab, "trap", "index out of range\n", 19);
+        }
+        if (es > 1) emit_scale_reg(cg, "rax", es);
+        emit(cg, "    add rbx, rax\n");
+        emit_elem_at_rbx(cg, es, is_struct, want_addr);
+        return 1;
+    }
     if (!slice_index_base(cg, arr, &s, &g, &unchecked)) return 0;
     if (legacy_bits()) {
         diag_error(n->line, n->col, "[]T is a 64-bit value");
@@ -10378,6 +10520,38 @@ static int gen_slice_store(Codegen* cg, AstNode* n) {
     arr = n->children[0];
     ix = n->children[1];
     val = n->children[2];
+    if (arr && arr->type != AST_IDENT && (elem = slice_operand_elem(cg, arr))) {
+        // f()[i] = v: the value, the index, then the 16 bytes (0.45.0).
+        es = elem_layout(cg, elem, &is_struct);
+        if (is_struct) {
+            diag_error(n->line, n->col, "a struct element of this slice is assigned field by field");
+            return 1;
+        }
+        check_types(val, "", ty_from_spelled(cg, elem), expr_ty(cg, val));
+        do_check = slice_checks();
+        gen_expr(cg, val);
+        emit(cg, "    push rax\n");
+        gen_expr(cg, ix);
+        emit(cg, "    push rax\n");
+        gen_slice_addr(cg, arr);
+        if (do_check) emit(cg, "    mov rcx, [rax+8]\n");
+        emit(cg, "    mov rbx, [rax]\n");
+        emit(cg, "    pop rax\n");
+        if (do_check) {
+            int lab = new_label(cg);
+            emit(cg, "    cmp rax, rcx\n");
+            emit(cg, "    jae .Lslice_trap_%d\n", lab);
+            emit_trap_cold(cg, lab, "trap", "index out of range\n", 19);
+        }
+        if (es > 1) emit_scale_reg(cg, "rax", es);
+        emit(cg, "    add rbx, rax\n");
+        emit(cg, "    pop rax\n");
+        if (es <= 1) emit(cg, "    mov byte [rbx], al\n");
+        else if (es == 2) emit(cg, "    mov word [rbx], ax\n");
+        else if (es == 4) emit(cg, "    mov dword [rbx], eax\n");
+        else emit(cg, "    mov qword [rbx], rax\n");
+        return 1;
+    }
     if (!slice_index_base(cg, arr, &s, &g, &unchecked)) return 0;
     if (legacy_bits()) {
         diag_error(n->line, n->col, "[]T is a 64-bit value");
@@ -10435,6 +10609,17 @@ static int gen_slice_field(Codegen* cg, AstNode* n) {
     if (strcmp(n->name, "ptr") && strcmp(n->name, "len") && strcmp(n->name, "cap")) return 0;
     s = local_fat(cg, n->children[0]);
     g = s ? NULL : global_slice(cg, n->children[0]);
+    if (!s && !g && slice_operand_elem(cg, n->children[0])) {
+        // f().len, f().ptr: read the temporary the call wrote (0.45.0).
+        if (!strcmp(n->name, "cap")) {
+            diag_error(n->line, n->col, "slice has no field 'cap'");
+            emit(cg, "    xor rax, rax\n");
+            return 1;
+        }
+        gen_slice_addr(cg, n->children[0]);
+        emit(cg, "    mov rax, [rax%s]\n", strcmp(n->name, "len") ? "" : "+8");
+        return 1;
+    }
     if (!s && !g) return 0;
     if (!strcmp(n->name, "cap")) {
         if (s && s->is_vec) {
@@ -10586,6 +10771,7 @@ static void fill_substr(Codegen* cg, AstNode* idx, int off, const char* want, Sy
         return;
     }
     if (!want && dst) remember_elem(dst, elem);
+    if (dst && s && s->frame_view) dst->frame_view = 1;
     es = elem_layout(cg, elem, &is_struct);
     if (is_struct) {
         diag_error(idx->line, idx->col, "a substring element must be an integer or a pointer");
@@ -10662,6 +10848,7 @@ static void gen_slice_let(Codegen* cg, AstNode* n) {
                 return;
             }
             if (!want) remember_elem(dst, elem);
+            if (arr && !arr->mem) dst->frame_view = 1;
             if (arr) store_ptr_len(cg, off, 1, arr->offset, NULL, count);
             else store_ptr_len(cg, off, 0, 0, garr->name, count);
             return;
@@ -10674,6 +10861,7 @@ static void gen_slice_let(Codegen* cg, AstNode* n) {
                 return;
             }
             if (!want) remember_elem(dst, elem);
+            if (src) dst->frame_view = src->frame_view;
             if (src) copy16_local(cg, off, src->offset);
             else copy16_global_local(cg, off, gs->name);
             return;
@@ -10692,6 +10880,7 @@ static void gen_slice_let(Codegen* cg, AstNode* n) {
                     return;
                 }
                 if (!want) remember_elem(dst, elem);
+                dst->frame_view = 1;
                 copy16_local(cg, off, vs->offset);
                 return;
             }
@@ -10749,6 +10938,7 @@ static void gen_slice_let(Codegen* cg, AstNode* n) {
             const char* po = after_star(pt.disp);
             if (po && po[0]) remember_elem(dst, po);
         }
+        if (addr_in_frame(cg, init->children[0])) dst->frame_view = 1;
         gen_expr(cg, init->children[0]);
         emit(cg, "    push rax\n");
         gen_expr(cg, plen);
@@ -10761,6 +10951,18 @@ static void gen_slice_let(Codegen* cg, AstNode* n) {
         emit(cg, "    mov [rbp%d], rax\n", off + 8);
         emit(cg, "    pop rax\n");
         emit(cg, "    mov [rbp%d], rax\n", off);
+        return;
+    }
+    // A call that returns a slice writes straight into this local (0.45.0).
+    if (init && init->type == AST_CALL && call_return_slice(cg, init)) {
+        const char* elem = call_return_slice(cg, init);
+        if (want && strcmp(want, elem)) {
+            diag_error(init->line, init->col, "expected []%s, found []%s", want, elem);
+            zero_slice(cg, off);
+            return;
+        }
+        if (!want) remember_elem(dst, elem);
+        gen_struct_call_into(cg, init, off);
         return;
     }
     if (!n->value)
@@ -10801,16 +11003,35 @@ static int gen_slice_assign(Codegen* cg, AstNode* n) {
     }
     ss = local_slice(cg, src);
     sg = ss ? NULL : global_slice(cg, src);
+    want = ds && ds->is_slice ? slice_elem_name(ds, NULL) : slice_elem_name(NULL, dg);
     if (!ss && !sg) {
-        diag_error(n->line, n->col, "expected a slice");
+        // A call that returns a slice (0.45.0): its temporary, then 16 bytes.
+        got = slice_operand_elem(cg, src);
+        if (!got) {
+            diag_error(n->line, n->col, "expected a slice");
+            return 1;
+        }
+        if (want && strcmp(want, got)) {
+            diag_error(n->line, n->col, "expected []%s, found []%s", want, got);
+            return 1;
+        }
+        gen_slice_addr(cg, src);
+        if (ds && ds->is_slice) copy16_from_rax(cg, ds->offset);
+        else {
+            emit(cg, "    mov rbx, rax\n");
+            emit(cg, "    mov rax, [rbx]\n");
+            emit(cg, "    mov [%s], rax\n", dg->name);
+            emit(cg, "    mov rax, [rbx+8]\n");
+            emit(cg, "    mov [%s+8], rax\n", dg->name);
+        }
         return 1;
     }
-    want = ds && ds->is_slice ? slice_elem_name(ds, NULL) : slice_elem_name(NULL, dg);
     got = slice_elem_name(ss, sg);
     if (want && got && strcmp(want, got)) {
         diag_error(n->line, n->col, "expected []%s, found []%s", want, got);
         return 1;
     }
+    if (ss && ds && ds->is_slice && ss->frame_view) ds->frame_view = 1;
     if (ss && ds && ds->is_slice) copy16_local(cg, ds->offset, ss->offset);
     else if (sg && ds && ds->is_slice) copy16_global_local(cg, ds->offset, sg->name);
     else if (ss && dg) copy16_local_global(cg, dg->name, ss->offset);
@@ -13631,6 +13852,107 @@ static void gen_struct_return(Codegen* cg, AstNode* src, StructType* st) {
     emit_copy_mem(cg, "rcx", "rbx", sz);
 }
 
+static int g_ret_tmp_seq = 0;
+
+// `return e` in a function that returns a slice of `elem` (0.45.0). A call of
+// the same slice type writes to the caller's destination itself. Anything else
+// is built in a temporary slice local with the same rules as `let t: []T = e`
+// (a slice, an array, a literal, a range, slice()) and its 16 bytes are copied
+// to the destination. A view of this frame (a local array, a local vec, &local,
+// or a slice local that holds one) is refused: it is dead after the return.
+static void gen_slice_return(Codegen* cg, AstNode* src, const char* elem) {
+    const char* got;
+    char want[160];
+    snprintf(want, sizeof want, "[]%s", elem);
+    if (src->type == AST_CALL && (got = call_return_slice(cg, src))) {
+        int sk = g_enum_dst_kind;
+        int so = g_enum_dst_off;
+        int sx = g_enum_dst_extra;
+        char sn[96];
+        if (strcmp(got, elem)) {
+            char gb[160];
+            snprintf(gb, sizeof gb, "[]%s", got);
+            mismatch(src, "return value", want, gb);
+            return;
+        }
+        snprintf(sn, sizeof sn, "%s", g_enum_dst_name);
+        g_enum_dst_kind = 2;
+        gen_user_call(cg, src, 0);
+        g_enum_dst_kind = sk;
+        g_enum_dst_off = so;
+        g_enum_dst_extra = sx;
+        snprintf(g_enum_dst_name, sizeof g_enum_dst_name, "%s", sn);
+        return;
+    }
+    {
+        int shape = 0;
+        if (src->type == AST_IDENT && src->name) {
+            Symbol* a = local_array_sym(cg, src);
+            Symbol* ls = local_slice(cg, src);
+            GlobalVar* g = (!a && !ls && cg->global_symtab) ? global_symtab_lookup(cg->global_symtab, src->name) : NULL;
+            if (a && !a->mem) {
+                diag_error(src->line, src->col,
+                           "a slice of local array '%s' cannot be returned; the array ends with the function",
+                           src->name);
+                return;
+            }
+            if (ls && ls->frame_view) {
+                diag_error(src->line, src->col,
+                           "'%s' views memory of this function (a local array, a local vec, or the address of a local) and cannot be returned",
+                           src->name);
+                return;
+            }
+            shape = a || ls || (g && (g->is_slice || g->is_array));
+        } else if (src->type == AST_STRING) {
+            shape = 1;
+        } else if (src->type == AST_INDEX && src->child_count >= 3) {
+            shape = 1;
+        } else if (src->type == AST_CALL && src->name && !strcmp(src->name, "slice") &&
+                   !find_func(cg, src->name)) {
+            shape = 1;
+        }
+        if (!shape) {
+            char found[160];
+            VTy t = expr_ty(cg, src);
+            if (src->flags & AF_DIAG) return;
+            if (t.kind == VK_SLICE) snprintf(found, sizeof found, "%s", t.disp);
+            else found_spelling(cg, src, found, (int)sizeof found);
+            mismatch(src, "return value", want, found);
+            return;
+        }
+    }
+    {
+        AstNode let;
+        AstNode* kids[1];
+        char name[32];
+        Symbol* t;
+        memset(&let, 0, sizeof let);
+        snprintf(name, sizeof name, "__ret.%d", g_ret_tmp_seq++);
+        let.type = AST_LET;
+        let.name = name;
+        let.struct_type = "__slice__";
+        let.value = (char*)elem;
+        let.line = src->line;
+        let.col = src->col;
+        kids[0] = src;
+        let.children = kids;
+        let.child_count = 1;
+        gen_slice_let(cg, &let);
+        t = cg->symtab ? symtab_lookup_symbol(cg->symtab, name) : NULL;
+        if (!t) return;
+        if (t->frame_view) {
+            diag_error(src->line, src->col,
+                       "this slice views memory of this function (a local array, a local vec, or the address of a local) and cannot be returned");
+            return;
+        }
+        emit(cg, "    mov rcx, [rbp%+d]\n", g_eret_off);
+        emit(cg, "    mov rax, [rbp%d]\n", t->offset);
+        emit(cg, "    mov [rcx], rax\n");
+        emit(cg, "    mov rax, [rbp%d]\n", t->offset + 8);
+        emit(cg, "    mov [rcx+8], rax\n");
+    }
+}
+
 static void gen_enum_return(Codegen* cg, AstNode* src, EnumType* e) {
     const char* en = NULL;
     const char* vn = NULL;
@@ -14611,6 +14933,14 @@ void gen_expr(Codegen* cg, AstNode* n) {
         diag_error(n->line, n->col, "'?' needs a Result return");
         emit(cg, "    xor rax, rax\n");
     } else if (n->type == AST_CALL) {
+        // The temporary's address is not the value of a slice (0.45.0). The
+        // places that take one (let, assignment, argument, .len, [i], print)
+        // do not come here; the call on its own as a statement does.
+        if (g_stmt_expr != n && call_return_slice(cg, n)) {
+            diag_error(n->line, n->col, "a slice is not a scalar; read .ptr or .len");
+            emit(cg, "    xor rax, rax\n");
+            return;
+        }
         gen_builtin_call(cg, n);
     } else if (n->type == AST_ARRAY_LITERAL) {
         emit(cg, "    ; array literal\n");
@@ -18589,6 +18919,18 @@ void gen_stmt(Codegen* cg, AstNode* n) {
                 emit_hosted_epilogue(cg);
                 return;
             }
+            if (g_cur_fn && g_eret_off && fn_ret_slice(g_cur_fn)) {
+                const char* el = g_cur_fn->value ? g_cur_fn->value : "i64";
+                if (n->child_count == 0 || !n->children[0]) {
+                    diag_error(n->line, n->col, "return needs a '[]%s' value", el);
+                    return;
+                }
+                gen_slice_return(cg, n->children[0], el);
+                emit_drops(cg, 0, cg->symtab ? cg->symtab->count : 0);
+                emit(cg, "    mov rax, [rbp%+d]\n", g_eret_off);
+                emit_hosted_epilogue(cg);
+                return;
+            }
         }
         if (n->child_count > 0) {
             VTy src_ty = expr_ty(cg, n->children[0]);
@@ -18626,6 +18968,8 @@ void gen_stmt(Codegen* cg, AstNode* n) {
             if (g_cur_fn && !(g_cur_fn->struct_type && !strcmp(g_cur_fn->struct_type, "__array__"))) {
                 VTy dst_ty = ty_decl(cg, 1, g_cur_fn->is_pointer, g_cur_fn->value);
                 check_types(n->children[0], "return value", dst_ty, src_ty);
+                // check_types named it; the call's temporary is not a value.
+                if (src_ty.kind == VK_SLICE && n->children[0]->type == AST_CALL) return;
             }
             gen_expr(cg, n->children[0]);
             // Move: the caller owns this pointer. The slot must be null before
@@ -20639,6 +20983,8 @@ void gen_func(Codegen* cg, AstNode* n) {
     lower_str(n);
     if (!(n->is_pointer & 1) && n->value && enum_lookup(n->value) && !enum_ret_allowed(n))
         diag_error(n->line, n->col, "an enum cannot be returned");
+    if (fn_ret_slice(n) && n->value && enum_lookup(n->value))
+        diag_error(n->line, n->col, "a slice element cannot be an enum");
     if (!sret_mode_ok(n) && (fn_ret_struct(n) || fn_ret_slice(n))) {
         const char* what = fn_ret_slice(n) ? "slice" : "struct";
         if ((n->flags & AF_MS64) && !naked)

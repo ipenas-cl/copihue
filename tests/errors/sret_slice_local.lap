@@ -1,0 +1,10 @@
+// A slice of a local array of the callee: the array ends with the return.
+fn f() -> []i64 {
+    let a: [i64; 3] = [1, 2, 3];
+    return a;
+}
+
+fn main() -> i32 {
+    let s: []i64 = f();
+    return 0;
+}

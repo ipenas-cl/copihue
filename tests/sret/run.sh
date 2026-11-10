@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Hidden-pointer returns (0.45.0): a struct by value, and later a slice. Called by
+# Hidden-pointer returns (0.45.0): a struct by value and a slice. Called by
 # tests/run_tests.sh with the compiler path; also runnable alone:   tests/sret/run.sh [path/to/copihue]
 #
 # 1. Every tests/errors/sret_*.lap is refused in each way the compiler builds (native -O0 and -O2,

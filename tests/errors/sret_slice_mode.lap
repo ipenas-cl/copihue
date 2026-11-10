@@ -1,0 +1,15 @@
+// A naked function has no frame for the destination pointer, and an enum is not
+// a slice element.
+enum Option { None, Some(i64) }
+
+naked fn f() -> str {
+    asm("ret");
+}
+
+fn g() -> []Option {
+    return g();
+}
+
+fn main() -> i32 {
+    return 0;
+}
