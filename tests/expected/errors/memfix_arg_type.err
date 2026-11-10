@@ -1,0 +1,10 @@
+tests/errors/memfix_arg_type.lap:12:14: error: argument 1 of 'sum': expected P, found Q
+     12 |     take(sum(q));
+        |              ^
+tests/errors/memfix_arg_type.lap:13:14: error: argument 1 of 'sum': expected P, found i64
+     13 |     take(sum(5));
+        |              ^
+tests/errors/memfix_arg_type.lap:14:16: error: argument 1 of 'sum': expected P, found Q
+     14 |     take(sum(Q { a: 2 }));
+        |                ^
+3 errors, compilation failed

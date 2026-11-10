@@ -6495,6 +6495,10 @@ static int gen_field_addr(Codegen* cg, AstNode* obj, const char* field);
 static Symbol* slice_into_temp(Codegen* cg, AstNode* src, const char* elem);
 static void store16_rcx(Codegen* cg, Symbol* t);
 static void found_spelling(Codegen* cg, AstNode* a, char* buf, int n);
+static int is_record(Codegen* cg, const char* t);
+static char* expr_struct_type(Codegen* cg, AstNode* n);
+static const char* struct_value_type(Codegen* cg, AstNode* n);
+static int gen_struct_value_addr(Codegen* cg, AstNode* n);
 
 // An owning local, or a call that returns `own *T`. A raw `*T` is not a source:
 // the caller could still free it.
@@ -6567,6 +6571,20 @@ static void check_user_args(Codegen* cg, AstNode* n, AstNode* fn) {
             diag_error(n->children[i] ? n->children[i]->line : n->line,
                        n->children[i] ? n->children[i]->col : n->col,
                        "expected []%s, found %s", want_e, found);
+            continue;
+        }
+        // A struct parameter takes a struct of that type (0.45.1). The callee
+        // copies the parameter's size from the address it gets: an integer
+        // was read as that address, and another struct was read past its end.
+        if (!par->is_pointer && par->value && is_record(cg, par->value) && arg) {
+            const char* got = arg->type == AST_STRUCT_LITERAL ? arg->struct_type : struct_value_type(cg, arg);
+            if (!got || strcmp(got, par->value)) {
+                char found[160];
+                if (got) snprintf(found, sizeof found, "%s", got);
+                else found_spelling(cg, arg, found, (int)sizeof found);
+                diag_error(arg->line, arg->col, "argument %d of '%s': expected %s, found %s", i + 1,
+                           n->name ? n->name : "(call)", par->value, found);
+            }
             continue;
         }
         VTy dst = ty_decl(cg, 0, par->is_pointer, par->value);
@@ -6955,29 +6973,42 @@ static int gen_enum_arg(Codegen* cg, AstNode* a);
 static int frame_temp_zeroed(Codegen* cg, int size);
 static void gen_struct_literal_at(Codegen* cg, AstNode* n, int base);
 
-// A struct literal as an argument (0.45.1). Before, it was built over the last
-// local of the frame.
+// A struct argument that is not a local name (0.45.1): a literal, `*q` with
+// q: *T, a global, or a field (`r.a`, `p->a`). Before, a literal was built over
+// the last local of the frame and the others passed their first qword as the
+// address. A local name, an element and a call already passed an address.
 static int struct_arg_by_addr(Codegen* cg, AstNode* a) {
     if (!a || !cg) return 0;
-    return a->type == AST_STRUCT_LITERAL;
+    if (a->type == AST_STRUCT_LITERAL) return 1;
+    if (a->type == AST_DEREF || a->type == AST_IDENT || a->type == AST_FIELD_ACCESS)
+        return struct_value_type(cg, a) != NULL;
+    return 0;
 }
 
 // The address of such an argument in rax. A literal is built in a zeroed
 // temporary of this frame, the way `return T { ... }` is. The callee copies.
 static void gen_struct_arg_addr(Codegen* cg, AstNode* a) {
-    StructType* st = a->struct_type ? typetab_lookup(cg->types, a->struct_type) : NULL;
-    int off;
-    if (!st || !cg->symtab || legacy_bits() || (g_fn_flags & AF_NAKED)) {
-        diag_error(a->line, a->col,
-                   "this struct literal cannot be passed as an argument; pass a local: let t: %s = ...; f(t)",
-                   a->struct_type ? a->struct_type : "T");
-        emit(cg, "    xor rax, rax\n");
+    if (a->type == AST_STRUCT_LITERAL) {
+        StructType* st = a->struct_type ? typetab_lookup(cg->types, a->struct_type) : NULL;
+        int off;
+        if (!st || !cg->symtab || legacy_bits() || (g_fn_flags & AF_NAKED)) {
+            diag_error(a->line, a->col,
+                       "this struct literal cannot be passed as an argument; pass a local: let t: %s = ...; f(t)",
+                       a->struct_type ? a->struct_type : "T");
+            emit(cg, "    xor rax, rax\n");
+            return;
+        }
+        emit(cg, "    ; struct literal %s\n", a->struct_type);
+        off = frame_temp_zeroed(cg, st->size);
+        gen_struct_literal_at(cg, a, off);
+        emit(cg, "    lea rax, [rbp%+d]\n", off);
         return;
     }
-    emit(cg, "    ; struct literal %s\n", a->struct_type);
-    off = frame_temp_zeroed(cg, st->size);
-    gen_struct_literal_at(cg, a, off);
-    emit(cg, "    lea rax, [rbp%+d]\n", off);
+    if (!gen_struct_value_addr(cg, a)) {
+        diag_error(a->line, a->col, "this struct value cannot be passed as an argument; pass a local: let t: %s = ...; f(t)",
+                   struct_value_type(cg, a));
+        emit(cg, "    xor rax, rax\n");
+    }
 }
 
 // Evaluate one call argument into rax. A struct value is passed as its address;
@@ -12084,16 +12115,35 @@ static void gen_struct_literal_at(Codegen* cg, AstNode* n, int base) {
             }
             continue;
         }
+        Symbol* lsrc = (fst && field_value->type == AST_IDENT) ? symtab_lookup_symbol(cg->symtab, field_value->name) : NULL;
         if (field_value->type == AST_STRUCT_LITERAL) {
             gen_struct_literal_at(cg, field_value, base + field_off);
-        } else if (fst && field_value->type == AST_IDENT) {
-            Symbol* src = symtab_lookup_symbol(cg->symtab, field_value->name);
-            if (src) {
-                for (int b = 0; b < fst->size; b += 8) {
-                    emit(cg, "    mov rax, [rbp%+d]\n", src->offset + b);
-                    emit(cg, "    mov [rbp%+d], rax\n", base + field_off + b);
-                }
+        } else if (lsrc && !lsrc->is_pointer && !lsrc->is_array && lsrc->type_name &&
+                   !strcmp(lsrc->type_name, fst->name) && fst->size % 8 == 0) {
+            for (int b = 0; b < fst->size; b += 8) {
+                emit(cg, "    mov rax, [rbp%+d]\n", lsrc->offset + b);
+                emit(cg, "    mov [rbp%+d], rax\n", base + field_off + b);
             }
+        } else if (fst) {
+            // 0.45.1: any other struct value (a global, a field, an element, `*q`,
+            // a call, a packed local) is copied from its address, exactly its
+            // size. Before, a global was skipped, a packed local was copied in
+            // whole qwords past the field, and the rest stored their address.
+            const char* vt = struct_value_type(cg, field_value);
+            if (!vt || strcmp(vt, fst->name)) {
+                char found[160];
+                found_spelling(cg, field_value, found, (int)sizeof found);
+                diag_error(field_value->line, field_value->col, "field '%s' of %s: expected %s, found %s",
+                           field_name, n->struct_type, fst->name, vt ? vt : found);
+                continue;
+            }
+            if (!gen_struct_value_addr(cg, field_value)) {
+                diag_error(field_value->line, field_value->col, "cannot copy this struct value");
+                continue;
+            }
+            emit(cg, "    mov rbx, rax\n");
+            emit(cg, "    lea rcx, [rbp%+d]\n", base + field_off);
+            emit_copy_mem(cg, "rcx", "rbx", fst->size);
         } else {
             gen_expr(cg, field_value);
             int psz = 8, psg = 0, poff = field_off, pvol = 0;
@@ -12316,6 +12366,41 @@ static int gen_struct_addr(Codegen* cg, AstNode* n) {
         return 1;
     }
     return 0;
+}
+
+// The struct a value is, counting `*q` with q: *T. NULL if it is not one.
+static const char* struct_value_type(Codegen* cg, AstNode* n) {
+    if (n && n->type == AST_DEREF && n->child_count == 1) {
+        VTy p = expr_ty(cg, n->children[0]);
+        if (p.kind != VK_PTR) return NULL;
+        // The name in the type table: p.disp ends with this function.
+        StructType* st = typetab_lookup(cg->types, (char*)after_star(p.disp));
+        return st ? st->name : NULL;
+    }
+    {
+        char* t = expr_struct_type(cg, n);
+        if (t) return t;
+    }
+    // An element of a field: `h.two[i]` with two: [P; N], `h->ps[i]` with ps: *P.
+    if (n && n->type == AST_INDEX && n->child_count >= 1 && n->children[0] &&
+        n->children[0]->type == AST_FIELD_ACCESS) {
+        StructField* f = access_field(cg, n->children[0]);
+        if (f && f->type_name && (f->array_len > 0 || f->is_pointer || f->type_name[0] == '*')) {
+            StructType* st = typetab_lookup(cg->types, (char*)after_star(f->type_name));
+            if (st) return st->name;
+        }
+    }
+    return NULL;
+}
+
+// Address of the bytes of a struct value in rax, counting `*q`. 0 if none.
+static int gen_struct_value_addr(Codegen* cg, AstNode* n) {
+    if (n && n->type == AST_DEREF && n->child_count == 1) {
+        if (!struct_value_type(cg, n)) return 0;
+        gen_expr(cg, n->children[0]);
+        return 1;
+    }
+    return gen_struct_addr(cg, n);
 }
 
 static StructField* access_field(Codegen* cg, AstNode* fa) {
