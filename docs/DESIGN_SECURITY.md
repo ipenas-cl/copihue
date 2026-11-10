@@ -2,7 +2,7 @@
 
 **Estado: propuesta, solo documentación.** Ninguna regla de este documento cambia hoy el compilador, las pruebas ni el lenguaje. Corte de referencia: Copihue **0.44.8** (`compiler/bootstrap-c/copihue.c`, `LANG_VERSION`; `main` en `95d3f7a`). Cada regla está marcada **Implementado** (el compilador ya lo hace, con la prueba que lo muestra) o **Propuesta** (no existe; aquí solo se describe).
 
-Lo que este documento afirma del compilador se comprobó en el código y con programas de prueba compilados con `-S` a `-O0` y `-O2` (§2). Esta máquina es macOS y no ejecuta ELF de Linux: nada de lo de abajo se ejecutó, salvo el propio compilador. No se afirma ninguna velocidad.
+Lo que este documento afirma del compilador se comprobó en el código y con programas de prueba compilados con `-S` a `-O0` y `-O2` (§2). La máquina donde se verificó es macOS y no ejecuta ELF de Linux: nada de lo de abajo se ejecutó, salvo el propio compilador. No se afirma ninguna velocidad.
 
 ## 1. Por qué este documento
 
@@ -100,7 +100,7 @@ Tras un `diag_error` el generador emite `xor rax, rax` y sigue, para juntar más
 
 ### 2.7 Hallazgos que no se esperaban
 
-Ninguno se corrigió en esta sesión (solo documentación).
+Ninguno se corrigió aquí: este cambio es solo documentación.
 
 1. **`malloc` compara el resultado de `mmap` contra -1** (`copihue.c:9657`, y lo mismo en `emit_malloc_rax`, `copihue.c:9961`, que usa `vec_push`). La syscall cruda de Linux no devuelve -1: devuelve `-errno` (por ejemplo, -12 para `ENOMEM`). Con -12 el salto no se toma, se escribe el tamaño en la dirección -12 y el proceso cae por segmentación en vez de devolver el centinela o escribir `out of memory`. El mismo `vec_push` sí trata bien a `mremap` (`test rax, rax` / `js`, `copihue.c:10103`), así que los dos caminos no son coherentes. Leído en el código; no ejecutado.
 2. **`==` entre structs compara direcciones** (§2.6).
@@ -112,7 +112,7 @@ Ninguno se corrigió en esta sesión (solo documentación).
    - `t10_today.lap` (una versión anterior de `t12_today.lap` que además pasa un literal a un parámetro `str`, cosa que el compilador rechaza en la línea 39): a `-O0`, 20 segfault; a `-O2`, 11 segfault y 9 veces el mensaje correcto `expected []u8, found *u8`. O sea, `-O2` tampoco está libre.
    - Sin `match` (`t11_seg_c.lap`, lo mismo en un `if`), sin `==` (`t11_seg_b.lap`) o con `==` sobre parámetros `str` (`t11_seg_d.lap`): 20 de 20 bien a ambos niveles.
 
-   No se buscó la causa: esta sesión no podía correr el bootstrap con AddressSanitizer. No se sabe si tiene relación con el segfault de `p->campo[i]` de [SELFHOST_S0.md](SELFHOST_S0.md) §3.4.
+   No se buscó la causa: no se corrió el bootstrap con AddressSanitizer. No se sabe si tiene relación con el segfault de `p->campo[i]` de [SELFHOST_S0.md](SELFHOST_S0.md) §3.4.
 6. **Un límite interno sin su propio error:** la bajada de `==` sobre `str` registra hasta 128 nombres por función (`copihue.c:20269`). Con 130 locales `str`, comparar el 130.° da `a slice is not a scalar; read .ptr or .len` (`t17_many_str.lap`), que no dice cuál es el límite. Es un error, no un fallo silencioso, pero el mensaje engaña (ver R5).
 
 Comprobado y descartado: con 13 comparaciones de `str` en una sola sentencia (tope de 24 sentencias izadas, `copihue.c:20202`) la sentencia se vuelve a procesar y las 13 quedan bajadas (13 trampas de índice en `t16_many_cmp.lap`). No es un hallazgo.
