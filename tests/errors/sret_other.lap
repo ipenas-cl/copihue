@@ -1,0 +1,15 @@
+// Another struct is not the declared one, even with the same fields.
+struct P { x: i64, y: i64 }
+struct Q { x: i64, y: i64 }
+
+fn f() -> P {
+    let q: Q;
+    q.x = 1;
+    q.y = 2;
+    return q;
+}
+
+fn main() -> i32 {
+    let p = f();
+    return 0;
+}

@@ -34,6 +34,9 @@
 # 4k. --pe-efi (0.44.8): tests/errors/pe_*.lap are refused under --pe-efi; tests/efi/app.lap becomes a PE32+ file
 #    that a C checker reads (and fails when a header field is broken) and that QEMU with OVMF runs as an EFI
 #    application. All of it in tests/efi/run.sh.
+# 4l. Hidden-pointer returns (0.45.0): tests/errors/sret_*.lap are refused in every way the compiler builds; the
+#    programs of tests/sret/progs.txt build in every mode; QEMU runs tests/sret/kernel.lap. All of it in
+#    tests/sret/run.sh.
 # 5. Boot sectors: tests/boot/*.lap, and QEMU must print COPIHUE.
 # 6. User mode: tests/usermode, and QEMU must print USER.
 # 7. Context switch: tests/ctx, and QEMU must print COPIHUE.
@@ -115,7 +118,7 @@ check() {  # $1 = name, $2 = golden file, $3 = actual file
   else fail=$((fail+1)); failed+=("$1"); echo "FAIL $1"; [ -f "$2" ] && diff "$2" "$3" | head -10; fi
 }
 
-for src in $(ls tests/*.lap tests/*/*.lap examples/*.lap examples/*/*.lap examples/*/*/*.lap | grep -v -e '^tests/errors/' -e '^tests/freestanding/' -e "^tests/flat/" -e "^tests/boot/" -e '^tests/usermode/' -e '^tests/ctx/' -e '^tests/native/' -e '^tests/align/' -e '^tests/assign/' -e '^tests/axe1/' -e '^tests/ginit/' -e '^tests/ms64/' -e '^tests/pic/' -e '^tests/efi/' -e '^tests/axe2/' -e '^tests/tools/'); do
+for src in $(ls tests/*.lap tests/*/*.lap examples/*.lap examples/*/*.lap examples/*/*/*.lap | grep -v -e '^tests/errors/' -e '^tests/freestanding/' -e "^tests/flat/" -e "^tests/boot/" -e '^tests/usermode/' -e '^tests/ctx/' -e '^tests/native/' -e '^tests/align/' -e '^tests/assign/' -e '^tests/axe1/' -e '^tests/ginit/' -e '^tests/ms64/' -e '^tests/sret/' -e '^tests/pic/' -e '^tests/efi/' -e '^tests/axe2/' -e '^tests/tools/'); do
   case "$SKIP" in *" $src "*) continue ;; esac
   golden=tests/expected/${src%.lap}.out
   FELL=0
@@ -1190,6 +1193,15 @@ if efi=$(bash "$ROOT/tests/efi/run.sh" "$CC" 2>&1); then
   pass=$((pass+1)); echo "$efi" | grep -E '^skip|^tests/efi:'
 else
   fail=$((fail+1)); failed+=("tests/efi"); echo "$efi" | head -40
+fi
+
+# 4l. Hidden-pointer returns (0.45.0): a struct by value. The refusals (tests/errors/sret_*.lap) in every way
+# the compiler builds, the programs that use it in every mode, and a kernel that runs the returns under
+# QEMU at -O0 and -O2. The details are in tests/sret/run.sh.
+if sr=$(bash "$ROOT/tests/sret/run.sh" "$CC" 2>&1); then
+  pass=$((pass+1)); echo "$sr" | grep -E '^skip|^tests/sret:'
+else
+  fail=$((fail+1)); failed+=("tests/sret"); echo "$sr" | head -40
 fi
 
 rm -f "$CC"

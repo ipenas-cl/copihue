@@ -1,4 +1,4 @@
-tests/errors/str_ret.lap:1:4: error: a slice cannot be returned
-      1 | fn f() -> str {
-        |    ^
+tests/errors/str_ret.lap:2:12: error: return value: expected []u8, found i64
+      2 |     return 0;
+        |            ^
 1 error, compilation failed

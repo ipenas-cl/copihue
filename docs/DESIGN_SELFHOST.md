@@ -1,6 +1,6 @@
 # Diseño: autoalojamiento (Copihue se compila a sí mismo)
 
-**Estado: aprobado el 2026-11-05 por Ignacio Peña. S0 entregada (pendiente de su revisión), S1 no empezada.** Todavía no está implementado: no hay código de autoalojamiento en este árbol. La aprobación cubre el plan y autoriza empezar por la fase S0 (§6); cada fase siguiente arranca solo con su criterio de aceptación anterior en verde. El inventario, el corpus y la lista de huecos de S0 están en [SELFHOST_S0.md](SELFHOST_S0.md).
+**Estado: aprobado el 2026-11-05 por Ignacio Peña. S0 entregada; S1 entregada el 2026-11-10 en Copihue 0.45.0, pendiente de su revisión.** Todavía no hay código de autoalojamiento en este árbol: S1 cambia el lenguaje, no reescribe el compilador. La aprobación cubre el plan; cada fase siguiente arranca solo con su criterio de aceptación anterior en verde. El inventario, el corpus y la lista de huecos de S0 están en [SELFHOST_S0.md](SELFHOST_S0.md); lo entregado en S1, en [DESIGN_SELFHOST_S1.md](DESIGN_SELFHOST_S1.md).
 
 Corte de referencia: Copihue **0.44.8** (`compiler/bootstrap-c/copihue.c`, `LANG_VERSION`; commit de `main` `c4a4036`). El paso 1 del camino nativo (escribir el ELF hosted sin `nasm` ni `ld`) está cerrado en [DESIGN_NATIVE.md](DESIGN_NATIVE.md) (M1–M6). Este documento es el **paso siguiente**: que el compilador deje de depender de C como implementación, y no solo de `nasm`/`ld` como herramientas externas.
 
@@ -40,6 +40,8 @@ Relación con el paso 1: DESIGN_NATIVE cierra «emitir código máquina y ELF pr
 ## 3. Huecos del lenguaje que bloquean expresar el compilador
 
 Lista **honesta**, tomada de lo que ya marcan REFERENCE, STATUS, README y los `DESIGN_*.md`. No se inventan features ni se prometen APIs nuevas más allá de lo que el plan histórico ya nombró (memoria dinámica, tablas de símbolos, structs y `str` devolvibles, y lo mínimo que falte).
+
+**Abiertos en S1 (0.45.0):** las dos primeras filas de la tabla de abajo ya no son huecos: un `str`/`[]T` se devuelve y es campo de struct ([DESIGN_SELFHOST_S1.md](DESIGN_SELFHOST_S1.md)). Antes de eso se arregló el retorno de un struct por valor, que devolvía una dirección del frame muerto.
 
 **Cerrado en S0** ([SELFHOST_S0.md](SELFHOST_S0.md) §3, con sondas de compilación): S1 abre **dos** de estos huecos, devolver `str`/`[]T` y `str`/`[]T` como campo de struct. `vec T` como campo, parámetro, retorno o global **no** entra en S1: una tabla que crece se escribe con un `Vec<T>` genérico de la biblioteca del compilador (`struct Vec<T> { ptr: *T, len: i64, cap: i64 }`), que compila hoy con `T` entero o struct. El texto de salida y los mensajes usan un `Buf` de esa biblioteca, no `append` de `str`. La tabla de abajo es el punto de partida y se deja como estaba escrita.
 
@@ -89,6 +91,8 @@ Cada fase es pequeña, tiene criterio de aceptación observable y no arranca la 
 **Aceptación.** Documento revisado; cero código nuevo de `compiler/self/`; la suite actual sigue verde sin cambios de comportamiento.
 
 ### S1 — Huecos mínimos del lenguaje
+
+**Estado: entregada el 2026-11-10 (Copihue 0.45.0), pendiente de revisión.** Puntos 1 y 2, más el arreglo del retorno de struct; el punto 3 (`vec` en structs) quedó fuera por la decisión de S0 (`Vec<T>` en la biblioteca). ABI, vistas a memoria muerta, pruebas (incluida la ejecución en QEMU de los kernels de `tests/sret/`) y hallazgos: [DESIGN_SELFHOST_S1.md](DESIGN_SELFHOST_S1.md).
 
 **Qué.** Solo lo necesario para expresar tablas y texto en el estilo del compilador:
 
@@ -146,9 +150,12 @@ Entregable: inventario de módulos + corpus de igualdad + lista cerrada de hueco
 
 Cuando S0 esté firmado, el siguiente ticket es **S1**: devolver `str`/`[]T` y `str`/`[]T` como campo de struct (la lista cerrada del anexo §3.1; `vec` en structs queda fuera y se cubre con `Vec<T>`). Antes de S2 queda pendiente el segfault del bootstrap C con `p->campo[i]` (anexo §3.4).
 
+**S1 hecha (2026-11-10), falta la revisión:** Copihue 0.45.0, rama `selfhost/s1`. Detalle en [DESIGN_SELFHOST_S1.md](DESIGN_SELFHOST_S1.md). Antes de S2 siguen pendientes el segfault de `p->campo[i]`, SEC-1 ([DESIGN_SECURITY.md](DESIGN_SECURITY.md)) y los hallazgos de [DESIGN_SELFHOST_S1.md](DESIGN_SELFHOST_S1.md) §7 que afecten al código del compilador en Copihue (un literal de struct como argumento y un campo struct pasado por valor generan código incorrecto sin error).
+
 ## 7. Referencias
 
 - [SELFHOST_S0.md](SELFHOST_S0.md) — fase S0: inventario de módulos, corpus de igualdad y huecos de S1.
+- [DESIGN_SELFHOST_S1.md](DESIGN_SELFHOST_S1.md) — fase S1: devolver un struct, devolver y guardar `str`/`[]T` (0.45.0).
 - [DESIGN_NATIVE.md](DESIGN_NATIVE.md) — ELF sin `nasm`/`ld` (M1–M6).
 - [DESIGN_NATIVE_X64.md](DESIGN_NATIVE_X64.md) — codificador x86-64.
 - [DESIGN_STRINGS.md](DESIGN_STRINGS.md), [DESIGN_SLICES.md](DESIGN_SLICES.md) — `str` / `[]T` y lo que aún no se puede devolver ni guardar en un struct.

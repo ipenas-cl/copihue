@@ -1,0 +1,10 @@
+// slice() of the address of a local is a view of this frame.
+fn f() -> []i64 {
+    let x: i64 = 5;
+    return slice(&x, 1);
+}
+
+fn main() -> i32 {
+    let s: []i64 = f();
+    return 0;
+}

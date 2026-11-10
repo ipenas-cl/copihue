@@ -1,0 +1,6 @@
+# Programs of the suite that use the hidden-pointer returns of 0.45.0. tests/sret/run.sh builds
+# each one natively (-O0, -O2, -c) and checks that its -S text assembles with nasm.
+tests/test_struct_return.lap
+tests/lang/struct_return.lap
+tests/lang/slice_return.lap
+tests/lang/struct_str.lap

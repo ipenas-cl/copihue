@@ -1,0 +1,4 @@
+tests/errors/sret_scalar.lap:8:12: error: return value: expected i64, found P; a struct is returned by value only from '-> P'
+      8 |     return p;
+        |            ^
+1 error, compilation failed

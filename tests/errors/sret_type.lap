@@ -1,0 +1,11 @@
+// A function that returns a struct needs a value of that struct.
+struct P { x: i64, y: i64 }
+
+fn f() -> P {
+    return 5;
+}
+
+fn main() -> i32 {
+    let p = f();
+    return 0;
+}

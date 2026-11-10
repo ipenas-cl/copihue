@@ -1,0 +1,10 @@
+// A naked function has no frame to keep the destination pointer in.
+struct P { x: i64, y: i64 }
+
+naked fn f() -> P {
+    asm("ret");
+}
+
+fn main() -> i32 {
+    return 0;
+}

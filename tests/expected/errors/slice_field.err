@@ -1,0 +1,25 @@
+tests/errors/slice_field.lap:6:23: error: volatile cannot apply to a slice
+      6 | struct Bad { volatile s: str, o: []Option }
+        |                       ^
+tests/errors/slice_field.lap:6:31: error: a slice element cannot be an enum
+      6 | struct Bad { volatile s: str, o: []Option }
+        |                               ^
+tests/errors/slice_field.lap:11:15: error: a slice is not a scalar; read .ptr or .len
+     11 |     let n = t.text + 1;
+        |               ^
+tests/errors/slice_field.lap:12:9: error: a slice must be declared as []u8
+     12 |     let x: i64 = t.text;
+        |         ^
+tests/errors/slice_field.lap:13:16: error: slice field 'len' is read-only
+     13 |     t.text.len = 3;
+        |                ^
+tests/errors/slice_field.lap:14:14: error: a slice is initialized from an array, a slice, or slice()
+     14 |     t.text = 5;
+        |              ^
+tests/errors/slice_field.lap:15:14: error: expected []u8, found [i64; 2]
+     15 |     t.text = nums;
+        |              ^
+tests/errors/slice_field.lap:16:20: error: slice has no field 'cap'
+     16 |     let c = t.text.cap;
+        |                    ^
+8 errors, compilation failed

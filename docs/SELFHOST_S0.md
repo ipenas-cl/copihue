@@ -119,6 +119,8 @@ Cada paso se compara contra el C con el artefacto que se indica. La propuesta in
 
 **Criterio:** el ejecutable que escribe el `copihue` autoalojado es idéntico byte a byte (`cmp`) al del bootstrap C de la misma versión, para cada programa y cada nivel.
 
+**En 0.45.0** la lista tiene **239** programas: se suman `tests/lang/struct_return.lap`, `tests/lang/slice_return.lap` y `tests/lang/struct_str.lap` (regenerada con `tools/selfhost/corpus-list.sh`; ningún programa salió). Las cifras de abajo son las de S0.
+
 **Cifras** (con `build/s18/copihue` = `gcc -O2 -Wall -Werror` del bootstrap): 245 candidatos − 6 del `SKIP` (servidores y clientes HTTP) − 3 que `--native` rechaza (`tests/lang/cpuid_carry.lap`, `tests/lang/ms64_call.lap`, `tests/lang/naked_param.lap`) = **236 programas** (198 de `tests/`, 38 de `examples/`), es decir **472 comparaciones** (236 × 2 niveles). Por directorio, los grupos grandes: `tests/lang` 77, `examples/lowlat` 18, `tests/types` 15, `tests/global` 10; el resto son los `tests/test_*.lap` sueltos y los directorios chicos.
 
 ### 2.2 Cómo se obtiene la lista
@@ -161,6 +163,8 @@ No se amplía el corpus en silencio. Fuera por ahora:
 ## 3. Huecos del §3.1 que abre S1
 
 ### 3.1 Qué se implementa en S1 (lista cerrada)
+
+**Entregado en 0.45.0** (2026-11-10, pendiente de revisión): los dos puntos, con la ABI propuesta aquí, en [DESIGN_SELFHOST_S1.md](DESIGN_SELFHOST_S1.md). La tabla queda como se escribió.
 
 | # | Hueco | Qué hace S1 | Por qué es imprescindible |
 |---|---|---|---|
@@ -209,11 +213,13 @@ Es un portado mecánico de 1.537 + 495 llamadas, no una función del lenguaje. `
 
 **Si el hueco 1 o el 2 se retrasara** (no es el plan): el estilo de respaldo es el que ya compila hoy, `struct Str { ptr: *u8, len: i64 }` definido por el programa, que sí se devuelve por valor (`tests/test_struct_return.lap`), a cambio de perder `==`, `[i]` comprobado y `print(s)` sobre ese tipo. S1 es comodidad y seguridad, no una condición de existencia del compilador en Copihue; está dicho aquí para que nadie crea lo contrario.
 
+**Corrección (0.45.0).** El párrafo anterior estaba mal: en 0.44.8 un struct **no** se devolvía por valor. `return p` de un struct local dejaba en `rax` la dirección de su slot en el frame, y `tests/test_struct_return.lap` imprimía `7` cuatro veces en Linux; su golden había guardado esa basura ([DESIGN_SECURITY.md](DESIGN_SECURITY.md) §2.7 punto 4). Desde 0.45.0 el struct se devuelve con el puntero oculto del enum (destino en `rdi`), y el golden dice 10, 20, 99 y 88. Con los dos huecos de S1 abiertos, el respaldo deja de hacer falta.
+
 ### 3.4 Hallazgos del sondeo (solo compilación)
 
 Se escribieron programas chicos en `build/s18/` (ignorado) y se compilaron con `-S`; **nada se ejecutó** (esta máquina es macOS y los ELF son de Linux). Los mensajes son los del compilador.
 
-Confirman los huecos (todos con `file:line:col: error:` y `1 error, compilation failed`):
+Confirman los huecos (todos con `file:line:col: error:` y `1 error, compilation failed`). Las dos primeras filas dejaron de ser error en 0.45.0 (S1):
 
 | Forma | Mensaje |
 |---|---|

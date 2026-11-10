@@ -1,0 +1,13 @@
+tests/errors/sret_slice_type.lap:5:12: error: expected []i64, found [u8; 2]
+      5 |     return gb;
+        |            ^
+tests/errors/sret_slice_type.lap:9:12: error: return value: expected []u8, found i64
+      9 |     return 7;
+        |            ^
+tests/errors/sret_slice_type.lap:13:12: error: expected []i64, found []u8
+     13 |     return s;
+        |            ^
+tests/errors/sret_slice_type.lap:17:18: error: return needs a '[]u8' value
+     17 |     if (n > 0) { return; }
+        |                  ^
+4 errors, compilation failed

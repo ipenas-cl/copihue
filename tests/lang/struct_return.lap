@@ -1,0 +1,203 @@
+// A struct returned by value (0.45.0): the caller passes the destination in rdi
+// and the callee copies the bytes there. Every value below is small and printed
+// on its own line, so the expected output can be checked by hand.
+
+struct P { x: i32, y: i32 }
+
+// Fields of several widths, with padding: a@0 b@2 c@4 d@8 e@16 f@24, 32 bytes.
+struct Rec { a: u8, b: i16, c: i32, d: i64, e: u8, f: i64 }
+
+struct Box { p: P, n: i64 }
+
+struct Six { a: i64, b: i64, c: i64, d: i64, e: i64, f: i64 }
+
+packed struct Tri { a: u8, b: u8, c: u8 }
+
+let g: P;
+
+fn mk(a: i32, b: i32) -> P {
+    let p: P;
+    p.x = a;
+    p.y = b;
+    return p;
+}
+
+fn lit(a: i32, b: i32) -> P {
+    return P { x: a, y: b };
+}
+
+fn wrap(a: i32, b: i32) -> P {
+    return mk(a, b);
+}
+
+fn same(p: P) -> P {
+    return p;
+}
+
+fn deref(q: *P) -> P {
+    return *q;
+}
+
+fn first(b: Box) -> P {
+    return b.p;
+}
+
+fn from_global() -> P {
+    return g;
+}
+
+fn pick(t: *P, i: i64) -> P {
+    return t[i];
+}
+
+fn add(a: P, b: P) -> P {
+    let r: P;
+    r.x = a.x + b.x;
+    r.y = a.y + b.y;
+    return r;
+}
+
+fn rec(a: u8, b: i16, c: i32, d: i64, e: u8, f: i64) -> Rec {
+    let r: Rec;
+    r.a = a;
+    r.b = b;
+    r.c = c;
+    r.d = d;
+    r.e = e;
+    r.f = f;
+    return r;
+}
+
+// Six arguments: five in rsi..r9 after the hidden pointer, the sixth on the stack.
+fn six(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64) -> Six {
+    let s: Six;
+    s.a = a;
+    s.b = b;
+    s.c = c;
+    s.d = d;
+    s.e = e;
+    s.f = f;
+    return s;
+}
+
+// (fib(n), fib(n + 1)) by recursion: every level returns through its caller's slot.
+fn fibp(n: i64) -> P {
+    if (n == 0) { return mk(0, 1); }
+    let q = fibp(n - 1);
+    return mk(q.y, q.x + q.y);
+}
+
+// Off the end without return: the destination is zeros.
+fn maybe(n: i32) -> P {
+    if (n > 0) { return mk(n, n); }
+}
+
+fn tri(a: u8, b: u8, c: u8) -> Tri {
+    let t: Tri;
+    t.a = a;
+    t.b = b;
+    t.c = c;
+    return t;
+}
+
+// Writes a large frame of other values over the stack the callees used.
+fn clobber(v: i64) -> i64 {
+    let junk: [i64; 64];
+    for i in 0..64 { junk[i] = v + i; }
+    return junk[63];
+}
+
+fn sum(p: P) -> i64 {
+    return p.x + p.y;
+}
+
+fn main() -> i32 {
+    let p1 = mk(10, 20);
+    let p2 = mk(99, 88);
+    print_int(p1.x); println("");
+    print_int(p1.y); println("");
+    print_int(p2.x); println("");
+    print_int(p2.y); println("");
+
+    // Used twice, and after another call has written over the stack.
+    let k: i64 = clobber(1000);
+    print_int(k); println("");
+    print_int(p1.x + p2.x); println("");
+    print_int(sum(p1) + sum(p1)); println("");
+
+    let a: P = lit(3, 4);
+    print_int(a.x); println("");
+    print_int(a.y); println("");
+    let w = wrap(5, 6);
+    print_int(w.x); println("");
+    print_int(w.y); println("");
+    let s = same(a);
+    a.x = 100;
+    print_int(s.x); println("");
+    let d = deref(&p2);
+    print_int(d.y); println("");
+
+    let b: Box;
+    b.p = mk(7, 8);
+    b.n = 9;
+    let f = first(b);
+    print_int(f.x); println("");
+    print_int(f.y); println("");
+    print_int(b.n); println("");
+
+    g = mk(11, 12);
+    let h = from_global();
+    print_int(h.x + h.y); println("");
+
+    let t: [P; 3];
+    t[0] = mk(1, 2);
+    t[1] = mk(3, 4);
+    t[2] = mk(5, 6);
+    let e = pick(&t[0], 2);
+    print_int(e.x); println("");
+    print_int(t[1].y); println("");
+
+    // Assigning to an existing struct, direct field read, and argument.
+    p1 = mk(21, 22);
+    print_int(p1.x); println("");
+    print_int(mk(31, 32).y); println("");
+    print_int(sum(mk(40, 2))); println("");
+    let n = add(add(mk(1, 1), mk(2, 2)), add(mk(3, 3), p1));
+    print_int(n.x); println("");
+    print_int(n.y); println("");
+
+    // d = 5 * 2^32 + 7: the upper and the lower half are printed apart.
+    let r = rec(200, -3, 70000, 21474836487, 7, -9);
+    print_int(r.a); println("");
+    print_int(r.b); println("");
+    print_int(r.c); println("");
+    print_int(r.d >> 32); println("");
+    print_int(r.d & 4294967295); println("");
+    print_int(r.e); println("");
+    print_int(r.f); println("");
+    print_int(sizeof(Rec)); println("");
+
+    let x = six(1, 2, 3, 4, 5, 6);
+    print_int(x.a * 100000 + x.b * 10000 + x.c * 1000 + x.d * 100 + x.e * 10 + x.f); println("");
+
+    let fp = fibp(10);
+    print_int(fp.x); println("");
+    print_int(fp.y); println("");
+
+    let z = maybe(0);
+    print_int(z.x); println("");
+    print_int(z.y); println("");
+    let m = maybe(4);
+    print_int(m.y); println("");
+
+    // A 3-byte record into the middle element: the neighbours keep their bytes.
+    let ts: [Tri; 3];
+    ts[0] = tri(1, 2, 3);
+    ts[2] = tri(7, 8, 9);
+    ts[1] = tri(4, 5, 6);
+    print_int(ts[0].c); println("");
+    print_int(ts[1].a); println("");
+    print_int(ts[1].c); println("");
+    print_int(ts[2].a); println("");
+    return 0;
+}

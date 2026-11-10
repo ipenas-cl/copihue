@@ -1,0 +1,260 @@
+// Flat kernel at 0x8000 for QEMU, loaded by tests/usermode/boot.lap (see tests/align/kernel.lap
+// for the mode switch). It runs, for real, the hidden-pointer returns of 0.45.0: a struct by
+// value (checks 1-23) and a slice (24-30). It reports on COM1: SRET when every check holds,
+// FAIL and the number of the first check that does not otherwise. The image has to stay
+// within the 16 sectors the boot sector reads.
+
+struct P { x: i32, y: i32 }
+struct Rec { a: u8, b: i16, c: i32, d: i64, e: u8, f: i64 }
+struct Box { p: P, n: i64 }
+struct Six { a: i64, b: i64, c: i64, d: i64, e: i64, f: i64 }
+packed struct Tri { a: u8, b: u8, c: u8 }
+
+let g: P;
+let bad: i64 = 0;
+
+data gdt {
+    dq 0;
+    dw 0;
+    dw 0;
+    db 0;
+    db 0x9A;
+    db 0x20;
+    db 0;
+    dw 0xFFFF;
+    dw 0;
+    db 0;
+    db 0x92;
+    db 0xCF;
+    db 0;
+}
+
+data gdtr {
+    dw 23;
+    dd gdt;
+}
+
+fn serial_putc(c: i64) -> i64 {
+    let tries = 0;
+    while ((inb(0x3FD) & 0x20) == 0 && tries < 1000) { tries = tries + 1; }
+    outb(0x3F8, c);
+    return 0;
+}
+
+fn check(n: i64, ok: i64) -> i64 {
+    if (ok == 0 && bad == 0) { bad = n; }
+    return 0;
+}
+
+fn mk(a: i32, b: i32) -> P {
+    let p: P;
+    p.x = a;
+    p.y = b;
+    return p;
+}
+
+fn lit(a: i32, b: i32) -> P { return P { x: a, y: b }; }
+fn wrap(a: i32, b: i32) -> P { return mk(a, b); }
+fn same(p: P) -> P { return p; }
+fn deref(q: *P) -> P { return *q; }
+fn first(b: Box) -> P { return b.p; }
+fn from_global() -> P { return g; }
+
+fn add(a: P, b: P) -> P {
+    let r: P;
+    r.x = a.x + b.x;
+    r.y = a.y + b.y;
+    return r;
+}
+
+fn rec(a: u8, b: i16, c: i32, d: i64, e: u8, f: i64) -> Rec {
+    let r: Rec;
+    r.a = a;
+    r.b = b;
+    r.c = c;
+    r.d = d;
+    r.e = e;
+    r.f = f;
+    return r;
+}
+
+fn six(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64) -> Six {
+    let s: Six;
+    s.a = a;
+    s.b = b;
+    s.c = c;
+    s.d = d;
+    s.e = e;
+    s.f = f;
+    return s;
+}
+
+fn fibp(n: i64) -> P {
+    if (n == 0) { return mk(0, 1); }
+    let q = fibp(n - 1);
+    return mk(q.y, q.x + q.y);
+}
+
+fn maybe(n: i32) -> P {
+    if (n > 0) { return mk(n, n); }
+}
+
+fn tri(a: u8, b: u8, c: u8) -> Tri {
+    let t: Tri;
+    t.a = a;
+    t.b = b;
+    t.c = c;
+    return t;
+}
+
+fn clobber(v: i64) -> i64 {
+    let junk: [i64; 64];
+    let i = 0;
+    while (i < 64) { junk[i] = v + i; i = i + 1; }
+    return junk[63];
+}
+
+fn sum(p: P) -> i64 { return p.x + p.y; }
+
+let gtab: [i64; 4] = [10, 20, 30, 40];
+
+fn palabra(i: i64) -> str {
+    if (i == 0) { return "cero"; }
+    return "muchos";
+}
+
+fn fword(s: str) -> str {
+    let i = 0;
+    while (i < s.len) {
+        if (s[i] == 32) { return s[0..i]; }
+        i = i + 1;
+    }
+    return s;
+}
+
+fn again(s: str) -> str { return fword(s); }
+fn tab() -> []i64 { return gtab; }
+fn mid(t: []i64) -> []i64 { return t[1..3]; }
+fn count(s: str) -> i64 { return s.len; }
+
+fn nothing(n: i64) -> str {
+    if (n > 0) { return "x"; }
+}
+
+fn kmain() -> i64 {
+    let p1 = mk(10, 20);
+    let p2 = mk(99, 88);
+    check(1, p1.x == 10 && p1.y == 20);
+    check(2, p2.x == 99 && p2.y == 88);
+    check(3, clobber(1000) == 1063);
+    check(4, p1.x + p2.x == 109);
+    check(5, sum(p1) + sum(p1) == 60);
+    let a: P = lit(3, 4);
+    check(6, a.x == 3 && a.y == 4);
+    let w = wrap(5, 6);
+    check(7, w.x == 5 && w.y == 6);
+    let s = same(a);
+    a.x = 100;
+    check(8, s.x == 3);
+    let d = deref(&p2);
+    check(9, d.y == 88);
+    let b: Box;
+    b.p = mk(7, 8);
+    b.n = 9;
+    let f = first(b);
+    check(10, f.x == 7 && f.y == 8 && b.n == 9);
+    g = mk(11, 12);
+    let h = from_global();
+    check(11, h.x + h.y == 23);
+    let t: [P; 3];
+    t[0] = mk(1, 2);
+    t[1] = mk(3, 4);
+    t[2] = mk(5, 6);
+    check(12, t[0].x == 1 && t[1].y == 4 && t[2].x == 5);
+    p1 = mk(21, 22);
+    check(13, p1.x == 21);
+    check(14, mk(31, 32).y == 32);
+    check(15, sum(mk(40, 2)) == 42);
+    let n = add(add(mk(1, 1), mk(2, 2)), add(mk(3, 3), p1));
+    check(16, n.x == 27 && n.y == 28);
+    let r = rec(200, -3, 70000, 21474836487, 7, -9);
+    check(17, r.a == 200 && r.b == -3 && r.c == 70000);
+    check(18, (r.d >> 32) == 5 && (r.d & 4294967295) == 7 && r.e == 7 && r.f == -9);
+    let x = six(1, 2, 3, 4, 5, 6);
+    check(19, x.a * 100000 + x.b * 10000 + x.c * 1000 + x.d * 100 + x.e * 10 + x.f == 123456);
+    let fp = fibp(10);
+    check(20, fp.x == 55 && fp.y == 89);
+    let z = maybe(0);
+    check(21, z.x == 0 && z.y == 0);
+    let m = maybe(4);
+    check(22, m.y == 4);
+    let ts: [Tri; 3];
+    ts[0] = tri(1, 2, 3);
+    ts[2] = tri(7, 8, 9);
+    ts[1] = tri(4, 5, 6);
+    check(23, ts[0].c == 3 && ts[1].a == 4 && ts[1].c == 6 && ts[2].a == 7);
+
+    {
+        let a: str = palabra(0);
+        check(24, a.len == 4 && a[0] == 99 && a[3] == 111);
+        let line: str = "hola mundo";
+        let w: str = again(line);
+        check(25, w.len == 4 && w[3] == 97 && w.ptr == line.ptr);
+        check(26, clobber(5) == 68 && a.len == 4 && w.len == 4);
+        w = palabra(1);
+        check(27, w.len == 6 && w[5] == 115);
+        check(28, count(palabra(0)) == 4 && palabra(1).len == 6 && palabra(0)[1] == 101);
+        let t: []i64 = tab();
+        let m: []i64 = mid(t);
+        check(29, t.len == 4 && t[3] == 40 && m.len == 2 && m[0] + m[1] == 50);
+        let z: str = nothing(0);
+        check(30, z.len == 0);
+    }
+
+    if (bad == 0) {
+        serial_putc(83);
+        serial_putc(82);
+        serial_putc(69);
+        serial_putc(84);
+    } else {
+        serial_putc(70);
+        serial_putc(65);
+        serial_putc(73);
+        serial_putc(76);
+        serial_putc(48 + bad / 10);
+        serial_putc(48 + bad % 10);
+    }
+    while (1) { hlt(); }
+    return 0;
+}
+
+bits 32 naked fn _start() {
+    cli();
+    asm("lgdt [gdtr]");
+    asm("mov ax, 0x10");
+    asm("mov ds, ax");
+    asm("mov es, ax");
+    asm("mov ss, ax");
+    asm("mov esp, 0x6000");
+    asm("cld");
+    asm("xor eax, eax");
+    asm("mov edi, 0x1000");
+    asm("mov ecx, 3072");
+    asm("rep stosd");
+    asm("mov dword [0x1000], 0x2007");
+    asm("mov dword [0x2000], 0x3007");
+    asm("mov dword [0x3000], 0x87");
+    asm("mov eax, cr4");
+    asm("or eax, 0x20");
+    asm("mov cr4, eax");
+    asm("mov eax, 0x1000");
+    asm("mov cr3, eax");
+    asm("mov ecx, 0xC0000080");
+    asm("rdmsr");
+    asm("or eax, 0x100");
+    asm("wrmsr");
+    asm("mov eax, cr0");
+    asm("or eax, 0x80000000");
+    asm("mov cr0, eax");
+    asm("jmp 0x08:kmain");
+}

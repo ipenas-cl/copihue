@@ -1,0 +1,7 @@
+tests/errors/sret_slice_mode.lap:5:10: error: a slice cannot be returned from a naked, interrupt, syscall, or bits 16/32 function
+      5 | naked fn f() -> str {
+        |          ^
+tests/errors/sret_slice_mode.lap:9:4: error: a slice element cannot be an enum
+      9 | fn g() -> []Option {
+        |    ^
+2 errors, compilation failed

@@ -1,0 +1,16 @@
+// A slice local that views a local array, directly, through a range, or
+// through another slice, is memory of this frame.
+fn f(n: i64) -> str {
+    let buf: [u8; 4] = [104, 111, 108, 97];
+    let s: str = buf;
+    let t: str = s[0..n];
+    let u: str;
+    u = t;
+    if (n > 2) { return u; }
+    return s;
+}
+
+fn main() -> i32 {
+    let w: str = f(3);
+    return 0;
+}

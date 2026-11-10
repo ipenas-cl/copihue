@@ -10,7 +10,7 @@
 
 A systems programming language with its own compiler, written in C with an x86-64 NASM back end. It produces Linux x86-64 ELF executables **with no libc and no runtime**, and it can also produce freestanding code for kernels and boot sectors. *Formerly Chronos.*
 
-Current version: **0.44.8** (`compiler/bootstrap-c/copihue.c`, `LANG_VERSION`). Release notes are in [CHANGELOG.md](CHANGELOG.md).
+Current version: **0.45.0** (`compiler/bootstrap-c/copihue.c`, `LANG_VERSION`). Release notes are in [CHANGELOG.md](CHANGELOG.md).
 
 > **Status: not production-ready.** It is a tested compiler for a small but real language. Memory safety is partial (checked slices and indexes, `own *T` moves) and there is no borrow checker: a `vec` slice can dangle after a push. Linux x86-64 only. The goal is a language that beats C++, Rust and OCaml; today it does not, and the numbers below say where it stands.
 
@@ -68,6 +68,7 @@ Two levels of syntax. The **easy level** lets the compiler decide: an omitted pa
 - Named integer constants: `const N = 8;` at module or function level, usable in `[T; N]` and in any expression, folded at compile time ([REFERENCE](docs/REFERENCE.md), Constants).
 - Global initializers: a constant integer expression (`let p: i64 = 0 - 1;`, `let m: u32 = 1 << 31;`, `let k: i64 = N * 4 + 2;`) is folded into `.data`; anything else is an error on the `let` ([REFERENCE](docs/REFERENCE.md), Initializers of globals).
 - Slices `[]T` with bounds-checked indexing in hosted code, `for x in s`, `unsafe { }`, and `str` as a `[]u8` ([DESIGN_SLICES](docs/DESIGN_SLICES.md), [DESIGN_STRINGS](docs/DESIGN_STRINGS.md)).
+- Structs and slices as values (0.45.0): `fn f() -> Point`, `-> str` and `-> []T` return the value through a destination the caller passes in `rdi` (the enum convention), and `str` / `[]T` can be struct fields (`struct Tok { kind: i64, text: str, line: i32 }`) with `.len`, checked `[i]`, `==`, assignment and whole-struct copies. Returning a view of the callee's own frame (a local array, a local `vec`, `&local`) is a compile error where the compiler can see it. Before 0.45.0 a returned struct was the address of the callee's dead frame. Details: [docs/DESIGN_SELFHOST_S1.md](docs/DESIGN_SELFHOST_S1.md).
 - Modules with `pub` and `name::item`, several files per command, `import`, and `-c` objects ([DESIGN_MODULES](docs/DESIGN_MODULES.md)).
 - Enums with data and exhaustive `match`, `Option<T>`, `Result<T, E>` and `?` ([DESIGN_ENUMS](docs/DESIGN_ENUMS.md), [DESIGN_ERRORS](docs/DESIGN_ERRORS.md)).
 - Generics by monomorphization and traits without vtables ([DESIGN_GENERICS](docs/DESIGN_GENERICS.md), [DESIGN_TRAITS](docs/DESIGN_TRAITS.md)).
@@ -154,11 +155,11 @@ Copihue is slower on recursive code (`fib`), on the matching engine, and on a gr
 
 - Borrow or lifetime checking, and generics over enums, slices, `vec` and `own *T`.
 - `+=`, `-=` and `++` on an element, a field or a dereference (only on variables); `getp()->x = v` (a call before `->`; `getp().x = v` works); `a + b` in a call argument or a `return` is still cut to the operands' width.
-- `str` is bytes only (no UTF-8, no heap strings); a `vec` cannot be returned, passed or stored in a struct.
+- `str` is bytes only (no UTF-8, no heap strings); a `vec` cannot be returned, passed or stored in a struct; a `str` cannot be an enum field or an array element; a returned or stored slice is a view with no lifetime check beyond the cases above.
 - Generic bodies in `-c` objects: the same monomorphized body emitted in two objects fails at `ld`.
 - The compiler does not emit GDT, page tables or the `STAR`/`LSTAR`/`EFER` writes; the kernel does.
 - Speed: recursion, the matching engine and `vec_push` against Rust (see above).
-- Self-hosting and other targets (ARM64) are not started. The self-hosting plan (phases S0–S5) was approved on 2026-11-05: [docs/DESIGN_SELFHOST.md](docs/DESIGN_SELFHOST.md). Phase S0 (module inventory, equality corpus, language gaps for S1) is written and waits for review: [docs/SELFHOST_S0.md](docs/SELFHOST_S0.md); no self-hosted code exists yet. `nasm` and `ld` are no longer needed for hosted programs and `-c` objects, but they still build programs with user assembly or `naked`/`interrupt`/`syscall` functions, `--freestanding -c`, `--flat` and `--boot`. The author's development machine (macOS) cannot run Linux ELF files, so running what the compiler writes is the CI's job ([docs/DESIGN_NATIVE.md](docs/DESIGN_NATIVE.md)).
+- Self-hosting and other targets (ARM64) are not started. The self-hosting plan (phases S0–S5) was approved on 2026-11-05: [docs/DESIGN_SELFHOST.md](docs/DESIGN_SELFHOST.md). Phase S0 (module inventory, equality corpus, language gaps for S1) is written: [docs/SELFHOST_S0.md](docs/SELFHOST_S0.md). Phase S1 (return a struct by value; return `str`/`[]T`; `str`/`[]T` as a struct field) is in 0.45.0 and waits for review: [docs/DESIGN_SELFHOST_S1.md](docs/DESIGN_SELFHOST_S1.md). No self-hosted code exists yet. `nasm` and `ld` are no longer needed for hosted programs and `-c` objects, but they still build programs with user assembly or `naked`/`interrupt`/`syscall` functions, `--freestanding -c`, `--flat` and `--boot`. The author's development machine (macOS) cannot run Linux ELF files, so running what the compiler writes is the CI's job ([docs/DESIGN_NATIVE.md](docs/DESIGN_NATIVE.md)).
 
 Plans: [ROADMAP.md](ROADMAP.md) and [docs/VISION.md](docs/VISION.md).
 

@@ -1,6 +1,6 @@
 Testing struct return values
-p1.x = 7
-p1.y = 7
-p2.x = 7
-p2.y = 7
+p1.x = 10
+p1.y = 20
+p2.x = 99
+p2.y = 88
 exit=0

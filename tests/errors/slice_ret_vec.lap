@@ -1,0 +1,12 @@
+// A view of a local vec: the vec frees its buffer when the function returns.
+fn f() -> []i64 {
+    let v: vec i64;
+    vec_push(v, 1);
+    let s: []i64 = v;
+    return s;
+}
+
+fn main() -> i32 {
+    let s: []i64 = f();
+    return 0;
+}

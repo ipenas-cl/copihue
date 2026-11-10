@@ -52,7 +52,7 @@ Ninguna de las dos formas es de tiempo constante, ni pretende serlo. El segundo 
 
 ### 2.4 ¿Un `*u8` o un `str` de retorno puede mezclar "hash", "bloqueado" y "falló"?
 
-**Con `*u8`, sí, y compila hoy.** La sonda `t9_ptr_cmp.lap` escribe el error de SSHole tal cual: una función `-> *u8` que devuelve `"*"` cuando falla, una entrada bloqueada `"*"` y `if (strcmp(got, stored) == 0)`. Compila sin aviso. También compilan `got == stored` (compara direcciones) y `got == n` con `n: i64` (comparar un puntero con un entero no es un error de tipos: "Not checked: ... comparisons as a type error", [REFERENCE.md](REFERENCE.md), Type checking). Un `str` no se puede devolver (`a slice cannot be returned`), así que ese camino hoy no existe.
+**Con `*u8`, sí, y compila hoy.** La sonda `t9_ptr_cmp.lap` escribe el error de SSHole tal cual: una función `-> *u8` que devuelve `"*"` cuando falla, una entrada bloqueada `"*"` y `if (strcmp(got, stored) == 0)`. Compila sin aviso. También compilan `got == stored` (compara direcciones) y `got == n` con `n: i64` (comparar un puntero con un entero no es un error de tipos: "Not checked: ... comparisons as a type error", [REFERENCE.md](REFERENCE.md), Type checking). Un `str` no se puede devolver (`a slice cannot be returned`), así que ese camino hoy no existe. **Desde 0.45.0 sí existe** (S1, [DESIGN_SELFHOST_S1.md](DESIGN_SELFHOST_S1.md)): una función `-> str` puede devolver `"*"` igual que la de `*u8`, y `got == stored` entre dos `str` compara los bytes, así que `"*" == "*"` es 1. Lo que lo evita son los enums de abajo, no el tipo `str`.
 
 **Con enums, no.** Los tipos que lo evitan ya existen:
 
@@ -106,6 +106,8 @@ Ninguno se corrigió aquí: este cambio es solo documentación.
 2. **`==` entre structs compara direcciones** (§2.6).
 3. **Un struct de otro tipo pasa como argumento** (§2.6).
 4. **`return p` de un struct local devuelve la dirección de su slot en el frame** (`lea rax, [rbp-8]`, `leave`, `ret` en `t13_newtype.lap`). La referencia dice que el tipo de retorno struct "is parsed and is not checked" ([REFERENCE.md](REFERENCE.md), Declarations). `tests/test_struct_return.lap` usa esa forma: llama `make_point(10, 20)` y `make_point(99, 88)`, y su salida esperada (`tests/expected/tests/test_struct_return.out`) guarda `p1.x = 7`, `p1.y = 7`, `p2.x = 7`, `p2.y = 7`. Esa salida no corresponde al programa: el golden guardó lo que quedó en la memoria. Esto contradice [SELFHOST_S0.md](SELFHOST_S0.md) §3.3, que da ese archivo como prueba de que un struct "sí se devuelve por valor" (estilo de respaldo `struct Str`). No se ejecutó aquí.
+
+   **Corregido en 0.45.0.** Ignacio lo confirmó ejecutando en Linux (`7`, `7`, `7`, `7` a `-O0` y a `-O2`). Un struct se devuelve con el puntero oculto del enum: el llamador pasa el destino en `rdi` y el callee copia los bytes ahí ([REFERENCE.md](REFERENCE.md), «Returning a struct»). El golden de `tests/test_struct_return.out` se reescribió a mano con 10, 20, 99 y 88. `return p` de un struct desde una función que no devuelve ese struct es error (`a struct is returned by value only from '-> P'`). `tests/sret/kernel.lap` corre los retornos en QEMU (`--flat`, `-O0` y `-O2`); con el compilador de 0.44.8, una versión recortada del mismo kernel imprime `FAIL01`.
 5. **El compilador cae a veces, no siempre**, con un `let x: []u8 = slice(...)` y un `==` sobre ese local dentro de un brazo bloque de `match`. La caída depende de la corrida (cambia con el nombre del archivo de salida y de una vez a otra), lo que apunta a una lectura de memoria no inicializada o fuera de rango. En 20 compilaciones por caso:
    - `t11_seg_a.lap` (20 líneas, dos `slice()` y `got == want`): a `-O0`, 11 segfault (139) y 9 bien; a `-O2`, 20 bien.
    - `t11_seg_e.lap` (un solo `slice()` y `got == got`): a `-O0`, 6 SIGBUS (138) y 14 bien; a `-O2`, 20 bien.
@@ -313,5 +315,5 @@ Por qué el error de SSHole no compila aquí:
 4. ¿SEC-1 (R2 y R3) puede ir entre S1 y S2, o se mete dentro de S1 aunque su lista esté cerrada?
 5. ¿Comparar un puntero con un entero que no es literal (`got == n`) debe ser error? No se contó cuántos programas rompería.
 6. Los hallazgos de §2.7 (`malloc` contra -1, `==` y argumentos struct, retorno de struct local, caída intermitente en `match`): ¿parches inmediatos, uno por uno, o se esperan a SEC-1?
-7. El retorno de struct por valor (§2.7 punto 4) es el estilo de respaldo de SELFHOST_S0 §3.3 y su golden guarda basura. ¿Se corrige el compilador o se retira ese respaldo del anexo de S0?
+7. El retorno de struct por valor (§2.7 punto 4) es el estilo de respaldo de SELFHOST_S0 §3.3 y su golden guarda basura. ¿Se corrige el compilador o se retira ese respaldo del anexo de S0? **Respondida: se corrigió el compilador en 0.45.0.**
 8. Un struct pasado a un parámetro `*T` sin `&` hoy compila (`tests/test_parser_pass.lap:44`). ¿R2 lo prohíbe también (rompe ese archivo del corpus de S0) o se deja como está?

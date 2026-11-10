@@ -1,0 +1,13 @@
+// `return;` in a function that returns a struct has nothing to copy.
+struct P { x: i64, y: i64 }
+
+fn f(n: i64) -> P {
+    if (n > 0) { return; }
+    let p: P;
+    return p;
+}
+
+fn main() -> i32 {
+    let p = f(1);
+    return 0;
+}

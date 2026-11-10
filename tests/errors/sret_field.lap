@@ -1,0 +1,20 @@
+// A field of the struct a call returns must exist, and a call that returns an
+// integer has no fields.
+struct P { x: i64, y: i64 }
+
+fn mk() -> P {
+    let p: P;
+    p.x = 1;
+    p.y = 2;
+    return p;
+}
+
+fn n() -> i64 {
+    return 3;
+}
+
+fn main() -> i32 {
+    let a = mk().z;
+    let b = n().x;
+    return 0;
+}

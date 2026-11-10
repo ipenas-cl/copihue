@@ -1,0 +1,14 @@
+// A struct local used as the value of an integer return would be the address of
+// this frame, which is gone after the return.
+struct P { x: i64, y: i64 }
+
+fn f() -> i64 {
+    let p: P;
+    p.x = 1;
+    return p;
+}
+
+fn main() -> i32 {
+    let n = f();
+    return 0;
+}

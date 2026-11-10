@@ -1,0 +1,7 @@
+tests/errors/sret_slice_view.lap:9:25: error: 'u' views memory of this function (a local array, a local vec, or the address of a local) and cannot be returned
+      9 |     if (n > 2) { return u; }
+        |                         ^
+tests/errors/sret_slice_view.lap:10:12: error: 's' views memory of this function (a local array, a local vec, or the address of a local) and cannot be returned
+     10 |     return s;
+        |            ^
+2 errors, compilation failed

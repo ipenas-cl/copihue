@@ -1,0 +1,4 @@
+tests/errors/sret_empty.lap:5:18: error: return needs a 'P' value
+      5 |     if (n > 0) { return; }
+        |                  ^
+1 error, compilation failed

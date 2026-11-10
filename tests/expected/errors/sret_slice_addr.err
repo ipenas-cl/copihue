@@ -1,0 +1,4 @@
+tests/errors/sret_slice_addr.lap:4:12: error: this slice views memory of this function (a local array, a local vec, or the address of a local) and cannot be returned
+      4 |     return slice(&x, 1);
+        |            ^
+1 error, compilation failed

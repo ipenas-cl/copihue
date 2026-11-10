@@ -1,0 +1,4 @@
+tests/errors/sret_other.lap:9:12: error: return value: expected P, found Q
+      9 |     return q;
+        |            ^
+1 error, compilation failed

@@ -1,0 +1,160 @@
+// Flat kernel at 0x8000 for QEMU, loaded by tests/usermode/boot.lap (see tests/align/kernel.lap
+// for the mode switch). It runs, for real, `str` and `[]T` as struct fields (0.45.0): stores,
+// reads, ==, copies, returns, pointers, globals, arrays. It reports on COM1: SRET when every
+// check holds, FAIL and the number of the first check that does not otherwise.
+
+struct Tok { kind: i64, text: str, line: i32 }
+struct Pair { a: []i64, b: str }
+packed struct Pk { tag: u8, s: str }
+struct List { items: []Tok }
+
+let bad: i64 = 0;
+let gtok: Tok;
+let gtoks: [Tok; 2];
+let gnums: [i64; 3] = [7, 8, 9];
+
+data gdt {
+    dq 0;
+    dw 0;
+    dw 0;
+    db 0;
+    db 0x9A;
+    db 0x20;
+    db 0;
+    dw 0xFFFF;
+    dw 0;
+    db 0;
+    db 0x92;
+    db 0xCF;
+    db 0;
+}
+
+data gdtr {
+    dw 23;
+    dd gdt;
+}
+
+fn serial_putc(c: i64) -> i64 {
+    let tries = 0;
+    while ((inb(0x3FD) & 0x20) == 0 && tries < 1000) { tries = tries + 1; }
+    outb(0x3F8, c);
+    return 0;
+}
+
+fn check(n: i64, ok: i64) -> i64 {
+    if (ok == 0 && bad == 0) { bad = n; }
+    return 0;
+}
+
+fn mk(kind: i64, text: str, line: i32) -> Tok {
+    return Tok { kind: kind, text: text, line: line };
+}
+
+fn text_of(t: Tok) -> str { return t.text; }
+fn tlen(t: *Tok) -> i64 { return t.text.len; }
+fn count(s: str) -> i64 { return s.len; }
+
+fn same_text(a: Tok, b: Tok) -> i64 {
+    if (a.text == b.text) { return 1; }
+    return 0;
+}
+
+fn kmain() -> i64 {
+    let src: str = "let x = 42";
+    let t: Tok;
+    t.kind = 1;
+    t.text = src[0..3];
+    t.line = 7;
+    check(1, t.text.len == 3 && t.text[1] == 101 && t.line == 7);
+    check(2, sizeof(Tok) == 32 && offsetof(Tok, line) == 24 && sizeof(Pk) == 17);
+    let x: str = src[4..5];
+    let u = mk(2, x, 9);
+    let v: Tok = u;
+    v.text = src[8..10];
+    check(3, u.text.len == 1 && u.text[0] == 120 && v.text.len == 2 && v.text[0] == 52);
+    let ft: str = "42";
+    check(4, v.text == ft);
+    check(5, u.text != v.text);
+    check(6, same_text(u, v) == 0 && same_text(v, v) == 1);
+    let w: str = text_of(v);
+    check(7, count(v.text) == 2 && w.len == 2 && w[1] == 50);
+    let p: *Tok = &v;
+    p.text = src[0..3];
+    check(8, tlen(p) == 3 && v.text[2] == 116);
+    gtok.text = src[4..5];
+    gtoks[1].text = src[8..10];
+    check(9, gtok.text[0] == 120 && gtoks[1].text[1] == 50);
+    let pr: Pair;
+    pr.a = gnums;
+    pr.a[0] = 70;
+    pr.b = "hola";
+    check(10, pr.a.len == 3 && pr.a[2] == 9 && gnums[0] == 70 && pr.b.len == 4);
+    let q = Tok { kind: 5, text: ft, line: 1 };
+    let k: Pk;
+    k.tag = 1;
+    k.s = ft;
+    check(11, q.text == ft && k.s == q.text && k.tag == 1);
+    let sum = 0;
+    for c in v.text { sum = sum + c; }
+    check(12, sum == 325);
+    let buf: [u8; 3];
+    buf[0] = 97;
+    buf[1] = 98;
+    buf[2] = 99;
+    let bs: str = buf;
+    let m: Tok;
+    m.text = bs;
+    m.text[0] = 122;
+    check(13, buf[0] == 122 && bs[0] == 122);
+    let l: List;
+    l.items = gtoks;
+    l.items[0].kind = 4;
+    check(14, l.items[1].text.len == 2 && gtoks[0].kind == 4);
+
+    if (bad == 0) {
+        serial_putc(83);
+        serial_putc(82);
+        serial_putc(69);
+        serial_putc(84);
+    } else {
+        serial_putc(70);
+        serial_putc(65);
+        serial_putc(73);
+        serial_putc(76);
+        serial_putc(48 + bad / 10);
+        serial_putc(48 + bad % 10);
+    }
+    while (1) { hlt(); }
+    return 0;
+}
+
+bits 32 naked fn _start() {
+    cli();
+    asm("lgdt [gdtr]");
+    asm("mov ax, 0x10");
+    asm("mov ds, ax");
+    asm("mov es, ax");
+    asm("mov ss, ax");
+    asm("mov esp, 0x6000");
+    asm("cld");
+    asm("xor eax, eax");
+    asm("mov edi, 0x1000");
+    asm("mov ecx, 3072");
+    asm("rep stosd");
+    asm("mov dword [0x1000], 0x2007");
+    asm("mov dword [0x2000], 0x3007");
+    asm("mov dword [0x3000], 0x87");
+    asm("mov eax, cr4");
+    asm("or eax, 0x20");
+    asm("mov cr4, eax");
+    asm("mov eax, 0x1000");
+    asm("mov cr3, eax");
+    asm("mov ecx, 0xC0000080");
+    asm("rdmsr");
+    asm("or eax, 0x100");
+    asm("wrmsr");
+    asm("mov eax, cr0");
+    asm("or eax, 0x80000000");
+    asm("mov cr0, eax");
+    asm("jmp 0x08:kmain");
+}
