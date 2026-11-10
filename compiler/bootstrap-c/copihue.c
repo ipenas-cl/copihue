@@ -12217,6 +12217,58 @@ static void gen_struct_literal_at(Codegen* cg, AstNode* n, int base) {
     }
 }
 
+// `let a: [T; N] = [e0, e1, ...]` into the local array `sym` (0.45.1). Each
+// element is stored at the stride a[i] reads with and at its own width. Before,
+// every element was a qword at i*8: b[1] of a [u8; 3] read a byte of the first
+// one. A struct element is built (literal) or copied, exactly its size. An
+// array of 8-byte elements keeps the instruction text it had.
+static void gen_array_literal_into(Codegen* cg, AstNode* lit, Symbol* sym) {
+    const char* et = sym->type_name;
+    int is_st = 0;
+    int el = elem_layout(cg, et, &is_st);
+    StructType* est = is_st ? typetab_lookup(cg->types, (char*)et) : NULL;
+    if (sym->array_len > 0 && lit->child_count > sym->array_len) {
+        diag_error(lit->line, lit->col, "%d values for an array of %d elements", lit->child_count, sym->array_len);
+        return;
+    }
+    emit(cg, "    ; array literal\n");
+    for (int i = 0; i < lit->child_count; i++) {
+        AstNode* e = lit->children[i];
+        int off = sym->offset + i * el;
+        if (est) {
+            const char* vt = e->type == AST_STRUCT_LITERAL ? e->struct_type : struct_value_type(cg, e);
+            if (!vt || strcmp(vt, est->name)) {
+                char found[160];
+                if (vt) snprintf(found, sizeof found, "%s", vt);
+                else found_spelling(cg, e, found, (int)sizeof found);
+                diag_error(e->line, e->col, "element %d: expected %s, found %s", i, est->name, found);
+                continue;
+            }
+            if (e->type == AST_STRUCT_LITERAL) {
+                gen_struct_literal_at(cg, e, off);
+                continue;
+            }
+            if (!gen_struct_value_addr(cg, e)) {
+                diag_error(e->line, e->col, "cannot copy this struct value");
+                continue;
+            }
+            emit(cg, "    mov rbx, rax\n");
+            emit(cg, "    lea rcx, [rbp%+d]\n", off);
+            emit_copy_mem(cg, "rcx", "rbx", est->size);
+            continue;
+        }
+        gen_expr(cg, e);
+        if (el >= 8) {
+            emit(cg, "    mov [rbp%d], rax\n", off);
+        } else {
+            char mem[64];
+            snprintf(mem, sizeof mem, "rbp%+d", off);
+            emit_sized_store_mark(cg, mem, el, 0, 0);
+        }
+    }
+    emit(cg, "    lea rax, [rbp%d]\n", sym->offset);
+}
+
 // Offset of `field` in the struct that `ptr` (an identifier of type *Struct)
 // points to, for ptr->field. Reports an error and returns -1 if unresolved.
 static int deref_field_offset(Codegen* cg, AstNode* ptr, const char* field, AstNode* at) {
@@ -15291,6 +15343,15 @@ void gen_expr(Codegen* cg, AstNode* n) {
         }
         gen_builtin_call(cg, n);
     } else if (n->type == AST_ARRAY_LITERAL) {
+        int into_let = g_lit_let;
+        g_lit_let = 0;
+        if (!into_let) {
+            // 0.45.1: the elements went to the slots of the last local declared,
+            // whatever it was.
+            diag_error(n->line, n->col, "an array literal is a value only in 'let a: [T; N] = [...]'; declare the array first");
+            emit(cg, "    xor rax, rax\n");
+            return;
+        }
         emit(cg, "    ; array literal\n");
         if (cg->symtab && cg->symtab->count > 0) {
             Symbol* sym = &cg->symtab->symbols[cg->symtab->count - 1];
@@ -19529,7 +19590,10 @@ void gen_stmt(Codegen* cg, AstNode* n) {
 
             // If there's an initializer, generate it
             if (n->child_count > 0) {
-                gen_expr(cg, n->children[0]);
+                if (n->children[0]->type == AST_ARRAY_LITERAL)
+                    gen_array_literal_into(cg, n->children[0], &cg->symtab->symbols[cg->symtab->count - 1]);
+                else
+                    gen_expr(cg, n->children[0]);
             }
             return;
         }
@@ -19707,7 +19771,10 @@ void gen_stmt(Codegen* cg, AstNode* n) {
                 o2_hosted() && can_place(cg, n->children[0], rr)) {
                 place_in(cg, n->children[0], rr);
             } else {
+                // `let a = [1, 2, 3]`: an untyped array of i64, built in a.
+                if (n->children[0]->type == AST_ARRAY_LITERAL) g_lit_let = 1;
                 gen_expr(cg, n->children[0]);
+                g_lit_let = 0;
                 if (n->children[0]->type != AST_ARRAY_LITERAL) {
                     if (!sym->is_pointer && !sym->is_array)
                         emit_store_trunc(cg, sym->type_name, n->children[0]);

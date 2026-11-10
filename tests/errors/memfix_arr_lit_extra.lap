@@ -1,0 +1,10 @@
+// More values than elements (0.45.1). Before, the third value was a qword
+// stored past the end of the array, over the local declared before it.
+fn main() -> i32 {
+    let keep: i64 = 77;
+    let s: [u8; 2] = [1, 2, 3];
+    take(keep);
+    return 0;
+}
+
+fn take(v: i64) -> i64 { return v; }
