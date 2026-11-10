@@ -106,7 +106,13 @@ Ninguno se corrigió en esta sesión (solo documentación).
 2. **`==` entre structs compara direcciones** (§2.6).
 3. **Un struct de otro tipo pasa como argumento** (§2.6).
 4. **`return p` de un struct local devuelve la dirección de su slot en el frame** (`lea rax, [rbp-8]`, `leave`, `ret` en `t13_newtype.lap`). La referencia dice que el tipo de retorno struct "is parsed and is not checked" ([REFERENCE.md](REFERENCE.md), Declarations). `tests/test_struct_return.lap` usa esa forma: llama `make_point(10, 20)` y `make_point(99, 88)`, y su salida esperada (`tests/expected/tests/test_struct_return.out`) guarda `p1.x = 7`, `p1.y = 7`, `p2.x = 7`, `p2.y = 7`. Esa salida no corresponde al programa: el golden guardó lo que quedó en la memoria. Esto contradice [SELFHOST_S0.md](SELFHOST_S0.md) §3.3, que da ese archivo como prueba de que un struct "sí se devuelve por valor" (estilo de respaldo `struct Str`). No se ejecutó aquí.
-5. **El compilador cae (segfault) a `-O0`** con dos `let x: []u8 = slice(...)` y un `==` entre ellos dentro de un brazo bloque de `match` (`t11_seg_a.lap`, 20 líneas). A `-O2` compila. Sin el segundo `slice()` (`t11_seg_e.lap`) compila a ambos niveles. No se buscó la causa.
+5. **El compilador cae a veces, no siempre**, con un `let x: []u8 = slice(...)` y un `==` sobre ese local dentro de un brazo bloque de `match`. La caída depende de la corrida (cambia con el nombre del archivo de salida y de una vez a otra), lo que apunta a una lectura de memoria no inicializada o fuera de rango. En 20 compilaciones por caso:
+   - `t11_seg_a.lap` (20 líneas, dos `slice()` y `got == want`): a `-O0`, 11 segfault (139) y 9 bien; a `-O2`, 20 bien.
+   - `t11_seg_e.lap` (un solo `slice()` y `got == got`): a `-O0`, 6 SIGBUS (138) y 14 bien; a `-O2`, 20 bien.
+   - `t10_today.lap` (una versión anterior de `t12_today.lap` que además pasa un literal a un parámetro `str`, cosa que el compilador rechaza en la línea 39): a `-O0`, 20 segfault; a `-O2`, 11 segfault y 9 veces el mensaje correcto `expected []u8, found *u8`. O sea, `-O2` tampoco está libre.
+   - Sin `match` (`t11_seg_c.lap`, lo mismo en un `if`), sin `==` (`t11_seg_b.lap`) o con `==` sobre parámetros `str` (`t11_seg_d.lap`): 20 de 20 bien a ambos niveles.
+
+   No se buscó la causa: esta sesión no podía correr el bootstrap con AddressSanitizer. No se sabe si tiene relación con el segfault de `p->campo[i]` de [SELFHOST_S0.md](SELFHOST_S0.md) §3.4.
 6. **Un límite interno sin su propio error:** la bajada de `==` sobre `str` registra hasta 128 nombres por función (`copihue.c:20269`). Con 130 locales `str`, comparar el 130.° da `a slice is not a scalar; read .ptr or .len` (`t17_many_str.lap`), que no dice cuál es el límite. Es un error, no un fallo silencioso, pero el mensaje engaña (ver R5).
 
 Comprobado y descartado: con 13 comparaciones de `str` en una sola sentencia (tope de 24 sentencias izadas, `copihue.c:20202`) la sentencia se vuelve a procesar y las 13 quedan bajadas (13 trampas de índice en `t16_many_cmp.lap`). No es un hallazgo.
@@ -139,10 +145,14 @@ Recuento usado abajo: una copia instrumentada del bootstrap, solo en `build/s19/
 - **Falta:** cerrar los dos agujeros de structs. `h == k` entre structs compila y compara direcciones; un struct de otro tipo pasa como argumento.
 - **Cómo, en el bootstrap C:**
   - En `gen_expr`, un `AST_COMPARE` cuyo operando es un struct (local, global o campo; no un arreglo) da `a struct is not a scalar; compare the fields`, con el mismo estilo que `an enum is not a scalar; match it` (`copihue.c:14069`). `&h == &k` sigue valiendo: es comparar punteros, y se escribe a propósito.
-  - En `check_types` (`copihue.c:6221`), un destino struct exige el mismo struct, como ya se hace con enums dos líneas antes: `argument 1 of 'f': expected Hash, found Locked`, como ya hace con enums.
+  - En `check_types` (`copihue.c:6221`), un destino struct exige el mismo struct, como ya se hace con enums unas líneas antes: `argument 1 of 'f': expected Hash, found Locked`.
   - En el compilador en Copihue, la misma regla vive en el módulo de chequeo que S3 porta; la igualdad con el C cubre los `.err` de las pruebas de error.
 - **Fácil:** modelar los estados con un enum; el compilador impide mezclarlos. **Explícito:** comparar los campos uno por uno, o comparar direcciones con `&`.
-- **Rompe:** `==` entre structs, 0 programas (recuento instrumentado). El chequeo de argumentos struct no se contó; habría que contarlo con la misma técnica antes de implementarlo.
+- **Rompe:** `==` entre structs, 0 programas (recuento instrumentado). Para el chequeo de structs se marcó, en la misma copia instrumentada, cada vez que `check_types` vuelve con un struct de un lado y otro tipo del otro. En los 571 archivos salen 2 marcas:
+  - `tests/errors/generic_op.lap:4`, un `return a + b` con destino `Point`. Es una prueba de error que ya falla por otra razón.
+  - `tests/test_parser_pass.lap:44`, `read_token(parser)` con `parser: Parser` y el parámetro `p: *Parser`. Pasa porque un struct usado como valor es su dirección (§2.6). Está en el corpus de S0 (`tools/selfhost/corpus.txt`).
+
+  Con la regla tal como se propone (un destino **struct** exige el mismo struct) se rompen 0 programas. Si además se prohíbe que un struct pase a un parámetro puntero sin `&`, se rompe 1, `test_parser_pass.lap`, que habría que escribir `read_token(&parser)` (pregunta abierta 8).
 - **Fase:** corte aparte, **después de S1 y antes de S2** (lo llamo SEC-1 abajo). Así el primer módulo del compilador en Copihue (S2) ya se escribe con la regla activa.
 
 ### R3. Un `Result` no usado es error de compilación
@@ -155,7 +165,7 @@ Recuento usado abajo: una copia instrumentada del bootstrap, solo en `build/s19/
   - (a) Solo los de forma `Ok(T)` / `Err(E)`, con la misma prueba estructural que ya usa `?` (no mira el nombre `Result`, [DESIGN_ERRORS.md](DESIGN_ERRORS.md)).
   - (b) Cualquier enum devuelto. Un enum devuelto es casi siempre una decisión; un `Option` descartado a propósito se escribe con `let _`.
   - Recomiendo (b): una regla más simple y sin excepciones por forma. Las dos rompen 0 programas del corpus.
-- **Descarte explícito:** `let _ = check(5);`. Hoy `let _` es un local común llamado `_` (un segundo `let _` en el mismo bloque es `redeclaration of '_'`, `t15_let_underscore.lap`). La propuesta: `let _ = e;` evalúa `e`, no crea nombre y se puede repetir. `_` ya es el comodín de `match`, así que encaja con el lenguaje. El corpus no usa `_` como nombre de variable (`grep` de `let _` y `_ =`: 0). La otra forma posible es `_ = check(5);`: hoy es `assignment to undeclared variable '_'` (`u1_result_enum_err.lap`), así que esa sintaxis está libre y no rompería nada. Recomiendo `let _`, que se lee como una declaración y no como una asignación.
+- **Descarte explícito:** `let _ = check(5);`. Hoy `let _` es un local común llamado `_` (un segundo `let _` en el mismo bloque es `redeclaration of '_'`, `t15_let_underscore.lap`). La propuesta: `let _ = e;` evalúa `e`, no crea nombre y se puede repetir. `_` ya es el comodín de `match`, así que encaja con el lenguaje. El corpus no usa `_` como nombre de variable (`grep` de `let _` y `_ =`: 0). La otra forma posible es `_ = check(5);`: hoy es `assignment to undeclared variable '_'` (`t12_underscore_assign.lap`, sin otros errores), así que esa sintaxis está libre y no rompería nada. Recomiendo `let _`, que se lee como una declaración y no como una asignación.
 - **Fácil:** el resultado hay que usarlo; si no, no compila. **Explícito:** `let _ =` deja constancia de que se ignoró a propósito.
 - **Rompe:** 0 programas de `tests/` y `examples/` (recuento instrumentado y `grep`). Cambia una frase de REFERENCE ("A discarded `give();` allocates a temporary").
 - **Fase:** SEC-1, con R2.
@@ -302,5 +312,6 @@ Por qué el error de SSHole no compila aquí:
 3. R3: ¿todo enum devuelto (recomendado) o solo los de forma `Ok`/`Err`? ¿Se agrega después un aviso por local `let r = f()` nunca leído?
 4. ¿SEC-1 (R2 y R3) puede ir entre S1 y S2, o se mete dentro de S1 aunque su lista esté cerrada?
 5. ¿Comparar un puntero con un entero que no es literal (`got == n`) debe ser error? No se contó cuántos programas rompería.
-6. Los hallazgos de §2.7 (`malloc` contra -1, `==` y argumentos struct, retorno de struct local, segfault en `match`): ¿parches inmediatos, uno por uno, o se esperan a SEC-1?
+6. Los hallazgos de §2.7 (`malloc` contra -1, `==` y argumentos struct, retorno de struct local, caída intermitente en `match`): ¿parches inmediatos, uno por uno, o se esperan a SEC-1?
 7. El retorno de struct por valor (§2.7 punto 4) es el estilo de respaldo de SELFHOST_S0 §3.3 y su golden guarda basura. ¿Se corrige el compilador o se retira ese respaldo del anexo de S0?
+8. Un struct pasado a un parámetro `*T` sin `&` hoy compila (`tests/test_parser_pass.lap:44`). ¿R2 lo prohíbe también (rompe ese archivo del corpus de S0) o se deja como está?
