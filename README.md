@@ -10,7 +10,7 @@
 
 A systems programming language with its own compiler, written in C with an x86-64 NASM back end. It produces Linux x86-64 ELF executables **with no libc and no runtime**, and it can also produce freestanding code for kernels and boot sectors. *Formerly Chronos.*
 
-Current version: **0.45.0** (`compiler/bootstrap-c/copihue.c`, `LANG_VERSION`). Release notes are in [CHANGELOG.md](CHANGELOG.md).
+Current version: **0.45.1** (`compiler/bootstrap-c/copihue.c`, `LANG_VERSION`). Release notes are in [CHANGELOG.md](CHANGELOG.md).
 
 > **Status: not production-ready.** It is a tested compiler for a small but real language. Memory safety is partial (checked slices and indexes, `own *T` moves) and there is no borrow checker: a `vec` slice can dangle after a push. Linux x86-64 only. The goal is a language that beats C++, Rust and OCaml; today it does not, and the numbers below say where it stands.
 
@@ -69,6 +69,7 @@ Two levels of syntax. The **easy level** lets the compiler decide: an omitted pa
 - Global initializers: a constant integer expression (`let p: i64 = 0 - 1;`, `let m: u32 = 1 << 31;`, `let k: i64 = N * 4 + 2;`) is folded into `.data`; anything else is an error on the `let` ([REFERENCE](docs/REFERENCE.md), Initializers of globals).
 - Slices `[]T` with bounds-checked indexing in hosted code, `for x in s`, `unsafe { }`, and `str` as a `[]u8` ([DESIGN_SLICES](docs/DESIGN_SLICES.md), [DESIGN_STRINGS](docs/DESIGN_STRINGS.md)).
 - Structs and slices as values (0.45.0): `fn f() -> Point`, `-> str` and `-> []T` return the value through a destination the caller passes in `rdi` (the enum convention), and `str` / `[]T` can be struct fields (`struct Tok { kind: i64, text: str, line: i32 }`) with `.len`, checked `[i]`, `==`, assignment and whole-struct copies. Returning a view of the callee's own frame (a local array, a local `vec`, `&local`) is a compile error where the compiler can see it. Before 0.45.0 a returned struct was the address of the callee's dead frame. Details: [docs/DESIGN_SELFHOST_S1.md](docs/DESIGN_SELFHOST_S1.md).
+- No silent memory corruption from struct arguments and local arrays (0.45.1): a struct argument is passed by the address of its bytes in every form (a literal is built in a temporary of the caller, not over its last local; a field, a global, `*q`, `q->a` no longer pass their first 8 bytes as the address); `let a: [u8; 3] = [97, 98, 99]` stores each element at its own width; `&a[i]` of a local array is checked against its length and steps by the element size; `p->f[i]` reads the element (it crashed the compiler). The forms that are not supported are compile errors that say what to write instead. See the [reference](docs/REFERENCE.md#passing-a-struct) and [local arrays](docs/REFERENCE.md#local-arrays-and-ai).
 - Modules with `pub` and `name::item`, several files per command, `import`, and `-c` objects ([DESIGN_MODULES](docs/DESIGN_MODULES.md)).
 - Enums with data and exhaustive `match`, `Option<T>`, `Result<T, E>` and `?` ([DESIGN_ENUMS](docs/DESIGN_ENUMS.md), [DESIGN_ERRORS](docs/DESIGN_ERRORS.md)).
 - Generics by monomorphization and traits without vtables ([DESIGN_GENERICS](docs/DESIGN_GENERICS.md), [DESIGN_TRAITS](docs/DESIGN_TRAITS.md)).
