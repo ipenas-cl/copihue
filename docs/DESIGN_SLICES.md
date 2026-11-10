@@ -1,5 +1,7 @@
 # Slices y nivel fácil (v0.34.0)
 
+**Corte 0.45.0.** Un slice se devuelve (`-> []T`, con el puntero oculto del enum) y es campo de struct (16 bytes, alineado a 8). Lo devuelto es una vista: devolver una vista del frame del callee es error donde se detecta. El detalle está en [`DESIGN_SELFHOST_S1.md`](DESIGN_SELFHOST_S1.md).
+
 **Corte 0.43.0.** `str` es este `[]u8`. El detalle está en [`DESIGN_STRINGS.md`](DESIGN_STRINGS.md).
 
 El nivel fácil es el que decide el compilador. El nivel explícito es el que decide quien escribe. Un slice es un puntero y un largo, no un tercer array. `[T; N]`, el decaimiento a `*T` y la comprobación de un array local en hosted no cambian. Indexar un puntero sigue sin comprobación.
@@ -15,7 +17,7 @@ let n: i64 = s.len;          // 4
 let p: *i64 = s.ptr;         // el puntero, sin largo
 ```
 
-- `[]T` se escribe con corchetes vacíos. `[T; N]` sigue siendo el array. Un elemento que es un slice es `a slice cannot be an array element`. Un campo que es un slice es `a slice cannot be a struct field`. Un `-> []T` es `a slice cannot be returned`.
+- `[]T` se escribe con corchetes vacíos. `[T; N]` sigue siendo el array. Un elemento que es un slice es `a slice cannot be an array element`. Desde 0.45.0 un campo puede ser un slice y una función puede devolverlo (antes: `a slice cannot be a struct field` y `a slice cannot be returned`).
 - En `bits 16` y `bits 32` es `[]T is a 64-bit value`.
 - `s.ptr` es `*T` y `s.len` es `i64`. Los dos se leen. Asignarlos es `slice field 'ptr' is read-only` (o `'len'`).
 - `let s: []T = arr` convierte un `[T; N]` local o global del mismo elemento. Otro slice se copia (puntero y largo). `let s: []T = slice(p, n)` lo arma desde un `*T` y un largo: el puntero no se comprueba. Un literal negativo es `negative slice length`. En hosted, y con `--checked`, un largo negativo que no es literal escribe `negative slice length` y sale con código 1. En `--freestanding`, `--flat` y `--boot` sin `--checked` ese largo se guarda tal cual.
@@ -53,4 +55,4 @@ for i in 0..4 { t = t + a[i]; }
 
 ## Qué no entra
 
-No hay capacidad, ni `append`, ni slice de slice como valor anidado en un struct, ni devolver un slice, ni comprobación de un puntero que no sea un slice. El costo de la comprobación se mide fuera de `make test`, en `bench/slice/`: el mismo `while` con `s[i]` y con `s.ptr[i]`, en rangos.
+No hay capacidad, ni `append`, ni slice de slice (`[][]T`), ni comprobación de un puntero que no sea un slice, ni comprobación de que una vista siga viva (salvo los casos de devolver una vista del frame, [`DESIGN_SELFHOST_S1.md`](DESIGN_SELFHOST_S1.md) §3). El costo de la comprobación se mide fuera de `make test`, en `bench/slice/`: el mismo `while` con `s[i]` y con `s.ptr[i]`, en rangos.

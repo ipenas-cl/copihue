@@ -52,7 +52,7 @@ Ninguna de las dos formas es de tiempo constante, ni pretende serlo. El segundo 
 
 ### 2.4 ¿Un `*u8` o un `str` de retorno puede mezclar "hash", "bloqueado" y "falló"?
 
-**Con `*u8`, sí, y compila hoy.** La sonda `t9_ptr_cmp.lap` escribe el error de SSHole tal cual: una función `-> *u8` que devuelve `"*"` cuando falla, una entrada bloqueada `"*"` y `if (strcmp(got, stored) == 0)`. Compila sin aviso. También compilan `got == stored` (compara direcciones) y `got == n` con `n: i64` (comparar un puntero con un entero no es un error de tipos: "Not checked: ... comparisons as a type error", [REFERENCE.md](REFERENCE.md), Type checking). Un `str` no se puede devolver (`a slice cannot be returned`), así que ese camino hoy no existe.
+**Con `*u8`, sí, y compila hoy.** La sonda `t9_ptr_cmp.lap` escribe el error de SSHole tal cual: una función `-> *u8` que devuelve `"*"` cuando falla, una entrada bloqueada `"*"` y `if (strcmp(got, stored) == 0)`. Compila sin aviso. También compilan `got == stored` (compara direcciones) y `got == n` con `n: i64` (comparar un puntero con un entero no es un error de tipos: "Not checked: ... comparisons as a type error", [REFERENCE.md](REFERENCE.md), Type checking). Un `str` no se puede devolver (`a slice cannot be returned`), así que ese camino hoy no existe. **Desde 0.45.0 sí existe** (S1, [DESIGN_SELFHOST_S1.md](DESIGN_SELFHOST_S1.md)): una función `-> str` puede devolver `"*"` igual que la de `*u8`, y `got == stored` entre dos `str` compara los bytes, así que `"*" == "*"` es 1. Lo que lo evita son los enums de abajo, no el tipo `str`.
 
 **Con enums, no.** Los tipos que lo evitan ya existen:
 
@@ -315,5 +315,5 @@ Por qué el error de SSHole no compila aquí:
 4. ¿SEC-1 (R2 y R3) puede ir entre S1 y S2, o se mete dentro de S1 aunque su lista esté cerrada?
 5. ¿Comparar un puntero con un entero que no es literal (`got == n`) debe ser error? No se contó cuántos programas rompería.
 6. Los hallazgos de §2.7 (`malloc` contra -1, `==` y argumentos struct, retorno de struct local, caída intermitente en `match`): ¿parches inmediatos, uno por uno, o se esperan a SEC-1?
-7. El retorno de struct por valor (§2.7 punto 4) es el estilo de respaldo de SELFHOST_S0 §3.3 y su golden guarda basura. ¿Se corrige el compilador o se retira ese respaldo del anexo de S0?
+7. El retorno de struct por valor (§2.7 punto 4) es el estilo de respaldo de SELFHOST_S0 §3.3 y su golden guarda basura. ¿Se corrige el compilador o se retira ese respaldo del anexo de S0? **Respondida: se corrigió el compilador en 0.45.0.**
 8. Un struct pasado a un parámetro `*T` sin `&` hoy compila (`tests/test_parser_pass.lap:44`). ¿R2 lo prohíbe también (rompe ese archivo del corpus de S0) o se deja como está?

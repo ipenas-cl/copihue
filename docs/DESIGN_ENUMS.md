@@ -1,5 +1,7 @@
 # Enums y `match` (corte 0.39.0)
 
+**Corte 0.45.0.** La ABI de «Devolver un enum» (destino en `rdi`, argumentos corridos) es también la de un struct por valor y la de un slice (`-> str`, `-> []T`). El enum no cambió. El detalle está en [`DESIGN_SELFHOST_S1.md`](DESIGN_SELFHOST_S1.md) §1.
+
 **Corte 0.43.0.** Un campo de enum sigue sin ser un slice: `str` no entra. El detalle está en [`DESIGN_STRINGS.md`](DESIGN_STRINGS.md).
 
 **Corte 0.42.0.** `?` sobre un enum con `Ok(T)` y `Err(E)` es un `match` que retorna `Err`. El detalle está en [`DESIGN_ERRORS.md`](DESIGN_ERRORS.md).
