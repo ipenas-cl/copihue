@@ -1,0 +1,26 @@
+// R2 of DESIGN_SECURITY (0.45.2): a struct parameter takes a struct of that type,
+// and a pointer parameter takes a pointer, not a struct. The callee copies the size
+// of P from the address it gets: before, the 8 bytes of a Q were read as 16, an
+// integer was read as the address, and a struct given to *P was taken as a P.
+struct P { x: i64, y: i64 }
+struct Q { a: i64 }
+
+fn sum(p: P) -> i64 { return p.x + p.y; }
+fn first(p: *P) -> i64 { return p->x; }
+
+fn main() -> i32 {
+    let q: Q;
+    q.a = 1;
+    let p: P;
+    let pp: *P = &p;
+    take(sum(q));
+    take(sum(5));
+    take(sum(Q { a: 2 }));
+    take(sum(pp));
+    take(first(p));
+    take(first(q));
+    take(first(P { x: 1, y: 2 }));
+    return 0;
+}
+
+fn take(v: i64) -> i64 { return v; }

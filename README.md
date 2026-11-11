@@ -10,7 +10,7 @@
 
 A systems programming language with its own compiler, written in C with an x86-64 NASM back end. It produces Linux x86-64 ELF executables **with no libc and no runtime**, and it can also produce freestanding code for kernels and boot sectors. *Formerly Chronos.*
 
-Current version: **0.45.1** (`compiler/bootstrap-c/copihue.c`, `LANG_VERSION`). Release notes are in [CHANGELOG.md](CHANGELOG.md).
+Current version: **0.45.2** (`compiler/bootstrap-c/copihue.c`, `LANG_VERSION`). Release notes are in [CHANGELOG.md](CHANGELOG.md).
 
 > **Status: not production-ready.** It is a tested compiler for a small but real language. Memory safety is partial (checked slices and indexes, `own *T` moves) and there is no borrow checker: a `vec` slice can dangle after a push. Linux x86-64 only. The goal is a language that beats C++, Rust and OCaml; today it does not, and the numbers below say where it stands.
 
@@ -74,6 +74,50 @@ Two levels of syntax. The **easy level** lets the compiler decide: an omitted pa
 - Enums with data and exhaustive `match`, `Option<T>`, `Result<T, E>` and `?` ([DESIGN_ENUMS](docs/DESIGN_ENUMS.md), [DESIGN_ERRORS](docs/DESIGN_ERRORS.md)).
 - Generics by monomorphization and traits without vtables ([DESIGN_GENERICS](docs/DESIGN_GENERICS.md), [DESIGN_TRAITS](docs/DESIGN_TRAITS.md)).
 - Atomics, `fence`, and hosted threads (`thread_spawn`, `thread_join`, `sched_setaffinity`) without libc.
+- Three struct rules of 0.45.2, below: the bound of an array of structs, the fields a literal does not name, and the type of a struct argument.
+
+### Structs: three rules (0.45.2)
+
+**1. An index past the end of a local array stops the program, also for an array of structs.** In hosted code (and with `--checked` in kernel modes) every read and every store of `a[i]`, `a[i].x`, `a[i] = q` and `&a[i]` compares `i` with the length `N` of `[T; N]`. Before 0.45.2 an array of structs larger than 8 bytes was compared with its count of 8-byte slots, and a store to a field of an element was not compared at all, so `pts[2].x = 7` on `[Point; 2]` wrote past the array and the program went on.
+
+```
+struct Point { x: i64, y: i64 }
+
+fn main() -> i32 {
+    let pts: [Point; 2];
+    let i: i64 = 1;
+    pts[i].x = 7;      // fine: 1 < 2
+    print_int(pts[i].x);
+    println("");
+    i = 2;
+    pts[i].x = 7;      // stops here
+    return 0;
+}
+```
+
+The output is `7`, then `Array bounds error\` on standard error (the text ends in a backslash, without a newline), and the exit code is 1. Fix: keep the index below the length (with `for i in 0..2` the compiler knows it and omits the check), or declare a longer array. Global arrays and `[T; N]` fields are not checked.
+
+**2. A field a struct literal does not name is 0.** `let p: Point = Point { y: 9 }` gives `p.x == 0`, in a `let`, an element of an array literal, a nested literal, an argument and a `return`. Before 0.45.2 a `let` and an array element kept whatever the stack held there. A global cannot take a literal: `let origin: Point = Point { y: 0 };` is
+
+```
+origin.lap:3:27: error: the initializer of global 'origin' is not a constant expression: a struct literal
+```
+
+Fix: `let origin: Point;` (a global starts at zero) and set the other fields in `main`.
+
+**3. A struct argument must be the parameter's struct, and a pointer parameter takes `&x`, not `x`.** With `fn norm1(p: Point)` and `fn move_right(p: *Point)`, `norm1(p)` and `move_right(&p)` compile. These do not:
+
+```
+points.lap:10:21: error: argument 1 of 'norm1': expected Point, found Size; pass a Point value
+     10 |     print_int(norm1(s));
+        |                     ^
+points.lap:11:16: error: argument 1 of 'move_right': expected *Point, found Point; pass its address with '&'
+     11 |     move_right(p);
+        |                ^
+2 errors, compilation failed
+```
+
+Before 0.45.2 both compiled: `norm1(s)` read 16 bytes from an 8-byte `Size`, `norm1(5)` read at address 5 and crashed, and a struct given to `*Point` was taken as a `Point`. Fix: pass a value of the parameter's struct (`norm1(p)`), its address for a pointer (`move_right(&p)`), or `*pp` when you hold a `*Point`. Each message says which. This rule (R2 of [DESIGN_SECURITY](docs/DESIGN_SECURITY.md)) can break code that compiled before; see [CHANGELOG.md](CHANGELOG.md) 0.45.2. Details and every message: [reference, Passing a struct](docs/REFERENCE.md#passing-a-struct).
 
 A trait and a generic function (from `tests/lang/trait.lap`):
 
@@ -143,7 +187,7 @@ Copihue is slower on recursive code (`fib`), on the matching engine, and on a gr
 - `examples/`: example programs; `examples/lowlat/` has the low-latency cases
 - `bench/`: benchmarks outside `make test`
 - `docs/REFERENCE.md`: language reference; `docs/DESIGN_*.md`: one note per feature
-- `docs/DESIGN_SECURITY.md`: security rules proposed after the SSHole bug (errors are not domain values, unused `Result` is an error, constant-time compare); a proposal, not implemented: [docs/DESIGN_SECURITY.md](docs/DESIGN_SECURITY.md)
+- `docs/DESIGN_SECURITY.md`: security rules proposed after the SSHole bug (errors are not domain values, unused `Result` is an error, constant-time compare); mostly a proposal: of R2, the struct argument rule is implemented (0.45.2), `==` between structs is not: [docs/DESIGN_SECURITY.md](docs/DESIGN_SECURITY.md)
 - `docs/STATUS.md`, `docs/KERNELS.md`: detailed limits, test inventory and kernel modes
 - `compiler/native/x64.c`: x86-64 instruction encoder, the first piece of writing the ELF without `nasm` and `ld`; `make native-test` compares it with `nasm`. Inventory and design: [docs/DESIGN_NATIVE.md](docs/DESIGN_NATIVE.md)
 - `compiler/native/asm.c`: assembler for the NASM text the compiler emits (labels, jump relaxation, `call`, `.data`/`.rodata`/`.bss`, `extern` in `-c` objects); `make native-test` checks the bytes, the `.bss` size and the relocations against `nasm -f elf64` on all the corpus programs. Used by `copihue`: [docs/DESIGN_NATIVE.md](docs/DESIGN_NATIVE.md)

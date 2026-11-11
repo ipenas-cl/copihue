@@ -1,0 +1,97 @@
+// A field that a struct literal does not name is 0 (0.45.2), wherever the
+// literal is built. Before, `let p: P = P { y: 9 }` and an element of an array
+// literal kept what the frame held in the other fields. Each function runs
+// right after dirty(), whose frame sets every byte of the same stack slots to
+// 0xFF, so a field left alone shows -1 (255 for a u8) instead of 0.
+struct P { x: i64, y: i64 }
+struct R { a: P, n: i64 }
+packed struct T3 { a: u8, b: u8, c: u8 }
+
+fn dirty() -> i64 {
+    let junk: [i64; 32];
+    let i: i64 = 0;
+    while (i < 32) {
+        junk[i] = -1;
+        i = i + 1;
+    }
+    return junk[31];
+}
+
+fn show(v: i64) -> i64 {
+    print_int(v);
+    println("");
+    return 0;
+}
+
+fn typed_let() -> i64 {
+    let p: P = P { y: 9 };
+    show(p.x);
+    show(p.y);
+    return 0;
+}
+
+fn untyped_let() -> i64 {
+    let q = P { x: 1 };
+    show(q.x);
+    show(q.y);
+    return 0;
+}
+
+fn array_elements() -> i64 {
+    let ps: [P; 2] = [P { y: 2 }, P { x: 3 }];
+    show(ps[0].x);
+    show(ps[0].y);
+    show(ps[1].x);
+    show(ps[1].y);
+    return 0;
+}
+
+fn nested() -> i64 {
+    let r: R = R { n: 4, a: P { y: 5 } };
+    show(r.a.x);
+    show(r.a.y);
+    show(r.n);
+    return 0;
+}
+
+fn packed_tail() -> i64 {
+    let t: T3 = T3 { b: 1 };
+    show(t.a);
+    show(t.b);
+    show(t.c);
+    return 0;
+}
+
+fn sum(p: P) -> i64 { return p.x * 10 + p.y; }
+
+fn mk() -> P { return P { y: 6 }; }
+
+fn argument() -> i64 {
+    show(sum(P { y: 7 }));
+    return 0;
+}
+
+fn returned() -> i64 {
+    let m: P = mk();
+    show(m.x);
+    show(m.y);
+    return 0;
+}
+
+fn main() -> i32 {
+    dirty();
+    typed_let();
+    dirty();
+    untyped_let();
+    dirty();
+    array_elements();
+    dirty();
+    nested();
+    dirty();
+    packed_tail();
+    dirty();
+    argument();
+    dirty();
+    returned();
+    return 0;
+}

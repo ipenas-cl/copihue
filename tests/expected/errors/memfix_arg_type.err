@@ -1,0 +1,22 @@
+tests/errors/memfix_arg_type.lap:16:14: error: argument 1 of 'sum': expected P, found Q; pass a P value
+     16 |     take(sum(q));
+        |              ^
+tests/errors/memfix_arg_type.lap:17:14: error: argument 1 of 'sum': expected P, found i64; pass a P value
+     17 |     take(sum(5));
+        |              ^
+tests/errors/memfix_arg_type.lap:18:16: error: argument 1 of 'sum': expected P, found Q; pass a P value
+     18 |     take(sum(Q { a: 2 }));
+        |                ^
+tests/errors/memfix_arg_type.lap:19:14: error: argument 1 of 'sum': expected P, found *P; pass the P it points to with '*'
+     19 |     take(sum(pp));
+        |              ^
+tests/errors/memfix_arg_type.lap:20:16: error: argument 1 of 'first': expected *P, found P; pass its address with '&'
+     20 |     take(first(p));
+        |                ^
+tests/errors/memfix_arg_type.lap:21:16: error: argument 1 of 'first': expected *P, found Q; pass the address of a P
+     21 |     take(first(q));
+        |                ^
+tests/errors/memfix_arg_type.lap:22:18: error: argument 1 of 'first': expected *P, found P; declare it first (let t: P = ...) and pass &t
+     22 |     take(first(P { x: 1, y: 2 }));
+        |                  ^
+7 errors, compilation failed
