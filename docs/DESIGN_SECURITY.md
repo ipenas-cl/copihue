@@ -1,6 +1,6 @@
 # Diseño: seguridad (errores que no se pueden confundir con datos)
 
-**Estado: propuesta, solo documentación.** Ninguna regla de este documento cambia hoy el compilador, las pruebas ni el lenguaje. Corte de referencia: Copihue **0.44.8** (`compiler/bootstrap-c/copihue.c`, `LANG_VERSION`; `main` en `95d3f7a`). Cada regla está marcada **Implementado** (el compilador ya lo hace, con la prueba que lo muestra) o **Propuesta** (no existe; aquí solo se describe).
+**Estado: propuesta, con una parte implementada.** Desde **0.45.2** el compilador aplica la mitad de R2 que toca a los argumentos struct (§3, R2); el resto de este documento (la otra mitad de R2, R1, R3–R6) sigue siendo solo documentación. Corte de referencia del análisis: Copihue **0.44.8** (`compiler/bootstrap-c/copihue.c`, `LANG_VERSION`; `main` en `95d3f7a`). Cada regla está marcada **Implementado** (el compilador ya lo hace, con la prueba que lo muestra) o **Propuesta** (no existe; aquí solo se describe).
 
 Lo que este documento afirma del compilador se comprobó en el código y con programas de prueba compilados con `-S` a `-O0` y `-O2` (§2). La máquina donde se verificó es macOS y no ejecuta ELF de Linux: nada de lo de abajo se ejecutó, salvo el propio compilador. No se afirma ninguna velocidad.
 
@@ -95,16 +95,16 @@ Tras un `diag_error` el generador emite `xor rax, rax` y sigue, para juntar más
 - **Dos enums distintos:** no se comparan (ni dos del mismo tipo: §2.4). Pasar un enum de otro tipo a un parámetro es `argument 1 of 'use_hash': expected Hash, found Locked` (`t14_enum_newtype.lap`). Un enum de una sola variante (`enum Hash { H(*u8) }`) ya funciona como newtype nominal: se pasa, se devuelve por el puntero oculto y se desarma con `match`.
 - **Dos structs distintos:** asignar uno al otro es error (`cannot assign struct 'Locked' to struct 'Hash'`, `copihue.c:12005`; `t8_struct_assign.lap`). Pero:
   - **`h == k` compila**, sean del mismo tipo o no (`t6_struct_eq.lap`, `t7_struct_same.lap`). Compara las **direcciones** de los dos locales (`lea rax, [rbp-8]` / `lea rax, [rbp-16]` / `cmp`), no el contenido. Un struct usado como valor es su dirección (`copihue.c:14074`, `gen_expr`).
-  - **Pasar un `Locked` a un parámetro `h: Hash` compila** (`t13_newtype.lap`). `check_types` vuelve sin comparar nada cuando cualquiera de los dos lados es un struct (`copihue.c:6221`), así que tampoco se rechaza un `*u8` pasado a un parámetro struct.
-  - Por eso un struct de un campo **no** sirve hoy como newtype seguro.
+  - **Pasar un `Locked` a un parámetro `h: Hash` compila** (`t13_newtype.lap`). `check_types` vuelve sin comparar nada cuando cualquiera de los dos lados es un struct (`copihue.c:6221`), así que tampoco se rechaza un `*u8` pasado a un parámetro struct. **Corregido en 0.45.2** (R2, §3): es `argument 1 of 'use_hash': expected Hash, found Locked; pass a Hash value`.
+  - Por eso un struct de un campo **no** servía como newtype seguro. Desde 0.45.2 sí lo es como argumento; `h == k` (arriba) sigue comparando direcciones.
 
 ### 2.7 Hallazgos que no se esperaban
 
-Ninguno se corrigió aquí: este cambio es solo documentación.
+Ninguno se corrigió en el cambio que escribió este documento (solo documentación); lo que se corrigió después lo dice cada punto.
 
 1. **`malloc` compara el resultado de `mmap` contra -1** (`copihue.c:9657`, y lo mismo en `emit_malloc_rax`, `copihue.c:9961`, que usa `vec_push`). La syscall cruda de Linux no devuelve -1: devuelve `-errno` (por ejemplo, -12 para `ENOMEM`). Con -12 el salto no se toma, se escribe el tamaño en la dirección -12 y el proceso cae por segmentación en vez de devolver el centinela o escribir `out of memory`. El mismo `vec_push` sí trata bien a `mremap` (`test rax, rax` / `js`, `copihue.c:10103`), así que los dos caminos no son coherentes. Leído en el código; no ejecutado.
 2. **`==` entre structs compara direcciones** (§2.6).
-3. **Un struct de otro tipo pasa como argumento** (§2.6).
+3. **Un struct de otro tipo pasa como argumento** (§2.6). **Corregido en 0.45.2** (R2).
 4. **`return p` de un struct local devuelve la dirección de su slot en el frame** (`lea rax, [rbp-8]`, `leave`, `ret` en `t13_newtype.lap`). La referencia dice que el tipo de retorno struct "is parsed and is not checked" ([REFERENCE.md](REFERENCE.md), Declarations). `tests/test_struct_return.lap` usa esa forma: llama `make_point(10, 20)` y `make_point(99, 88)`, y su salida esperada (`tests/expected/tests/test_struct_return.out`) guarda `p1.x = 7`, `p1.y = 7`, `p2.x = 7`, `p2.y = 7`. Esa salida no corresponde al programa: el golden guardó lo que quedó en la memoria. Esto contradice [SELFHOST_S0.md](SELFHOST_S0.md) §3.3, que da ese archivo como prueba de que un struct "sí se devuelve por valor" (estilo de respaldo `struct Str`). No se ejecutó aquí.
 
    **Corregido en 0.45.0.** Ignacio lo confirmó ejecutando en Linux (`7`, `7`, `7`, `7` a `-O0` y a `-O2`). Un struct se devuelve con el puntero oculto del enum: el llamador pasa el destino en `rdi` y el callee copia los bytes ahí ([REFERENCE.md](REFERENCE.md), «Returning a struct»). El golden de `tests/test_struct_return.out` se reescribió a mano con 10, 20, 99 y 88. `return p` de un struct desde una función que no devuelve ese struct es error (`a struct is returned by value only from '-> P'`). `tests/sret/kernel.lap` corre los retornos en QEMU (`--flat`, `-O0` y `-O2`); con el compilador de 0.44.8, una versión recortada del mismo kernel imprime `FAIL01`.
@@ -141,20 +141,30 @@ Recuento usado abajo: una copia instrumentada del bootstrap, solo en `build/s19/
 
 ### R2. "Bloqueado" y "falló" son tipos distintos; compararlos no compila
 
-**Implementado para enums. Propuesta para structs.**
+**Implementado para enums y, desde 0.45.2, para el argumento struct. Propuesta para `==` entre structs.**
 
-- **Hoy:** si "bloqueado" es `Shadow::Locked` y "falló" es `Crypt::TooLong(n)`, no hay `==` posible entre ellos ni con un `*u8` (§2.4, `t18_sshole_enum.lap`). Un enum de una variante sirve de newtype nominal (§2.6).
-- **Falta:** cerrar los dos agujeros de structs. `h == k` entre structs compila y compara direcciones; un struct de otro tipo pasa como argumento.
-- **Cómo, en el bootstrap C:**
+- **Hoy:** si "bloqueado" es `Shadow::Locked` y "falló" es `Crypt::TooLong(n)`, no hay `==` posible entre ellos ni con un `*u8` (§2.4, `t18_sshole_enum.lap`). Un enum de una variante sirve de newtype nominal (§2.6). Desde 0.45.2 un struct de un campo también, como argumento.
+- **Implementado (0.45.2): el argumento struct es nominal.** Un parámetro `h: Hash` toma un `Hash` y nada más; un parámetro `p: *Hash` toma un puntero, nunca un struct (pregunta abierta 8: sí, R2 lo cubre). Cada mensaje dice cómo corregir:
+  - `argument 1 of 'use_hash': expected Hash, found Locked; pass a Hash value`
+  - `argument 1 of 'sum': expected P, found i64; pass a P value`
+  - `argument 1 of 'sum': expected P, found *P; pass the P it points to with '*'`
+  - `argument 1 of 'first': expected *P, found P; pass its address with '&'`
+  - `argument 1 of 'first': expected *P, found Q; pass the address of a P`
+  - `argument 1 of 'first': expected *P, found P; declare it first (let t: P = ...) and pass &t` (un literal: `&P { ... }` no da hoy una dirección; es otro hallazgo).
+
+  Vive donde se tipan los argumentos, `check_struct_arg` en `check_user_args` (no en `check_types`, que también tipa `let`, asignaciones y `return`: ahí un struct usado como valor sigue siendo su dirección, `let x: i64 = p` compila). Prueba: `tests/errors/memfix_arg_type.lap`, rechazada en cada modo por `tests/memfix/run.sh`.
+- **Falta:** `h == k` entre structs compila y compara direcciones.
+- **Cómo, en el bootstrap C (lo que falta):**
   - En `gen_expr`, un `AST_COMPARE` cuyo operando es un struct (local, global o campo; no un arreglo) da `a struct is not a scalar; compare the fields`, con el mismo estilo que `an enum is not a scalar; match it` (`copihue.c:14069`). `&h == &k` sigue valiendo: es comparar punteros, y se escribe a propósito.
-  - En `check_types` (`copihue.c:6221`), un destino struct exige el mismo struct, como ya se hace con enums unas líneas antes: `argument 1 of 'f': expected Hash, found Locked`.
-  - En el compilador en Copihue, la misma regla vive en el módulo de chequeo que S3 porta; la igualdad con el C cubre los `.err` de las pruebas de error.
+  - En el compilador en Copihue, la misma regla (y la del argumento) vive en el módulo de chequeo que S3 porta; la igualdad con el C cubre los `.err` de las pruebas de error.
 - **Fácil:** modelar los estados con un enum; el compilador impide mezclarlos. **Explícito:** comparar los campos uno por uno, o comparar direcciones con `&`.
 - **Rompe:** `==` entre structs, 0 programas (recuento instrumentado). Para el chequeo de structs se marcó, en la misma copia instrumentada, cada vez que `check_types` vuelve con un struct de un lado y otro tipo del otro. En los 571 archivos salen 2 marcas:
   - `tests/errors/generic_op.lap:4`, un `return a + b` con destino `Point`. Es una prueba de error que ya falla por otra razón.
   - `tests/test_parser_pass.lap:44`, `read_token(parser)` con `parser: Parser` y el parámetro `p: *Parser`. Pasa porque un struct usado como valor es su dirección (§2.6). Está en el corpus de S0 (`tools/selfhost/corpus.txt`).
 
   Con la regla tal como se propone (un destino **struct** exige el mismo struct) se rompen 0 programas. Si además se prohíbe que un struct pase a un parámetro puntero sin `&`, se rompe 1, `test_parser_pass.lap`, que habría que escribir `read_token(&parser)` (pregunta abierta 8).
+
+  **En 0.45.2** se midió de nuevo con el compilador (no con la copia instrumentada): los 616 `.lap` de `tests/` y `examples/` (606 de main y 10 nuevos de 0.45.2) con `-S -O0` y `-O2`, contra el compilador de main. El único programa que deja de compilar es `test_parser_pass.lap`, que pasó a `read_token(&parser)` y genera el mismo código que antes. Ningún `.err` cambia salvo el de la prueba nueva.
 - **Fase:** corte aparte, **después de S1 y antes de S2** (lo llamo SEC-1 abajo). Así el primer módulo del compilador en Copihue (S2) ya se escribe con la regla activa.
 
 ### R3. Un `Result` no usado es error de compilación
@@ -220,7 +230,7 @@ Recuento usado abajo: una copia instrumentada del bootstrap, solo en `build/s19/
 | Corte | Qué | Cuándo |
 |---|---|---|
 | Parche | `malloc`/`vec_push` contra `-errno`; mensaje del tope de 128 `str` | En cualquier momento; son errores de implementación. |
-| SEC-1 | R2 (`==` entre structs es error; argumento struct nominal), R3 (enum descartado es error; `let _`) | Después de S1, antes de S2. |
+| SEC-1 | R2 (argumento struct nominal: **implementado en 0.45.2**; `==` entre structs es error: pendiente), R3 (enum descartado es error; `let _`): pendiente | Después de S1, antes de S2. |
 | SEC-2 | R6 (`ct_eq`) | En cualquier momento; antes de cualquier código que compare secretos. |
 | S2 en adelante | R1 y R5 como reglas del compilador en Copihue | Con S2. |
 | Biblioteca | R4, R5, tipo `Secret` | Con la primera biblioteca que maneje credenciales; `Secret` después de S1 y SEC-1. |
@@ -314,6 +324,6 @@ Por qué el error de SSHole no compila aquí:
 3. R3: ¿todo enum devuelto (recomendado) o solo los de forma `Ok`/`Err`? ¿Se agrega después un aviso por local `let r = f()` nunca leído?
 4. ¿SEC-1 (R2 y R3) puede ir entre S1 y S2, o se mete dentro de S1 aunque su lista esté cerrada?
 5. ¿Comparar un puntero con un entero que no es literal (`got == n`) debe ser error? No se contó cuántos programas rompería.
-6. Los hallazgos de §2.7 (`malloc` contra -1, `==` y argumentos struct, retorno de struct local, caída intermitente en `match`): ¿parches inmediatos, uno por uno, o se esperan a SEC-1?
+6. Los hallazgos de §2.7 (`malloc` contra -1, `==` y argumentos struct, retorno de struct local, caída intermitente en `match`): ¿parches inmediatos, uno por uno, o se esperan a SEC-1? (El retorno de struct se corrigió en 0.45.0 y los argumentos struct en 0.45.2.)
 7. El retorno de struct por valor (§2.7 punto 4) es el estilo de respaldo de SELFHOST_S0 §3.3 y su golden guarda basura. ¿Se corrige el compilador o se retira ese respaldo del anexo de S0? **Respondida: se corrigió el compilador en 0.45.0.**
-8. Un struct pasado a un parámetro `*T` sin `&` hoy compila (`tests/test_parser_pass.lap:44`). ¿R2 lo prohíbe también (rompe ese archivo del corpus de S0) o se deja como está?
+8. Un struct pasado a un parámetro `*T` sin `&` hoy compila (`tests/test_parser_pass.lap:44`). ¿R2 lo prohíbe también (rompe ese archivo del corpus de S0) o se deja como está? **Respondida en 0.45.2: lo prohíbe** (`expected *Parser, found Parser; pass its address with '&'`). `test_parser_pass.lap` pasó a `read_token(&parser)`, con el mismo código generado, y sigue en el corpus de S0.

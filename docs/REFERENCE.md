@@ -1,4 +1,4 @@
-# Copihue Language Reference (v0.45.1)
+# Copihue Language Reference (v0.45.2)
 
 This document describes the language that `copihue` accepts today. Anything not listed here is not supported.
 Planned features are in the README roadmap.
@@ -428,7 +428,7 @@ What the caller gives as the destination:
 - `sum(make(...))` (a struct parameter), `make(...).y`, and `make(...);` on its own: a temporary of the caller's frame.
 - `return make(...)` in a function that returns the same struct: the caller's own destination is passed on.
 
-What `return` copies from: a local, a parameter, a global, a field (`b.p`), an element (`t[i]`), `*q` with `q: *Point`, a literal (`Point { x: a, y: b }`, built in a zeroed temporary), or a call. Another struct is `return value: expected Point, found Other` (even with the same fields); an integer is `return value: expected Point, found i64`; `return;` is `return needs a 'Point' value`. A function that reaches its end without `return` leaves zeros in the destination, as an integer function returns 0. `let p: Point = other()` with another struct is `expected Point, found Other`, and the assignment form is `cannot assign struct 'Other' to struct 'Point'`. `make(...).z` with no such field is `struct 'Point' has no field 'z'`; `n().x` with `n` returning an integer is `'n' does not return a struct; it has no field 'x'`.
+What `return` copies from: a local, a parameter, a global, a field (`b.p`), an element (`t[i]`), `*q` with `q: *Point`, a literal (`Point { x: a, y: b }`, built in a temporary; a field it does not name is 0), or a call. Another struct is `return value: expected Point, found Other` (even with the same fields); an integer is `return value: expected Point, found i64`; `return;` is `return needs a 'Point' value`. A function that reaches its end without `return` leaves zeros in the destination, as an integer function returns 0. `let p: Point = other()` with another struct is `expected Point, found Other`, and the assignment form is `cannot assign struct 'Other' to struct 'Point'`. `make(...).z` with no such field is `struct 'Point' has no field 'z'`; `n().x` with `n` returning an integer is `'n' does not return a struct; it has no field 'x'`.
 
 `return p` of a struct from a function that does not return that struct (`-> i64`, `-> *Point`) is `return value: expected i64, found Point; a struct is returned by value only from '-> Point'`: its address would be the frame that the return ends. A naked, `interrupt`, `syscall`, or `bits 16`/`bits 32` function cannot return a struct (`a struct cannot be returned from a naked, interrupt, syscall, or bits 16/32 function`), and an `ms64 fn` returns in `rax` (`an ms64 function returns an integer or a pointer, not a struct`). Hosted, `--freestanding` and `--flat` 64-bit code, `-c` objects and `--nasm` take the same text. Hosted `-O2` builds an `rbp` frame for such a function (it keeps `rdi`), as for an enum, and does not put the local that receives the value in a register.
 
@@ -443,19 +443,136 @@ A struct argument is passed as the address of its bytes, in the argument's regis
 - `*q` with `q: *P`;
 - an element: `sum(arr[i])`, `sum(s[i])` of a slice, `sum(x.two[i])` of a `[P; N]` field, `sum(h->ps[i])` through a pointer field;
 - a call that returns the struct (`sum(make(1, 2))`): a temporary of the caller's frame;
-- a literal (`sum(P { x: 3, y: 4 })`): built in a zeroed temporary of the caller's frame, so a field the literal does not name is 0.
+- a literal (`sum(P { x: 3, y: 4 })`): built in a temporary of the caller's frame; a field the literal does not name is 0, as in every literal (see below).
 
 Before 0.45.1 a literal was built over the last local the function had declared (`keep` and `other` in `let keep = 77; let other = 55; sum(P { x: 3, y: 4 })` printed 4 and 3), and a field, a global and `*q` passed their first 8 bytes as the address (`sum(r.a)` crashed).
 
-Not checked yet: that the argument is a struct of the parameter's type. `sum(q)` with another struct `q: Q` compiles and the callee copies `sizeof(P)` bytes from `q`'s address (past its end if `Q` is smaller), and `sum(5)` compiles and the callee reads at address 5. The callee only reads there; it writes its own copy. Requiring the same struct is rule R2 of SEC-1 ([DESIGN_SECURITY.md](DESIGN_SECURITY.md)), not implemented. A struct literal cannot be an argument in a `naked` or `bits 16`/`bits 32` function, which has no frame: `this struct literal cannot be passed as an argument; pass a local: let t: P = ...; f(t)`. An `ms64` call takes no struct at all (see Microsoft x64 convention).
+**The argument is the parameter's struct (0.45.2, rule R2 of [DESIGN_SECURITY.md](DESIGN_SECURITY.md)).** A struct parameter `p: P` takes a `P` value, in any of the forms above, and nothing else. A pointer parameter `p: *P` takes a pointer, never a struct: write `&x` to pass the address of a struct `x`. The callee copies `sizeof(P)` bytes from the address it receives, so before 0.45.2 `sum(5)` compiled and read at address 5 (the program crashed), `sum(q)` with a smaller `q: Q` read past the end of `q`, and a struct given to `*P` was taken as a `P` wherever it was.
+
+This compiles (a `Point` by value, and `&p` for the pointer parameter) and prints 8:
+
+```
+struct Point { x: i64, y: i64 }
+
+fn norm1(p: Point) -> i64 { return p.x + p.y; }
+fn move_right(p: *Point) -> i64 { p->x = p->x + 1; return 0; }
+
+fn main() -> i32 {
+    let p: Point = Point { x: 3, y: 4 };
+    move_right(&p);
+    print_int(norm1(p));
+    println("");
+    return 0;
+}
+```
+
+This does not (`points.lap`):
+
+```
+struct Point { x: i64, y: i64 }
+struct Size { w: i64 }
+
+fn norm1(p: Point) -> i64 { return p.x + p.y; }
+fn move_right(p: *Point) -> i64 { p->x = p->x + 1; return 0; }
+
+fn main() -> i32 {
+    let p: Point = Point { x: 3, y: 4 };
+    let s: Size = Size { w: 5 };
+    print_int(norm1(s));
+    move_right(p);
+    return 0;
+}
+```
+
+```
+points.lap:10:21: error: argument 1 of 'norm1': expected Point, found Size; pass a Point value
+     10 |     print_int(norm1(s));
+        |                     ^
+points.lap:11:16: error: argument 1 of 'move_right': expected *Point, found Point; pass its address with '&'
+     11 |     move_right(p);
+        |                ^
+2 errors, compilation failed
+```
+
+How to fix each message:
+
+| Message (after `argument N of 'f': expected ..., found ...;`) | What to write |
+| --- | --- |
+| `expected P, found Q; pass a P value` | a `P`: another struct is not converted, even with the same fields. Build a `P` from `q`'s fields if that is what you mean. |
+| `expected P, found i64; pass a P value` | a `P` value; an integer is never an address of a struct. |
+| `expected P, found *P; pass the P it points to with '*'` | `f(*pp)`. |
+| `expected *P, found P; pass its address with '&'` | `f(&p)`. |
+| `expected *P, found Q; pass the address of a P` | the address of a `P` (`&q` would be `expected *P, found *Q`). |
+| `expected *P, found P; declare it first (let t: P = ...) and pass &t` | a literal has no address of its own: `let t: P = P { ... }; f(&t)`. |
+
+The rule is for calls to functions of the program. `let x: i64 = p`, `p == q` and other uses of a struct as a value are not part of it (see Type checking). A struct literal cannot be an argument in a `naked` or `bits 16`/`bits 32` function, which has no frame: `this struct literal cannot be passed as an argument; pass a local: let t: P = ...; f(t)`. An `ms64` call takes no struct at all (see Microsoft x64 convention).
 
 A field of an outer literal takes a struct value the same way: `R { a: g, n: 1 }`, `R { a: r.a }`, `R { a: *q }`, `R { a: make(1, 2) }` copy exactly `sizeof(P)` bytes into the field (before 0.45.1 a global was not copied, a packed local of odd size was copied in whole qwords past the field, and the rest stored an address). Another struct is `field 'a' of R: expected P, found Q`. `let p: P = Q { ... }` is `expected P, found Q` (before, the bytes of `Q` were written over `p` and what followed it).
 
 A struct literal is a value in `let x: T = T { ... }` (built in `x`), `return`, a field of another literal, an element of an array literal, and an argument. Reading a field of a literal is an error, `a field of a struct literal cannot be read; use a local: let t: P = ...; t.x`; before 0.45.1 the value was the literal's address. Anywhere else a literal is built in a temporary of its own and its value is that address, like any struct used as a value (see Type checking).
 
+**A field the literal does not name is 0 (0.45.2).** Every literal is built the same way, wherever it goes: all its bytes are set to zero (padding included), then the fields it names are written. `Point { y: 9 }` has `x == 0` in a `let`, an untyped `let`, an element of an array literal, a nested literal (`R { a: P { y: 5 } }`), an argument, a `return` and a temporary. Before 0.45.2 a `let` and an element of an array literal kept whatever the frame held in the other fields: a value left there by an earlier call. A `packed struct` of odd size is zeroed up to its last byte and not past it.
+
+```
+struct Point { x: i64, y: i64 }
+
+let origin: Point;
+
+fn main() -> i32 {
+    let p: Point = Point { y: 9 };
+    let pts: [Point; 2] = [Point { x: 1 }, Point { y: 2 }];
+    print_int(p.x + pts[0].y + pts[1].x + origin.x);
+    println("");
+    return 0;
+}
+```
+
+prints 0: `p.x`, `pts[0].y` and `pts[1].x` were not named, and a global without an initializer is zero. A global cannot take a literal (`origin.lap`):
+
+```
+struct Point { x: i64, y: i64 }
+
+let origin: Point = Point { y: 0 };
+```
+
+```
+origin.lap:3:27: error: the initializer of global 'origin' is not a constant expression: a struct literal
+      3 | let origin: Point = Point { y: 0 };
+        |                           ^
+1 error, compilation failed
+```
+
+Fix: declare it without an initializer (`let origin: Point;`, all zero) and set the fields that are not zero at the start of `main`.
+
 ### Local arrays and `&a[i]`
 
 A local `[T; N]` holds its elements at their real size, one after the other: `a[i]` is at `i * sizeof(T)` from the start of the array. The frame still reserves at least 8 bytes per element (see Stack probing above), so `[u8; 3]` occupies 24 bytes of the frame and its elements are the first 3.
+
+**The bound is the length `N`, for every element type (0.45.2).** In hosted code, and with `--checked`, every access to an element of a local array compares the index with `N`: a read (`a[i]`, `a[i].x`, `sum(a[i])`, `let t: P = a[i]`), a store (`a[i] = v`, `a[i] = q` of a whole struct, `a[i].x = v`, `a[i].p.y = v`), and `&a[i]`. An index outside `[0, N)` writes `Array bounds error\` to standard error (19 bytes: the last one is a backslash, not a newline) and exits with code 1, before anything is read or written. Before 0.45.2 an array of structs larger than 8 bytes was compared with its count of 8-byte slots (`[Point; 2]` with a 16-byte `Point` against 4), so `pts[2]` and `pts[3]` read and wrote the 32 bytes after the array; a store to a field of an element (`pts[i].x = v`) was not checked at all; and a hosted `-O2` `while (i < 4)` over `[Point; 2]` dropped the check because the array "had" 4 elements.
+
+```
+struct Point { x: i64, y: i64 }
+
+fn main() -> i32 {
+    let pts: [Point; 2];
+    let i: i64 = 1;
+    pts[i].x = 7;
+    print_int(pts[i].x);
+    println("");
+    i = 2;
+    pts[i].x = 7;
+    return 0;
+}
+```
+
+prints `7` and then stops at `pts[2]`: the program's output (standard output and standard error together) is
+
+```
+7
+Array bounds error\
+```
+
+with exit code 1, and nothing after the backslash. Fix: keep the index below the length (`while (i < 2)`, or `for i in 0..2`, which also lets the compiler omit the check), or make the array as long as the indexes you use. A global array and a `[T; N]` field are not checked (unchanged); a slice is, with its own message (see Slices).
 
 `let a: [T; N] = [e0, e1, ...]` stores each value at that position and with the width of `T` (a byte, a word, a dword, a qword); a struct element is built (a literal) or copied, exactly `sizeof(T)` bytes. `let b: [u8; 3] = [97, 98, 99]` gives `b[1] == 98`, and a `str` over `b` is `abc`. Before 0.45.1 every value was a qword at `i * 8`, so `b[1]` and `b[2]` read 0. More values than elements is `3 values for an array of 2 elements` (before, the extra qword was written past the array). An array literal outside such a `let`, for example as an argument, is `an array literal is a value only in 'let a: [T; N] = [...]'; declare the array first` (before, its values went into the slots of the last local declared). `let a = [1, 2, 3]` without a type is an array of `i64`, as before. A global array literal was already laid out by type (`db`, `dw`, `dd`, `dq`).
 
@@ -813,7 +930,7 @@ As in Rust, bitwise operators bind tighter than comparisons: `x & 2 == 2` means 
 
 ## Type checking
 
-A direct assignment (`let`, `x = e`, `a[i] = e`, `s.f = e`, `p->f = e`), a direct call, and `return` check integer and pointer types. A mismatch is `file:line:col: error: expected T, found U`, with the source line and a caret. A call says `argument N of 'f': expected T, found U` (N starts at 1). A return says `return value: expected T, found U`. The compiler keeps going and ends with `1 error, compilation failed` or `N errors, compilation failed`.
+A direct assignment (`let`, `x = e`, `a[i] = e`, `s.f = e`, `p->f = e`), a direct call, and `return` check integer and pointer types. A mismatch is `file:line:col: error: expected T, found U`, with the source line and a caret. A call says `argument N of 'f': expected T, found U` (N starts at 1). Since 0.45.2 a direct call also checks a struct against its parameter: a struct parameter takes that same struct, and a pointer parameter does not take a struct (see Passing a struct for the messages and their fixes). A return says `return value: expected T, found U`. The compiler keeps going and ends with `1 error, compilation failed` or `N errors, compilation failed`.
 
 `as` converts on purpose. It is allowed between any two types. A cast to a pointer or to `i64` / `u64` emits no instruction. A cast to `i8` / `u8` / `i16` / `u16` / `i32` / `u32` keeps the low bits: unsigned zero-extends (`300 as u8` is 44), signed sign-extends (`200 as i8` is -56). That explicit cast is not a range error.
 
@@ -837,7 +954,7 @@ A `u8`, `u16`, `u32`, `i8`, `i16`, or `i32` operator still truncates to that typ
 
 Scalar locals and globals still occupy 8-byte slots when they live in memory. Struct fields occupy their real width. Hosted `-O2` may keep a scalar local in `r12`–`r15`, or in `r10`/`r11` when no call is in its live range; the mask or sign-extend is applied before the value is written to that register or to the slot, and again after a narrow operator. That truncation uses the destination register's own low half, including a call argument in `rdi`, `rsi`, `rdx`, `rcx`, `r8`, or `r9` (`movsxd rdi, edi`, not `eax`). A struct field, a store through a pointer, and an array element write only the real width. A load of a `u8`/`u16`/`u32` field zero-extends. A load of an `i8`/`i16`/`i32` field sign-extends.
 
-Not checked: indirect calls, comparisons as a type error, bitwise mixes of pointers, `mut` used as a permission, and array return types (a struct return type is checked since 0.45.0, see Returning a struct). A struct used as a value is its address: `a == b` between two structs compares the addresses, not the fields. An untyped `let x = e` infers `i64` from an integer, including a narrow load, the pointer type from a pointer, and an address from `malloc`. It does not infer a struct onto that slot, except from a call that returns one (`let p = make()`): write `let p: Point = ...` or a struct literal. An omitted parameter type and an omitted `->` are `i64`. That default is not inferred from a use: indexing an untyped parameter does not make it `*i64`. An expression the compiler cannot type is accepted.
+Not checked: indirect calls, comparisons as a type error, bitwise mixes of pointers, `mut` used as a permission, and array return types (a struct return type is checked since 0.45.0, see Returning a struct). A struct used as a value is its address: `a == b` between two structs compares the addresses, not the fields, and `let x: i64 = p` stores the address of `p`. A call argument is the exception (0.45.2, see Passing a struct). An untyped `let x = e` infers `i64` from an integer, including a narrow load, the pointer type from a pointer, and an address from `malloc`. It does not infer a struct onto that slot, except from a call that returns one (`let p = make()`): write `let p: Point = ...` or a struct literal. An omitted parameter type and an omitted `->` are `i64`. That default is not inferred from a use: indexing an untyped parameter does not make it `*i64`. An expression the compiler cannot type is accepted.
 
 ## Built-ins (hosted mode)
 
@@ -1184,6 +1301,6 @@ The regression suite compares the hexdump at `-O0` and `-O2`. When `qemu-system-
 - Direct calls check the function name, the argument count, and argument types. Assignments and integer or pointer returns are checked. Indirect calls are not. `*i8` and `*u8` match. An integer literal converts to any pointer; a variable does not, without `as`.
 - Struct fields use their real width. Ordinary structs add natural alignment; `packed struct` does not, unless `align(N)` says so. `align(N)` is a power of two from 1 to 4096 on a struct, a field, or a global. Locals are not aligned that way. An array field is `N * sizeof(T)` or a compile error. `sizeof` and `offsetof` are compile-time integers. A narrow integer operator truncates to that type; `i64` and `u64` stay 64-bit. Scalar locals and globals still occupy 8-byte slots. Struct assignment copies the whole value; it does not assign field by field in the source. Nested fields (`r.b.x`) use the real offset.
 - `str` is `[]u8`: a pointer and a length, 16 bytes. A literal is that slice only in a `str` or `[]u8` destination. `a == b` compares the bytes. `s[i..j]` is a local slice. `print(s)` is `write` of the pointer and the length, with no libc. There is no UTF-8, no heap string, and no returning a `str`. An enum field cannot be a `str`. See Strings.
-- Indexing a local array in hosted mode inserts a bounds check that exits the process; `&a[i]` of a local array is checked the same way, against the declared length (0.45.1). `--freestanding`, `--flat`, and `--boot` omit that check unless `--checked`. `unsafe { a[i] }` omits it. `for i in 0..N` omits it when the array has at least `N` elements, including under `--checked`. `bits 16` and `bits 32` do not insert it. Pointer indexing is never checked. A slice `s[i]` is checked in hosted code and writes `index out of range` before exiting with code 1. `--freestanding`, `--flat`, and `--boot` omit that check unless `--checked`. `unsafe { s[i] }` and `s.ptr[i]` omit it in every mode. `for x in s` and `for i in 0..s.len` omit it when the bound is the loop itself.
+- Indexing a local array in hosted mode inserts a bounds check that exits the process; `&a[i]` of a local array is checked the same way, against the declared length (0.45.1). Since 0.45.2 that length is also the bound of an array of structs (it was the count of 8-byte slots), and a store to a field of an element (`a[i].x = v`) is checked like the read. `--freestanding`, `--flat`, and `--boot` omit that check unless `--checked`. `unsafe { a[i] }` omits it. `for i in 0..N` omits it when the array has at least `N` elements, including under `--checked`. `bits 16` and `bits 32` do not insert it. Pointer indexing is never checked. A slice `s[i]` is checked in hosted code and writes `index out of range` before exiting with code 1. `--freestanding`, `--flat`, and `--boot` omit that check unless `--checked`. `unsafe { s[i] }` and `s.ptr[i]` omit it in every mode. `for x in s` and `for i in 0..s.len` omit it when the bound is the loop itself.
 - Several files on one command, and `import`, are one assembly unit and one object. Modules, `pub`, and `mod__item` are described under Modules. `-c` writes one relocatable object for that unit; `ld` links objects and there is no libc. `bits 16` and `bits 32` exist only as naked functions. A scalar or pointer `let` there is a slot in the image; an array or a struct local is rejected. Named registers are readable and writable only inside `naked`. `bx`, `bp`, `ebx`, `ebp`, `esi`, and `edi` are naked lvalues in `bits 16` and `bits 32`, and rejected in 64-bit code. An `interrupt fn` cannot name `rbp`; it receives a pointer to the CPU frame instead. `save_context` / `restore_context` capture `rsp`, `rbp`, the callee-saved registers, and a resume address without naming those registers. Integer expressions in `bits 16` and `bits 32` use `eax`. A call in those modes uses the naked parameter registers (`ax`/`cx`/`dx`/`si` or `eax`/`ecx`/`edx`/`esi`), at most four, and only a callee of the same bits mode. `jmp reg` and `jmp [name]` are naked-only. The hosted suite assembles `iretq`, `sysret`, `ltr`, and the 64-bit control-register moves and does not execute them; it does execute `cpuid` and `int_carry`. The multi-file tests run as a Linux process. `tests/lang/context.lap` runs the framed switch as a Linux process. `tests/ctx` runs a `#PF` handler and an IRQ handler that rewrite the frame, under QEMU. The boot-sector tests execute real mode and protected mode under QEMU, including `lgdt(&gdtr)`, `write_cr0`, `if carry`, and `outb` on `tests/boot/realmode_builtins.lap`, `ds = 0` plus a local on `tests/boot/seg_local.lap`, and `sp` plus `jmp` on `tests/boot/jmp_sp.lap`. `tests/boot/call16.lap` and `tests/boot/call32.lap` call another function and jump through memory. `tests/boot/rax_keep.lap` executes the `ax` compare and the immediate store under QEMU. `tests/boot/edx_keep.lap` executes `idiv`, a `u32` `div`, a store through `bp+di`, and `lgdt` of a register under QEMU. `tests/freestanding/edx_keep.lap` assembles the remainder, a zero divisor, `lidt`, `invlpg`, and the `bits 32` forms, and is not booted. `tests/freestanding/rax_branch.lap` assembles `syscall`, `while (rax == 0)`, and `let r = syscall(8)`, and is not booted. `tests/freestanding/bits32_regs.lap` assembles `write_cr4`, `rdmsr` / `wrmsr`, and `cpuid` in `bits 32` and is not booted. `tests/freestanding/naked_local.lap` assembles the slot and the segment write and is not booted. `tests/freestanding/naked_regs.lap` assembles the named registers, the sized store, `jmp 0x8200`, and `far_jump` / `retfq`, and is not booted. `tests/freestanding/insns.lap` assembles `lodsb`, `rep stos`, `push`/`pop`, `syscall`, and a load of `__syscall_rsp`, and is not booted. `tests/freestanding/jmp_call.lap` assembles the indirect jump, the bits 16/32 call, and `syscall` with arguments, and is not booted. `tests/freestanding/sections.lap` assembles a named section, `vstart`, and `section_start` / `section_end`, and is not booted. `tests/boot/stc_carry.lap` executes `stc` and `if carry` under QEMU. `tests/boot/section.lap` executes one named section at `0x7C00` under QEMU. `tests/lang/naked_param.lap` runs the 64-bit register parameters. `tests/lang/extern_data.lap` runs a load of an `extern` qword. `tests/link` links two hosted `-c` objects and runs them, and links two freestanding `bits 32` objects that QEMU boots. `tests/usermode` executes long mode, `ltr`, the syscall MSRs, `iretq` to ring 3, `syscall`/`sysret`, and `iretq` from an interrupt, also under QEMU.
 - `syscall fn` does not program `STAR`, `LSTAR`, `SFMASK`, or `EFER`, and it does not emit `swapgs`. The kernel does that with `wrmsr` and `asm`. The `syscall` stack is `set_syscall_stack`, not `TSS.rsp0`. `volatile` is per access, as described above. It is not a memory model by itself; the atomic builtins are the protocol, and they are 64-bit only. `thread_spawn` is a Linux `clone` of one function with a caller-provided stack. It is not a pool, and it is not available in freestanding code. `let volatile` on a local scalar keeps the stack slot at hosted `-O2`.
