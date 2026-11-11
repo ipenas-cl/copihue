@@ -43,6 +43,7 @@ Parche: los hallazgos 10, 11 y 12 de [DESIGN_SELFHOST_S1.md](docs/DESIGN_SELFHOS
 
   Deja de compilar solo `tests/test_parser_pass.lap` en su forma anterior (R2).
 - `gcc -O2 -Wall -Werror` y `clang -O2 -Wall -Werror` sin advertencias en cada commit (en esta Mac `gcc` es el clang de Apple). La suite en esta Mac: los dos fallos de siempre (`tests/flat/generic.lap`, `tests/boot/edx_keep.lap`: codificación del nasm 3.02 instalado; con 0.45.1 fallan igual).
+- **Verificado en Linux** (Debian, gcc 14.2 `-O2 -Wall -Werror` sin advertencias): `tests/run_tests.sh` 672 pasan, 0 fallan (`tests/memfix`: 170 comprobaciones); `--nasm` 255 y 0; `--native` 252 y 0 (3 omitidos, como antes). Cada programa nuevo de `tests/lang/` falla con 0.45.1 y pasa con 0.45.2 a `-O0` y `-O2`, ejecutado; `tests/errors/memfix_arg_type.lap` compila con 0.45.1 y da sus 7 errores con 0.45.2. Los tres goldens de bytes regenerados (`min_kernel`, `usermode/kernel`, `ctx/kernel`) coinciden con el nasm de Linux. Con `--freestanding` y `--flat` también cambia el `-S` de `tests/pic/kernel.lap` y `tests/stackprobe/flat/kernel.lap`, por la misma escritura de campo de un arreglo global de structs (`pairs`, `idt`) por el camino común.
 - `tools/selfhost/corpus.txt` se regeneró con `tools/selfhost/corpus-list.sh`: pasa de 245 a 252 programas (los siete `tests/lang/` nuevos). `tests/memfix/` queda fuera de las listas, como antes.
 
 ### Pendiente
