@@ -1,0 +1,18 @@
+// let t: P = ps[i] past the end of a local array of structs traps (0.45.2).
+// Before, [P; 2] was checked against 4 and ps[3] copied the 16 bytes that
+// start 16 bytes after the array.
+struct P { x: i64, y: i64 }
+
+fn main() -> i32 {
+    let ps: [P; 2];
+    let i: i64 = 1;
+    ps[i].x = 8;
+    let t: P = ps[i];
+    print_int(t.x);
+    println("");
+    i = 3;
+    let u: P = ps[i];
+    print_int(u.x);
+    println("");
+    return 0;
+}

@@ -1,0 +1,18 @@
+// sum(ps[i]) past the end of a local array of structs traps (0.45.2). Before,
+// [P; 2] was checked against 4 and ps[2] passed the 16 bytes after the array.
+struct P { x: i64, y: i64 }
+
+fn sum(p: P) -> i64 { return p.x * 10 + p.y; }
+
+fn main() -> i32 {
+    let ps: [P; 2];
+    let i: i64 = 1;
+    ps[i].x = 6;
+    ps[i].y = 7;
+    print_int(sum(ps[i]));
+    println("");
+    i = 2;
+    print_int(sum(ps[i]));
+    println("");
+    return 0;
+}

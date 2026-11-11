@@ -1,0 +1,22 @@
+// A hosted -O2 `while (i < 4)` with no call drops the bounds check only when
+// every array it indexes has at least 4 elements (0.45.2). Before, [P; 2]
+// counted its 4 slots, so -O2 dropped the check and read ps[2] and ps[3] past
+// the array (-O0 compared i with 4). Now i = 2 traps at both levels.
+struct P { x: i64, y: i64 }
+
+fn main() -> i32 {
+    let ps: [P; 2];
+    ps[0].x = 1;
+    ps[1].x = 2;
+    print_int(ps[0].x + ps[1].x);
+    println("");
+    let s: i64 = 0;
+    let i: i64 = 0;
+    while (i < 4) {
+        s = s + ps[i].x;
+        i = i + 1;
+    }
+    print_int(s);
+    println("");
+    return 0;
+}

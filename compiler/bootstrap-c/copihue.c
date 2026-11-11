@@ -933,6 +933,13 @@ static void symbol_assign_reg(Symbol *s) {
     }
 }
 
+// Element count of a local array, the bound of a[i] and &a[i]. `size` counts
+// 8-byte slots: [P; 2] with a 16-byte P has 4 of them (0.45.2). An array from
+// an untyped literal has no array_len and one slot per element.
+static int local_array_len(const Symbol* s) {
+    return s->array_len > 0 ? s->array_len : s->size;
+}
+
 static const char *local_reg(Symbol *s) {
     if (!s || s->reg < 0 || s->reg >= g_reg_local_n) return NULL;
     return g_reg_local_name[s->reg];
@@ -10836,7 +10843,7 @@ static void found_spelling(Codegen* cg, AstNode* a, char* buf, int n) {
         }
         if (s && s->is_array) {
             snprintf(buf, n, "[%s; %d]", s->type_name ? s->type_name : "i64",
-                     s->array_len > 0 ? s->array_len : s->size);
+                     local_array_len(s));
             return;
         }
         if (!s && cg->global_symtab) g = global_symtab_lookup(cg->global_symtab, a->name);
@@ -11022,7 +11029,7 @@ static void gen_slice_let(Codegen* cg, AstNode* n) {
         if (arr || garr) {
             const char* elem = arr ? (arr->type_name ? arr->type_name : "i64")
                                    : (garr->elem_type ? garr->elem_type : "i64");
-            int count = arr ? (arr->array_len > 0 ? arr->array_len : arr->size) : garr->array_count;
+            int count = arr ? local_array_len(arr) : garr->array_count;
             if (want && strcmp(want, elem)) {
                 diag_error(init->line, init->col, "expected []%s, found [%s; %d]", want, elem, count);
                 zero_slice(cg, off);
@@ -11483,7 +11490,7 @@ void gen_addr_of(Codegen* cg, AstNode* n) {
             // Bounds checking for address-of, against the declared length.
             // Before 0.45.1 an array of integers was checked against its slot
             // count / 8 (0 for fewer than 8 elements), so &a[1] always trapped.
-            int array_count = sym->array_len > 0 ? sym->array_len : sym->size / 8;
+            int array_count = local_array_len(sym);
             if (sym->size > 0 && array_checks() &&
                 !hosted_array_check_skipped(var->children[1], array_count)) {
                 int ok_label = new_label(cg);
@@ -11950,7 +11957,7 @@ void gen_array_index(Codegen* cg, AstNode* n) {
         // It's a real array - do bounds checking
         // Determine element size from type_name
         int elem_size = 8;  // Default to 8 bytes (i64)
-        int array_count = sym->size;  // size is already the count for typed arrays
+        int array_count = local_array_len(sym);
         int is_struct = 0;
 
         if (sym->type_name) {
@@ -11970,9 +11977,6 @@ void gen_array_index(Codegen* cg, AstNode* n) {
                     is_struct = 1;
                 }
             }
-        } else {
-            // If no type_name, assume old behavior (size is in qwords)
-            array_count = sym->size;
         }
 
         // Bounds checking. idxreg is non-NULL only at hosted -O2; the rax
@@ -11982,10 +11986,7 @@ void gen_array_index(Codegen* cg, AstNode* n) {
             n->children[1]->type == AST_IDENT && n->children[1]->name &&
             !strcmp(n->children[1]->name, g_proven_idx) &&
             g_proven_lim >= 0 && (long long)array_count >= g_proven_lim;
-        {
-            int declared = (sym->is_array && sym->array_len > 0) ? sym->array_len : array_count;
-            if (hosted_array_check_skipped(n->children[1], declared)) proven = 1;
-        }
+        if (hosted_array_check_skipped(n->children[1], array_count)) proven = 1;
         if (!proven && sym->size > 0 && array_checks()) {
             if (o2_hosted()) {
                 int skip_neg = g_nonneg_reg && !strcmp(g_nonneg_reg, breg);
@@ -17213,7 +17214,7 @@ static int arrays_fit(Codegen* cg, AstNode* n, long long lim) {
     if ((n->type == AST_INDEX || n->type == AST_ARRAY_ASSIGN) && n->children &&
         n->children[0] && n->children[0]->type == AST_IDENT && n->children[0]->name) {
         Symbol* s = symtab_lookup_symbol(cg->symtab, n->children[0]->name);
-        if (s && s->is_array && !s->is_pointer && (long long)s->size < lim) return 0;
+        if (s && s->is_array && !s->is_pointer && (long long)local_array_len(s) < lim) return 0;
     }
     for (int i = 0; i < n->child_count; i++)
         if (!arrays_fit(cg, n->children[i], lim)) return 0;
@@ -17312,9 +17313,7 @@ static int parse_mad(AstNode* ix, MadIx* m) {
 static int i64_arr(Symbol* s, long long need) {
     if (!s || !s->is_array || s->is_pointer || !s->type_name) return 0;
     if (strcmp(s->type_name, "i64") && strcmp(s->type_name, "u64")) return 0;
-    if ((long long)s->size < need) return 0;
-    if (s->array_len > 0 && (long long)s->array_len < need) return 0;
-    return 1;
+    return (long long)local_array_len(s) >= need;
 }
 
 static const char* distinct_reg(Codegen* cg, const char* name, const char** prev, int nprev) {
@@ -17618,7 +17617,7 @@ static int try_byte_fill(Codegen* cg, AstNode* wh) {
     if (name_addr_taken(g_cur_fn, arr->name) || name_addr_taken(g_cur_fn, iname)) return 0;
     si = symtab_lookup_symbol(cg->symtab, (char*)iname);
     if (!si || si->is_array || si->is_pointer || sym_narrow_int(si)) return 0;
-    alen = asym->array_len > 0 ? asym->array_len : asym->size;
+    alen = local_array_len(asym);
     if (alen < 0 || !fits_imm32_val(alen)) return 0;
     if (rhs && rhs->type == AST_NUMBER) {
         if (!parse_i64(rhs->value, &lim) || lim < 0 || lim > alen) return 0;

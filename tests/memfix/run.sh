@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Silent memory corruption (0.45.1): struct arguments, p->f[i], &a[i], array literals. Called by
-# tests/run_tests.sh with the compiler path; also runnable alone:   tests/memfix/run.sh [path/to/copihue]
+# Silent memory corruption (0.45.1): struct arguments, p->f[i], &a[i], array literals; and (0.45.2) the
+# bound of a local array of structs. Called by tests/run_tests.sh with the compiler path; also runnable
+# alone:   tests/memfix/run.sh [path/to/copihue]
 #
 # 1. Every tests/errors/memfix_*.lap is refused in each way the compiler builds (native -O0 and -O2,
 #    --nasm, -c, --freestanding, --flat) with the first message of its golden file, on its line,
@@ -9,6 +10,8 @@
 #    (-S -O0 and -O2) assembles with nasm. The kernel builds with --freestanding and --flat.
 # 3. QEMU runs tests/memfix/kernel.lap and tests/memfix/kernel_addr.lap at -O0 and -O2 (--flat 0x8000),
 #    and kernel_addr.lap again with --checked (the bounds of &a[i] compiled in). COM1 must say MEMOK.
+#    tests/memfix/kernel_struct.lap (--checked) then indexes past its array of structs: the check
+#    faults, so COM1 must never say LEAK, which the kernel writes after that access.
 #    Without qemu-system-x86_64 and perl it is skipped; CMP_REQUIRE=1 (the CI) makes that a failure.
 # The hosted executables are Linux ELF files and are not run here; tests/run_tests.sh runs them on
 # Linux and compares them with tests/expected/tests/lang.
@@ -68,7 +71,7 @@ while IFS= read -r src; do
   done
 done < tests/memfix/progs.txt
 # The kernels are the freestanding and flat case (print needs the hosted runtime).
-for K in tests/memfix/kernel.lap tests/memfix/kernel_addr.lap; do
+for K in tests/memfix/kernel.lap tests/memfix/kernel_addr.lap tests/memfix/kernel_struct.lap; do
 for opt in -O0 -O2; do
   "$CC" --freestanding $opt -o "$WORK/f.asm" "$K" 2>"$WORK/err.txt" || bad "$K --freestanding $opt: $(head -3 "$WORK/err.txt")"
   ( cd "$WORK" && "$CC" --flat 0x8000 -S $opt -o fl.asm "$ROOT/$K" ) 2>"$WORK/err.txt" || bad "$K --flat -S $opt: $(head -3 "$WORK/err.txt")"
@@ -86,7 +89,8 @@ if command -v qemu-system-x86_64 >/dev/null 2>&1 && command -v perl >/dev/null 2
     bad "boot sector: $(cat "$WORK/err.txt")"
   else
     for kb in "kernel.lap -O0" "kernel.lap -O2" "kernel_addr.lap -O0" "kernel_addr.lap -O2" \
-              "kernel_addr.lap -O0 --checked" "kernel_addr.lap -O2 --checked"; do
+              "kernel_addr.lap -O0 --checked" "kernel_addr.lap -O2 --checked" \
+              "kernel_struct.lap -O0 --checked" "kernel_struct.lap -O2 --checked"; do
       K=tests/memfix/${kb%% *}; build=${kb#* }
       # shellcheck disable=SC2086
       if ! ( cd "$WORK" && "$CC" $build --flat 0x8000 -o kern.bin "$ROOT/$K" 2>err.txt ); then
@@ -101,6 +105,7 @@ if command -v qemu-system-x86_64 >/dev/null 2>&1 && command -v perl >/dev/null 2
         qemu-system-x86_64 -display none -boot a -drive file="$WORK/disk.img",format=raw,if=floppy,index=0 \
         -serial file:"$WORK/serial.txt" </dev/null >/dev/null 2>&1 || true
       grep -q MEMOK "$WORK/serial.txt" 2>/dev/null || bad "$K $build: COM1 should be MEMOK, got '$(cat "$WORK/serial.txt" 2>/dev/null)'"
+      grep -q LEAK "$WORK/serial.txt" 2>/dev/null && bad "$K $build: an access past the array was not stopped (COM1 says LEAK)"
       ok
     done
   fi

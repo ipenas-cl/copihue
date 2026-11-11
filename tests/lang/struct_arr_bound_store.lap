@@ -1,0 +1,21 @@
+// ps[i] = q past the end of a local array of structs traps before it writes
+// (0.45.2). Before, [P; 2] was checked against 4 and ps[2] = q wrote the 16
+// bytes after the array: here, guard.
+struct P { x: i64, y: i64 }
+
+fn main() -> i32 {
+    let guard: i64 = 77;
+    let ps: [P; 2];
+    let q: P;
+    q.x = 1;
+    q.y = 2;
+    let i: i64 = 1;
+    ps[i] = q;
+    print_int(ps[i].y);
+    println("");
+    i = 2;
+    ps[i] = q;
+    print_int(guard);
+    println("");
+    return 0;
+}

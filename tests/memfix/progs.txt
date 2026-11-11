@@ -6,3 +6,9 @@ tests/lang/addr_elem.lap
 tests/lang/addr_elem_oob.lap
 tests/lang/arr_lit_narrow.lap
 tests/lang/slice_return.lap
+# 0.45.2: the bound of a local array of structs.
+tests/lang/struct_arr_bound.lap
+tests/lang/struct_arr_bound_arg.lap
+tests/lang/struct_arr_bound_let.lap
+tests/lang/struct_arr_bound_store.lap
+tests/lang/struct_arr_bound_loop.lap
