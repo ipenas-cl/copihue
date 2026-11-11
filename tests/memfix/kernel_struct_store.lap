@@ -1,0 +1,118 @@
+// Flat kernel at 0x8000 for QEMU, like tests/memfix/kernel_struct.lap, for a field store into an
+// element of a local array of structs (0.45.2). tests/memfix/run.sh builds it with --checked.
+// The stores at the last valid index (an i64, a u8, an i32 and a nested field) must leave their
+// neighbours, then COM1 says MEMOK. ps[2].y = 9 comes next: the check ends in `syscall`, which
+// faults here, so LEAK must never follow. Before 0.45.2 the store had no check and wrote past the
+// array, and COM1 said MEMOKLEAK.
+
+struct P { x: i64, y: i64 }
+struct N { a: u8, b: i32, p: P }
+
+let bad: i64 = 0;
+
+data gdt {
+    dq 0;
+    dw 0;
+    dw 0;
+    db 0;
+    db 0x9A;
+    db 0x20;
+    db 0;
+    dw 0xFFFF;
+    dw 0;
+    db 0;
+    db 0x92;
+    db 0xCF;
+    db 0;
+}
+
+data gdtr {
+    dw 23;
+    dd gdt;
+}
+
+fn serial_putc(c: i64) -> i64 {
+    let tries = 0;
+    while ((inb(0x3FD) & 0x20) == 0 && tries < 1000) { tries = tries + 1; }
+    outb(0x3F8, c);
+    return 0;
+}
+
+fn check(n: i64, ok: i64) -> i64 {
+    if (ok == 0 && bad == 0) { bad = n; }
+    return 0;
+}
+
+fn kmain() -> i64 {
+    let guard: i64 = 77;
+    let ns: [N; 2];
+    let ps: [P; 2];
+    let i: i64 = 1;
+    ns[i].b = 4;
+    ns[i].a = 7;
+    ns[i].p.x = 5;
+    ns[i].p.y = 6;
+    ns[0].a = 1;
+    check(1, ns[1].a == 7 && ns[1].b == 4 && ns[1].p.x == 5 && ns[1].p.y == 6 && ns[0].a == 1);
+    ns[i].a = 8;
+    check(2, ns[1].a == 8 && ns[1].b == 4);
+    ps[0].y = 1;
+    ps[i].x = 2;
+    ps[i].y = 3;
+    check(3, ps[0].y == 1 && ps[1].x == 2 && ps[1].y == 3);
+    check(4, guard == 77);
+
+    if (bad == 0) {
+        serial_putc(77);
+        serial_putc(69);
+        serial_putc(77);
+        serial_putc(79);
+        serial_putc(75);
+    } else {
+        serial_putc(70);
+        serial_putc(65);
+        serial_putc(73);
+        serial_putc(76);
+        serial_putc(48 + bad / 10);
+        serial_putc(48 + bad % 10);
+    }
+    i = 2;
+    ps[i].y = 9;
+    serial_putc(76);
+    serial_putc(69);
+    serial_putc(65);
+    serial_putc(75);
+    while (1) { hlt(); }
+    return 0;
+}
+
+bits 32 naked fn _start() {
+    cli();
+    asm("lgdt [gdtr]");
+    asm("mov ax, 0x10");
+    asm("mov ds, ax");
+    asm("mov es, ax");
+    asm("mov ss, ax");
+    asm("mov esp, 0x6000");
+    asm("cld");
+    asm("xor eax, eax");
+    asm("mov edi, 0x1000");
+    asm("mov ecx, 3072");
+    asm("rep stosd");
+    asm("mov dword [0x1000], 0x2007");
+    asm("mov dword [0x2000], 0x3007");
+    asm("mov dword [0x3000], 0x87");
+    asm("mov eax, cr4");
+    asm("or eax, 0x20");
+    asm("mov cr4, eax");
+    asm("mov eax, 0x1000");
+    asm("mov cr3, eax");
+    asm("mov ecx, 0xC0000080");
+    asm("rdmsr");
+    asm("or eax, 0x100");
+    asm("wrmsr");
+    asm("mov eax, cr0");
+    asm("or eax, 0x80000000");
+    asm("mov cr0, eax");
+    asm("jmp 0x08:kmain");
+}

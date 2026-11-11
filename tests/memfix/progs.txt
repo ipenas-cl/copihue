@@ -12,3 +12,4 @@ tests/lang/struct_arr_bound_arg.lap
 tests/lang/struct_arr_bound_let.lap
 tests/lang/struct_arr_bound_store.lap
 tests/lang/struct_arr_bound_loop.lap
+tests/lang/struct_arr_bound_field.lap

@@ -1,0 +1,29 @@
+// ps[i].f = v on a local array of structs is checked like ps[i].f (0.45.2).
+// Before, the store computed the element's address itself and had no bounds
+// check in hosted code: ps[2].y = 9 wrote past [P; 2]. The store writes the
+// field's width only (u8, i32, a nested field) and leaves its neighbours.
+struct P { x: i64, y: i64 }
+struct N { a: u8, b: i32, p: P }
+
+fn main() -> i32 {
+    let guard: i64 = 77;
+    let ns: [N; 2];
+    let ps: [P; 2];
+    let i: i64 = 1;
+    ns[i].b = 4;
+    ns[i].a = 7;
+    ns[i].p.x = 5;
+    ns[i].p.y = 6;
+    print_int(ns[i].a + ns[i].b + ns[i].p.x + ns[i].p.y);
+    println("");
+    ps[0].y = 1;
+    ps[i].x = 2;
+    ps[i].y = 3;
+    print_int(ps[0].y * 100 + ps[1].x * 10 + ps[1].y);
+    println("");
+    i = 2;
+    ps[i].y = 9;
+    print_int(guard);
+    println("");
+    return 0;
+}

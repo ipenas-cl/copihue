@@ -10,8 +10,9 @@
 #    (-S -O0 and -O2) assembles with nasm. The kernel builds with --freestanding and --flat.
 # 3. QEMU runs tests/memfix/kernel.lap and tests/memfix/kernel_addr.lap at -O0 and -O2 (--flat 0x8000),
 #    and kernel_addr.lap again with --checked (the bounds of &a[i] compiled in). COM1 must say MEMOK.
-#    tests/memfix/kernel_struct.lap (--checked) then indexes past its array of structs: the check
-#    faults, so COM1 must never say LEAK, which the kernel writes after that access.
+#    tests/memfix/kernel_struct.lap and kernel_struct_store.lap (--checked) then read and write past
+#    their array of structs: the check faults, so COM1 must never say LEAK, which each kernel writes
+#    after that access.
 #    Without qemu-system-x86_64 and perl it is skipped; CMP_REQUIRE=1 (the CI) makes that a failure.
 # The hosted executables are Linux ELF files and are not run here; tests/run_tests.sh runs them on
 # Linux and compares them with tests/expected/tests/lang.
@@ -71,7 +72,8 @@ while IFS= read -r src; do
   done
 done < tests/memfix/progs.txt
 # The kernels are the freestanding and flat case (print needs the hosted runtime).
-for K in tests/memfix/kernel.lap tests/memfix/kernel_addr.lap tests/memfix/kernel_struct.lap; do
+for K in tests/memfix/kernel.lap tests/memfix/kernel_addr.lap tests/memfix/kernel_struct.lap \
+         tests/memfix/kernel_struct_store.lap; do
 for opt in -O0 -O2; do
   "$CC" --freestanding $opt -o "$WORK/f.asm" "$K" 2>"$WORK/err.txt" || bad "$K --freestanding $opt: $(head -3 "$WORK/err.txt")"
   ( cd "$WORK" && "$CC" --flat 0x8000 -S $opt -o fl.asm "$ROOT/$K" ) 2>"$WORK/err.txt" || bad "$K --flat -S $opt: $(head -3 "$WORK/err.txt")"
@@ -90,7 +92,8 @@ if command -v qemu-system-x86_64 >/dev/null 2>&1 && command -v perl >/dev/null 2
   else
     for kb in "kernel.lap -O0" "kernel.lap -O2" "kernel_addr.lap -O0" "kernel_addr.lap -O2" \
               "kernel_addr.lap -O0 --checked" "kernel_addr.lap -O2 --checked" \
-              "kernel_struct.lap -O0 --checked" "kernel_struct.lap -O2 --checked"; do
+              "kernel_struct.lap -O0 --checked" "kernel_struct.lap -O2 --checked" \
+              "kernel_struct_store.lap -O0 --checked" "kernel_struct_store.lap -O2 --checked"; do
       K=tests/memfix/${kb%% *}; build=${kb#* }
       # shellcheck disable=SC2086
       if ! ( cd "$WORK" && "$CC" $build --flat 0x8000 -o kern.bin "$ROOT/$K" 2>err.txt ); then

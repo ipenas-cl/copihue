@@ -16163,92 +16163,7 @@ void gen_expr(Codegen* cg, AstNode* n) {
         }
         emit(cg, "    push rax\n");  // Save value
 
-        // Check if object is an array index expression (e.g., arr[0])
-        if (obj->type == AST_INDEX) {
-            // Field assignment to array element: arr[index].field = value
-            if (!obj->children || obj->child_count < 2) return;
-            AstNode* arr_base = obj->children[0];
-            AstNode* index_expr = obj->children[1];
-
-            if (!arr_base || !arr_base->name) return;
-
-            // Evaluate index expression
-            gen_expr(cg, index_expr);
-            emit(cg, "    push rax\n");  // Save index
-
-            // Look up array in symbol table
-            Symbol* sym = symtab_lookup_symbol(cg->symtab, arr_base->name);
-            if (sym && sym->type_name) {
-                char* type_name = sym->type_name;
-
-                // Determine element size and struct type
-                int elem_size = 8;
-                char* struct_type = type_name;
-
-                // Check if it's a struct type
-                StructType* st = typetab_lookup(cg->types, type_name);
-                if (st) {
-                    elem_size = st->size;
-                    struct_type = type_name;
-                }
-
-                // Get field offset
-                int field_off = typetab_field_offset(cg->types, struct_type, field_name);
-                if (field_off >= 0) {
-                    emit(cg, "    pop rbx\n");  // Restore index
-                    emit(cg, "    ; Array element field assignment: %s[index].%s (elem_size=%d, offset %d)\n",
-                         arr_base->name, field_name, elem_size, field_off);
-
-                    // Calculate array element address
-                    if (elem_size > 1) {
-                        emit_scale_reg(cg, "rbx", elem_size);
-                    }
-                    emit(cg, "    lea rcx, [rbp%d+rbx]\n", sym->offset);  // rcx = address of array element
-
-                    // Add field offset
-                    if (field_off > 0) {
-                        emit(cg, "    add rcx, %d\n", field_off);
-                    }
-
-                    emit(cg, "    pop rax\n");  // Restore value
-                    {
-                        int psz = 8, psg = 0, poff = field_off, pvol = 0;
-                        if (field_mem_info(cg, struct_type, field_name, &poff, &psz, &psg, &pvol))
-                            emit_sized_store_mark(cg, "rcx", psz, 0, pvol);
-                        else {
-                            trunc_rax_field(cg, struct_type, field_name);
-                            emit(cg, "    mov [rcx], rax\n");  // Store value at field location
-                        }
-                    }
-                }
-            } else {
-                // Global array of structs: idt[n].field = value
-                GlobalVar* gv = global_symtab_lookup(cg->global_symtab, arr_base->name);
-                StructType* st = (gv && gv->is_array && gv->elem_type) ? typetab_lookup(cg->types, gv->elem_type) : NULL;
-                if (st) {
-                    int field_off = typetab_field_offset(cg->types, gv->elem_type, field_name);
-                    if (field_off >= 0) {
-                        emit(cg, "    pop rbx\n");
-                        emit_scale_reg(cg, "rbx", st->size);
-                        emit(cg, "    lea rcx, [%s]\n", gv->name);
-                        emit(cg, "    add rcx, rbx\n");
-                        if (field_off > 0) emit(cg, "    add rcx, %d\n", field_off);
-                        emit(cg, "    pop rax\n");
-                        int psz = 8, psg = 0, poff = field_off, pvol = 0;
-                        if (field_mem_info(cg, gv->elem_type, field_name, &poff, &psz, &psg, &pvol))
-                            emit_sized_store_mark(cg, "rcx", psz, 0, pvol);
-                        else {
-                            trunc_rax_field(cg, gv->elem_type, field_name);
-                            emit(cg, "    mov [rcx], rax\n");
-                        }
-                    } else {
-                        emit(cg, "    pop rbx\n    pop rax\n");
-                    }
-                } else {
-                    emit(cg, "    pop rbx\n    pop rax\n");
-                }
-            }
-        } else if (obj->type == AST_DEREF && obj->child_count == 1) {
+        if (obj->type == AST_DEREF && obj->child_count == 1) {
             // ptr->field = value
             int field_off = deref_field_offset(cg, obj->children[0], field_name, n);
             if (field_off >= 0) {
@@ -16275,9 +16190,11 @@ void gen_expr(Codegen* cg, AstNode* n) {
             } else {
                 emit(cg, "    pop rax\n");
             }
-        } else if (obj->type == AST_FIELD_ACCESS) {
-            // Nested scalar store: a.p.x = value. Address the embedded field
-            // and write only its width, so the rest of the parent stays put.
+        } else if (obj->type == AST_FIELD_ACCESS || obj->type == AST_INDEX) {
+            // a.p.x = value and a[i].x = value. Address the field and write only
+            // its width, so the rest of the parent stays put. An element's address
+            // is the one a[i].x reads, bounds check included (0.45.2; before, the
+            // store to a local array element computed its own, unchecked).
             char* rec = obj_record_type(cg, obj);
             int field_off = rec ? typetab_field_offset(cg->types, rec, field_name) : -1;
             if (rec && field_off >= 0 && gen_field_addr(cg, obj, field_name)) {
