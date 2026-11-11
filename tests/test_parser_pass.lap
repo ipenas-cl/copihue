@@ -41,7 +41,7 @@ fn main() -> i64 {
     print_int(parser.pos);
     println("");
 
-    let val: i64 = read_token(parser);
+    let val: i64 = read_token(&parser);
 
     print("Returned value: ");
     print_int(val);

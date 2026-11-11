@@ -6522,6 +6522,65 @@ static int expr_is_own_source(Codegen* cg, AstNode* a) {
     return 0;
 }
 
+// The struct an argument is: a literal's type, or the struct of a value (a
+// local, a global, a field, an element, `*q`, a call). NULL if it is not one.
+static const char* arg_struct_type(Codegen* cg, AstNode* arg) {
+    if (arg->type == AST_STRUCT_LITERAL) return arg->struct_type;
+    return struct_value_type(cg, arg);
+}
+
+// A struct parameter `p: P` given something that is not a P: another struct,
+// an integer, a pointer. `got` is the argument's struct, NULL if it is none.
+static void diag_struct_param_arg(Codegen* cg, AstNode* arg, int i, const char* fname,
+                                  const char* want, const char* got) {
+    char found[160];
+    VTy arg_ty = expr_ty(cg, arg);
+    if (got) snprintf(found, sizeof found, "%s", got);
+    else found_spelling(cg, arg, found, (int)sizeof found);
+    if (arg_ty.kind == VK_PTR && !strcmp(after_star(arg_ty.disp), want))
+        diag_error(arg->line, arg->col, "argument %d of '%s': expected %s, found %s; pass the %s it points to with '*'",
+                   i + 1, fname, want, found, want);
+    else
+        diag_error(arg->line, arg->col, "argument %d of '%s': expected %s, found %s; pass a %s value",
+                   i + 1, fname, want, found, want);
+}
+
+// A pointer parameter given the struct `got` itself instead of its address.
+static void diag_pointer_param_arg(Codegen* cg, AstNode* arg, int i, const char* fname,
+                                   AstNode* par, const char* got) {
+    VTy want = ty_decl(cg, 0, par->is_pointer, par->value);
+    int same = par->value && !strcmp(got, par->value);
+    if (same && arg->type == AST_STRUCT_LITERAL)
+        diag_error(arg->line, arg->col, "argument %d of '%s': expected %s, found %s; declare it first (let t: %s = ...) and pass &t",
+                   i + 1, fname, want.disp, got, got);
+    else if (same)
+        diag_error(arg->line, arg->col, "argument %d of '%s': expected %s, found %s; pass its address with '&'",
+                   i + 1, fname, want.disp, got);
+    else
+        diag_error(arg->line, arg->col, "argument %d of '%s': expected %s, found %s; pass the address of a %s",
+                   i + 1, fname, want.disp, got, after_star(want.disp));
+}
+
+// R2 of DESIGN_SECURITY (0.45.2): a struct parameter takes a struct of that
+// type, and a pointer parameter takes a pointer, not a struct. The callee
+// copies the parameter's size from the address it gets: `sum(5)` read at
+// address 5, another struct was read past its end, and a struct given to
+// `*P` was taken as a P. Returns 1 when it decided the argument (an error, or
+// a struct of the right type), 0 to leave it to check_arg.
+static int check_struct_arg(Codegen* cg, AstNode* call, int i, AstNode* par, AstNode* arg) {
+    const char* fname = call->name ? call->name : "(call)";
+    const char* got = arg_struct_type(cg, arg);
+    if (!par->is_pointer && par->value && is_record(cg, par->value)) {
+        if (!got || strcmp(got, par->value)) diag_struct_param_arg(cg, arg, i, fname, par->value, got);
+        return 1;
+    }
+    if (par->is_pointer && got) {
+        diag_pointer_param_arg(cg, arg, i, fname, par, got);
+        return 1;
+    }
+    return 0;
+}
+
 static void check_user_args(Codegen* cg, AstNode* n, AstNode* fn) {
     int argc = n->child_count;
     int want = fn->child_count - 1;
@@ -6580,6 +6639,7 @@ static void check_user_args(Codegen* cg, AstNode* n, AstNode* fn) {
                        "expected []%s, found %s", want_e, found);
             continue;
         }
+        if (arg && check_struct_arg(cg, n, i, par, arg)) continue;
         VTy dst = ty_decl(cg, 0, par->is_pointer, par->value);
         check_arg(cg, n->children[i], i, n->name, dst);
     }
