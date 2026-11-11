@@ -1,9 +1,10 @@
 // Flat kernel at 0x8000 for QEMU, loaded by tests/usermode/boot.lap, like tests/memfix/kernel.lap.
 // A local array of structs, [P; 2] with a 16-byte P (0.45.2). tests/memfix/run.sh builds it with
 // --checked, so a[i] is checked against the length, 2, and not against the 4 slots of the array.
-// Every form at the last valid index must hold, then COM1 says MEMOK. ps[2].x comes next: the
-// check ends in `syscall`, which faults here, so LEAK must never follow. Before 0.45.2 the read
-// went through and COM1 said MEMOKLEAK.
+// Every form at the last valid index must hold, and a field a struct literal does not name must be
+// 0 over a dirty stack; then COM1 says MEMOK (FAIL06 or FAIL07 before 0.45.2: the literal kept the
+// 0xFF bytes). ps[2].x comes next: the check ends in `syscall`, which faults here, so LEAK must
+// never follow. Before 0.45.2 the read went through and COM1 said MEMOKLEAK.
 
 struct P { x: i64, y: i64 }
 
@@ -44,6 +45,28 @@ fn check(n: i64, ok: i64) -> i64 {
 
 fn sum(p: P) -> i64 { return p.x * 10 + p.y; }
 
+// Every byte of these stack slots to 0xFF, for the literals that come next.
+fn dirty() -> i64 {
+    let junk: [i64; 16];
+    let i: i64 = 0;
+    while (i < 16) {
+        junk[i] = -1;
+        i = i + 1;
+    }
+    return junk[15];
+}
+
+// A field a literal does not name is 0 (0.45.2): x here, and the first element's x.
+fn let_unnamed() -> i64 {
+    let p: P = P { y: 9 };
+    return p.x;
+}
+
+fn elem_unnamed() -> i64 {
+    let ps: [P; 2] = [P { y: 2 }, P { x: 3 }];
+    return ps[0].x + ps[1].y;
+}
+
 fn kmain() -> i64 {
     let guard: i64 = 77;
     let ps: [P; 2];
@@ -61,6 +84,10 @@ fn kmain() -> i64 {
     check(3, t.x == 3 && t.y == 5);
     check(4, sum(ps[i]) == 35 && sum(ps[0]) == 12);
     check(5, guard == 77);
+    dirty();
+    check(6, let_unnamed() == 0);
+    dirty();
+    check(7, elem_unnamed() == 0);
 
     if (bad == 0) {
         serial_putc(77);
@@ -77,7 +104,7 @@ fn kmain() -> i64 {
         serial_putc(48 + bad % 10);
     }
     i = i + 1;
-    check(6, ps[i].x == 0);
+    check(8, ps[i].x == 0);
     serial_putc(76);
     serial_putc(69);
     serial_putc(65);

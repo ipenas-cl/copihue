@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Silent memory corruption (0.45.1): struct arguments, p->f[i], &a[i], array literals; and (0.45.2) the
-# bound of a local array of structs. Called by tests/run_tests.sh with the compiler path; also runnable
-# alone:   tests/memfix/run.sh [path/to/copihue]
+# bound of a local array of structs and the fields a struct literal does not name. Called by
+# tests/run_tests.sh with the compiler path; also runnable alone:   tests/memfix/run.sh [path/to/copihue]
 #
 # 1. Every tests/errors/memfix_*.lap is refused in each way the compiler builds (native -O0 and -O2,
 #    --nasm, -c, --freestanding, --flat) with the first message of its golden file, on its line,

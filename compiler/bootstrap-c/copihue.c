@@ -6963,8 +6963,7 @@ static int enum_passed_by_addr(Codegen* cg, AstNode* a) {
 }
 
 static int gen_enum_arg(Codegen* cg, AstNode* a);
-static int frame_temp_zeroed(Codegen* cg, int size);
-static void gen_struct_literal_at(Codegen* cg, AstNode* n, int base);
+static void gen_struct_literal_temp(Codegen* cg, AstNode* n, int size);
 
 // A struct argument that is not a local name (0.45.1): a literal, `*q` with
 // q: *T, a global, or a field (`r.a`, `p->a`). Before, a literal was built over
@@ -6983,7 +6982,6 @@ static int struct_arg_by_addr(Codegen* cg, AstNode* a) {
 static void gen_struct_arg_addr(Codegen* cg, AstNode* a) {
     if (a->type == AST_STRUCT_LITERAL) {
         StructType* st = a->struct_type ? typetab_lookup(cg->types, a->struct_type) : NULL;
-        int off;
         if (!st || !cg->symtab || legacy_bits() || (g_fn_flags & AF_NAKED)) {
             diag_error(a->line, a->col,
                        "this struct literal cannot be passed as an argument; pass a local: let t: %s = ...; f(t)",
@@ -6992,9 +6990,7 @@ static void gen_struct_arg_addr(Codegen* cg, AstNode* a) {
             return;
         }
         emit(cg, "    ; struct literal %s\n", a->struct_type);
-        off = frame_temp_zeroed(cg, st->size);
-        gen_struct_literal_at(cg, a, off);
-        emit(cg, "    lea rax, [rbp%+d]\n", off);
+        gen_struct_literal_temp(cg, a, st->size);
         return;
     }
     if (!gen_struct_value_addr(cg, a)) {
@@ -12137,9 +12133,46 @@ void gen_array_index(Codegen* cg, AstNode* n) {
     }
 }
 
-// Store a struct literal into the frame at [rbp+base]. Nested struct
-// literals are stored in place; struct-typed variables are copied.
+// Zero `size` bytes at [rbp+off]: whole qwords, then the tail at its own
+// width, so a byte past the end (the neighbour of a packed struct) stays.
+static void emit_zero_frame(Codegen* cg, int off, int size) {
+    int b = 0;
+    emit(cg, "    xor rax, rax\n");
+    for (; b + 8 <= size; b += 8) emit(cg, "    mov [rbp%+d], rax\n", off + b);
+    if (b + 4 <= size) { emit(cg, "    mov dword [rbp%+d], eax\n", off + b); b += 4; }
+    if (b + 2 <= size) { emit(cg, "    mov word [rbp%+d], ax\n", off + b); b += 2; }
+    if (b < size) emit(cg, "    mov byte [rbp%+d], al\n", off + b);
+}
+
+static void store_literal_fields(Codegen* cg, AstNode* n, int base);
+
+// Build a struct literal in the frame at [rbp+base]: every byte zeroed, then
+// the fields it names. A field it does not name is 0 (0.45.2; before, a 'let'
+// and an element of an array literal kept what the frame held there).
 static void gen_struct_literal_at(Codegen* cg, AstNode* n, int base) {
+    StructType* st = n->struct_type ? typetab_lookup(cg->types, n->struct_type) : NULL;
+    if (st) emit_zero_frame(cg, base, st->size);
+    store_literal_fields(cg, n, base);
+}
+
+// A new slot of `size` bytes in this frame, rounded to whole qwords.
+static int frame_temp(Codegen* cg, int size) {
+    int sz = size > 0 ? (size + 7) & ~7 : 8;
+    cg->symtab->stack_size += sz;
+    return -cg->symtab->stack_size;
+}
+
+// A struct literal built in a new temporary of this frame, its address in rax:
+// an argument, a returned value, a literal anywhere else.
+static void gen_struct_literal_temp(Codegen* cg, AstNode* n, int size) {
+    int off = frame_temp(cg, size);
+    gen_struct_literal_at(cg, n, off);
+    emit(cg, "    lea rax, [rbp%+d]\n", off);
+}
+
+// The fields a struct literal names, stored over bytes already zeroed. A
+// nested struct literal is stored in place; a struct value is copied.
+static void store_literal_fields(Codegen* cg, AstNode* n, int base) {
     for (int i = 0; i < n->child_count; i++) {
         AstNode* field_assign = n->children[i];
         char* field_name = field_assign->name;
@@ -12163,7 +12196,7 @@ static void gen_struct_literal_at(Codegen* cg, AstNode* n, int base) {
         }
         Symbol* lsrc = (fst && field_value->type == AST_IDENT) ? symtab_lookup_symbol(cg->symtab, field_value->name) : NULL;
         if (field_value->type == AST_STRUCT_LITERAL) {
-            gen_struct_literal_at(cg, field_value, base + field_off);
+            store_literal_fields(cg, field_value, base + field_off);
         } else if (lsrc && !lsrc->is_pointer && !lsrc->is_array && lsrc->type_name &&
                    !strcmp(lsrc->type_name, fst->name) && fst->size % 8 == 0) {
             for (int b = 0; b < fst->size; b += 8) {
@@ -14139,17 +14172,6 @@ static void gen_enum_store(Codegen* cg, Symbol* dst, AstNode* src) {
     gen_enum_store_loc(cg, e, &loc, src);
 }
 
-// A new slot of `size` bytes in this frame, rounded to whole qwords and zeroed.
-static int frame_temp_zeroed(Codegen* cg, int size) {
-    int sz = size > 0 ? (size + 7) & ~7 : 8;
-    int off;
-    cg->symtab->stack_size += sz;
-    off = -cg->symtab->stack_size;
-    emit(cg, "    xor rax, rax\n");
-    for (int f = 0; f < sz; f += 8) emit(cg, "    mov [rbp%+d], rax\n", off + f);
-    return off;
-}
-
 // The call writes its struct or slice straight into [rbp+off], a new local.
 static void gen_struct_call_into(Codegen* cg, AstNode* call, int off) {
     int sk = g_enum_dst_kind;
@@ -14189,15 +14211,12 @@ static void gen_struct_return(Codegen* cg, AstNode* src, StructType* st) {
         return;
     }
     if (src->type == AST_STRUCT_LITERAL) {
-        int off;
         if (!src->struct_type || strcmp(src->struct_type, st->name)) {
             mismatch(src, "return value", st->name, src->struct_type ? src->struct_type : "untyped");
             return;
         }
         if (!cg->symtab) return;
-        off = frame_temp_zeroed(cg, sz);
-        gen_struct_literal_at(cg, src, off);
-        emit(cg, "    lea rax, [rbp%+d]\n", off);
+        gen_struct_literal_temp(cg, src, sz);
     } else if (src->type == AST_DEREF && src->child_count == 1) {
         VTy p = expr_ty(cg, src->children[0]);
         if (p.kind != VK_PTR || strcmp(after_star(p.disp), st->name)) {
@@ -15366,9 +15385,7 @@ void gen_expr(Codegen* cg, AstNode* n) {
                 return;
             }
             emit(cg, "    ; struct literal %s\n", n->struct_type);
-            int toff = frame_temp_zeroed(cg, lst->size);
-            gen_struct_literal_at(cg, n, toff);
-            emit(cg, "    lea rax, [rbp%+d]\n", toff);
+            gen_struct_literal_temp(cg, n, lst->size);
             return;
         }
         emit(cg, "    ; struct literal %s\n", n->struct_type);
