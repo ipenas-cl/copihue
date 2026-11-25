@@ -21388,7 +21388,8 @@ static void check_literal_addresses(AstNode* n, int in_loop) {
         else
             diag_error(addr->line, addr->col,
                        "&%s { ... } in a loop: every iteration would reuse its one slot while a pointer from an earlier one "
-                       "may still be held; declare it before the loop (let t: %s = %s { ... };) and take &t", t, t, t);
+                       "may still be held; declare it before the loop (let t: %s = %s { ... };) and take &t, "
+                       "or, for one per iteration, an array before the loop (let a: [%s; N];) and take &a[i]", t, t, t, t);
         return;
     }
     for (i = 0; i < n->child_count; i++)

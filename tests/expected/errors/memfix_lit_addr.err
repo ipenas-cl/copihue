@@ -1,13 +1,13 @@
-tests/errors/memfix_lit_addr.lap:14:13: error: &P { ... } in a loop: every iteration would reuse its one slot while a pointer from an earlier one may still be held; declare it before the loop (let t: P = P { ... };) and take &t
+tests/errors/memfix_lit_addr.lap:14:13: error: &P { ... } in a loop: every iteration would reuse its one slot while a pointer from an earlier one may still be held; declare it before the loop (let t: P = P { ... };) and take &t, or, for one per iteration, an array before the loop (let a: [P; N];) and take &a[i]
      14 |         q = &P { x: i, y: 0 };
         |             ^
-tests/errors/memfix_lit_addr.lap:17:17: error: &P { ... } in a loop: every iteration would reuse its one slot while a pointer from an earlier one may still be held; declare it before the loop (let t: P = P { ... };) and take &t
+tests/errors/memfix_lit_addr.lap:17:17: error: &P { ... } in a loop: every iteration would reuse its one slot while a pointer from an earlier one may still be held; declare it before the loop (let t: P = P { ... };) and take &t, or, for one per iteration, an array before the loop (let a: [P; N];) and take &a[i]
      17 |     while (show(&P { x: i }) < 5) {
         |                 ^
-tests/errors/memfix_lit_addr.lap:21:24: error: &P { ... } in a loop: every iteration would reuse its one slot while a pointer from an earlier one may still be held; declare it before the loop (let t: P = P { ... };) and take &t
+tests/errors/memfix_lit_addr.lap:21:24: error: &P { ... } in a loop: every iteration would reuse its one slot while a pointer from an earlier one may still be held; declare it before the loop (let t: P = P { ... };) and take &t, or, for one per iteration, an array before the loop (let a: [P; N];) and take &a[i]
      21 |         print_int(show(&P { x: j, y: 1 }));
         |                        ^
-tests/errors/memfix_lit_addr.lap:23:32: error: &P { ... } in a loop: every iteration would reuse its one slot while a pointer from an earlier one may still be held; declare it before the loop (let t: P = P { ... };) and take &t
+tests/errors/memfix_lit_addr.lap:23:32: error: &P { ... } in a loop: every iteration would reuse its one slot while a pointer from an earlier one may still be held; declare it before the loop (let t: P = P { ... };) and take &t, or, for one per iteration, an array before the loop (let a: [P; N];) and take &a[i]
      23 |     for (let k = 0; k < 3; q = &P { x: k }) {
         |                                ^
 tests/errors/memfix_lit_addr.lap:30:12: error: cannot return &P { ... }: the literal lives in this function's frame, which is gone after the return; declare the function '-> P' and return P { ... }
