@@ -19,3 +19,6 @@ tests/lang/struct_lit_addr.lap
 # 0.45.3: a field through a pointer that is not a local name (a.next.v, a global *P, ps[i].x, a cast, a call).
 tests/lang/field_ptr_chain.lap
 tests/lang/field_ptr_call.lap
+# 0.45.3: a field store into an element of an array field (h.ps[i].y, q.arr[i].x).
+tests/lang/struct_field_arr.lap
+tests/lang/struct_field_arr_ptr.lap

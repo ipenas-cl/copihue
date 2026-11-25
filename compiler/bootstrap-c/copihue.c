@@ -11678,40 +11678,25 @@ static void gen_ptr_expr_load(Codegen* cg, AstNode* at, AstNode* base, AstNode* 
     else emit_sized_load_mark(cg, "rbx", a.sz, 0, a.vol);
 }
 
-// obj.field = value where obj is an expression with no name: `getp().x = v`,
-// `getp()[i].x = v`. Through a pointer to a struct it is a store into that struct.
-// A struct returned by value is a temporary, and anything else has no fields.
+// obj.field = value where obj is an expression with no name that is not an
+// element: `getp().x = v`, `(p as *P).x = v`. Through a pointer to a struct it
+// is a store into that struct. A struct returned by value is a temporary, and
+// anything else has no fields.
 static void gen_field_store_expr(Codegen* cg, AstNode* n, AstNode* obj, const char* field, AstNode* value) {
     PtrAcc a;
-    AstNode* base = obj;
-    AstNode* index = NULL;
     const char* stype = NULL;
-    if (obj->type == AST_INDEX && obj->child_count >= 2) {
-        base = obj->children[0];
-        index = obj->children[1];
-        if (!ptr_expr_access(cg, base, &a)) {
-            diag_not_pointer(cg, n, base, "the assignment target is not assignable");
-            return;
-        }
-        if (a.rec) stype = a.tn;
-    } else {
-        VTy t = expr_ty(cg, obj);
-        if (t.kind == VK_STRUCT) {
-            diag_error(STMT_POS(n),
-                       "the assignment target is not assignable: a field of a struct value (a copy, not a place)");
-            return;
-        }
-        if (t.kind == VK_PTR && ptr_expr_access(cg, obj, &a) && a.rec) stype = a.tn;
-        else a.sz = 8;
+    VTy t = expr_ty(cg, obj);
+    if (t.kind == VK_STRUCT) {
+        diag_error(STMT_POS(n),
+                   "the assignment target is not assignable: a field of a struct value (a copy, not a place)");
+        return;
     }
+    // check_field_access found the struct and its field.
+    if (t.kind == VK_PTR && ptr_expr_access(cg, obj, &a) && a.rec) stype = a.tn;
     if (!stype) {
         diag_error(STMT_POS(n),
                    "the assignment target is not assignable: field '%s' of an expression that is not a struct or a pointer to one",
                    field);
-        return;
-    }
-    if (typetab_field_offset(cg->types, (char*)stype, (char*)field) < 0) {
-        diag_error(STMT_POS(n), "struct '%s' has no field '%s'", stype, field);
         return;
     }
     {
@@ -11724,11 +11709,8 @@ static void gen_field_store_expr(Codegen* cg, AstNode* n, AstNode* obj, const ch
         gen_expr(cg, peel_store_cast(value, bits));
     }
     emit(cg, "    push rax\n");
-    if (index) gen_ptr_expr_addr(cg, base, index, &a);
-    else {
-        gen_expr(cg, obj);
-        emit(cg, "    mov rbx, rax\n");
-    }
+    gen_expr(cg, obj);
+    emit(cg, "    mov rbx, rax\n");
     emit(cg, "    pop rax\n");
     {
         int psz = 8, psg = 0, poff = typetab_field_offset(cg->types, (char*)stype, (char*)field), pvol = 0;
@@ -16307,10 +16289,13 @@ void gen_expr(Codegen* cg, AstNode* n) {
             return;
         }
 
-        // An object that is an expression without a name (`getp().x = v`): handled apart.
+        // An object that is an expression without a name and is not an element
+        // (`getp().x = v`, `(p as *P).x = v`): handled apart. Every element,
+        // `h.ps[i].x = v` with ps: [P; N] included, takes the common path below
+        // (0.45.3; before, an element of a field was sent there as a pointer
+        // expression and refused, or written at the pointer's stride).
         if (obj->type != AST_IDENT && obj->type != AST_DEREF && obj->type != AST_FIELD_ACCESS &&
-            !(obj->type == AST_INDEX && obj->child_count >= 2 && obj->children[0] &&
-              obj->children[0]->type == AST_IDENT)) {
+            obj->type != AST_INDEX) {
             gen_field_store_expr(cg, n, obj, field_name, value_expr);
             return;
         }
