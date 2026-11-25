@@ -1,0 +1,19 @@
+// A field of the struct that a call's returned pointer points to (0.45.3).
+// Before, reading it was refused ("'getp' does not return a struct"), while the
+// store through the same call compiled.
+struct P { x: i64, y: i64 }
+
+let gp: P;
+
+fn getp() -> *P { return &gp; }
+
+fn main() -> i32 {
+    gp.x = 3;
+    gp.y = 4;
+    print_int(getp().y);
+    println("");
+    getp().x = 9;
+    print_int(gp.x + getp().x);
+    println("");
+    return 0;
+}

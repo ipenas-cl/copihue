@@ -1,0 +1,27 @@
+// A field store through an element of an array field of pointers,
+// `q.arr[i].x = v` with arr: [*P; 2] (0.45.3): the element is a pointer, 8 bytes,
+// and the store goes through it. Before, the element was taken as a P (16 bytes)
+// and the store went into the array itself: with i = 1 it wrote over `guard`,
+// the field after the array, and r.x kept 6.
+struct P { x: i64, y: i64 }
+struct Q { arr: [*P; 2], guard: i64 }
+
+fn main() -> i32 {
+    let p: P;
+    let r: P;
+    let q: Q;
+    let i: i64 = 1;
+    p.x = 4;
+    r.x = 6;
+    q.guard = 77;
+    q.arr[0] = &p;
+    q.arr[i] = &r;
+    q.arr[i].x = 9;
+    print_int(r.x);
+    println("");
+    print_int(q.guard);
+    println("");
+    print_int(q.arr[0].x + q.arr[i].x * 10);
+    println("");
+    return 0;
+}

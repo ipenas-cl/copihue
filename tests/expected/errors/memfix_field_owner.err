@@ -1,0 +1,61 @@
+tests/errors/memfix_field_owner.lap:22:5: error: a[i] has type i64, which has no field 'x'; only a struct or a pointer to a struct has fields
+     22 |     a[i].x = 7;
+        |     ^
+tests/errors/memfix_field_owner.lap:23:5: error: b[i] has type u8, which has no field 'x'; only a struct or a pointer to a struct has fields
+     23 |     b[i].x = 7;
+        |     ^
+tests/errors/memfix_field_owner.lap:24:5: error: ga[i] has type i64, which has no field 'x'; only a struct or a pointer to a struct has fields
+     24 |     ga[i].x = 7;
+        |     ^
+tests/errors/memfix_field_owner.lap:25:5: error: pi[i] has type i64, which has no field 'x'; only a struct or a pointer to a struct has fields
+     25 |     pi[i].x = 7;
+        |     ^
+tests/errors/memfix_field_owner.lap:26:5: error: h.n has type i64, which has no field 'x'; only a struct or a pointer to a struct has fields
+     26 |     h.n.x = 7;
+        |     ^
+tests/errors/memfix_field_owner.lap:27:5: error: ph.n has type i64, which has no field 'x'; only a struct or a pointer to a struct has fields
+     27 |     ph.n.x = 7;
+        |     ^
+tests/errors/memfix_field_owner.lap:28:5: error: gh.n has type i64, which has no field 'x'; only a struct or a pointer to a struct has fields
+     28 |     gh.n.x = 7;
+        |     ^
+tests/errors/memfix_field_owner.lap:29:5: error: h.k[i] has type i64, which has no field 'x'; only a struct or a pointer to a struct has fields
+     29 |     h.k[i].x = 7;
+        |     ^
+tests/errors/memfix_field_owner.lap:30:5: error: h.q has type *i64, which has no field 'x'; only a struct or a pointer to a struct has fields
+     30 |     h.q.x = 7;
+        |     ^
+tests/errors/memfix_field_owner.lap:31:5: error: a has type [i64; 4], which has no field 'x'; only a struct or a pointer to a struct has fields
+     31 |     a.x = 7;
+        |     ^
+tests/errors/memfix_field_owner.lap:32:5: error: h.ps has type [P; 2], which has no field 'x'; index it first: h.ps[i].x
+     32 |     h.ps.x = 7;
+        |     ^
+tests/errors/memfix_field_owner.lap:33:5: error: struct 'P' has no field 'z'
+     33 |     p.z = 7;
+        |     ^
+tests/errors/memfix_field_owner.lap:34:20: error: a[i] has type i64, which has no field 'x'; only a struct or a pointer to a struct has fields
+     34 |     print_int(a[i].x);
+        |                    ^
+tests/errors/memfix_field_owner.lap:35:17: error: n has type i64, which has no field 'x'; only a struct or a pointer to a struct has fields
+     35 |     print_int(n.x);
+        |                 ^
+tests/errors/memfix_field_owner.lap:36:18: error: gn has type i64, which has no field 'x'; only a struct or a pointer to a struct has fields
+     36 |     print_int(gn.x);
+        |                  ^
+tests/errors/memfix_field_owner.lap:37:18: error: gp has type *i64, which has no field 'x'; only a struct or a pointer to a struct has fields
+     37 |     print_int(gp.x);
+        |                  ^
+tests/errors/memfix_field_owner.lap:38:19: error: h.k has type [i64; 2], which has no field 'x'; only a struct or a pointer to a struct has fields
+     38 |     print_int(h.k.x);
+        |                   ^
+tests/errors/memfix_field_owner.lap:39:17: error: struct 'P' has no field 'z'
+     39 |     print_int(p.z);
+        |                 ^
+tests/errors/memfix_field_owner.lap:40:18: error: struct 'H' has no field 'z'
+     40 |     print_int(ph.z);
+        |                  ^
+tests/errors/memfix_field_owner.lap:41:23: error: struct 'P' has no field 'z'
+     41 |     print_int(h.ps[i].z);
+        |                       ^
+20 errors, compilation failed

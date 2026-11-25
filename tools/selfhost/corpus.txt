@@ -73,9 +73,12 @@ tests/lang/enum_opt.lap
 tests/lang/enum_use.lap
 tests/lang/extern_data.lap
 tests/lang/field_atomic.lap
+tests/lang/field_ptr_call.lap
+tests/lang/field_ptr_chain.lap
 tests/lang/fn_pointer.lap
 tests/lang/generic.lap
 tests/lang/global_init.lap
+tests/lang/global_struct_fields.lap
 tests/lang/local_array_idx.lap
 tests/lang/loops.lap
 tests/lang/modules.lap
@@ -125,6 +128,9 @@ tests/lang/struct_arr_bound_store.lap
 tests/lang/struct_arr_bound.lap
 tests/lang/struct_assign.lap
 tests/lang/struct_by_value.lap
+tests/lang/struct_field_arr_ptr.lap
+tests/lang/struct_field_arr.lap
+tests/lang/struct_lit_addr.lap
 tests/lang/struct_lit_zero.lap
 tests/lang/struct_pointer_param.lap
 tests/lang/struct_return.lap

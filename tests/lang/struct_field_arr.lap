@@ -1,0 +1,54 @@
+// A field store into an element of an array field of structs, `h.ps[i].y = v`
+// with ps: [P; 3] (0.45.3). It takes the address a read of h.ps[i].y takes
+// (gen_field_addr, gen_struct_addr, gen_array_index) and writes only the field.
+// Before, it was refused: "the expression has type P, not a pointer".
+// An array field is not bounds checked (only a local array is).
+struct P { x: i64, y: i64 }
+struct H { n: i64, ps: [P; 3], tail: i64 }
+struct W { a: u8, h: H }
+
+fn sum(h: *H) -> i64 {
+    let s: i64 = 0;
+    let i: i64 = 0;
+    while (i < 3) {
+        s = s * 10 + h.ps[i].x + h.ps[i].y;
+        i = i + 1;
+    }
+    return s;
+}
+
+fn main() -> i32 {
+    let h: H;
+    let i: i64 = 0;
+    h.n = 7;
+    h.tail = 8;
+    while (i < 3) {
+        h.ps[i].x = i;
+        h.ps[i].y = 0;
+        i = i + 1;
+    }
+    i = 1;
+    h.ps[i].y = 5;
+    print_int(h.ps[i].y);
+    println("");
+    print_int(sum(&h));
+    println("");
+    print_int(h.n * 10 + h.tail);
+    println("");
+
+    let ph: *H = &h;
+    i = 2;
+    ph.ps[i].x = 4;
+    ph.ps[i].y = 3;
+    print_int(sum(&h));
+    println("");
+
+    let w: W;
+    w.a = 1;
+    w.h.n = 2;
+    w.h.tail = 9;
+    w.h.ps[i].y = 6;
+    print_int(w.h.ps[i].y + w.a * 10 + w.h.n * 100 + w.h.tail * 1000);
+    println("");
+    return 0;
+}

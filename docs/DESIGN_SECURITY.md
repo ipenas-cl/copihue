@@ -1,6 +1,6 @@
 # Diseño: seguridad (errores que no se pueden confundir con datos)
 
-**Estado: propuesta, con una parte implementada.** Desde **0.45.2** el compilador aplica la mitad de R2 que toca a los argumentos struct (§3, R2); el resto de este documento (la otra mitad de R2, R1, R3–R6) sigue siendo solo documentación. Corte de referencia del análisis: Copihue **0.44.8** (`compiler/bootstrap-c/copihue.c`, `LANG_VERSION`; `main` en `95d3f7a`). Cada regla está marcada **Implementado** (el compilador ya lo hace, con la prueba que lo muestra) o **Propuesta** (no existe; aquí solo se describe).
+**Estado: propuesta, con una parte implementada.** Desde **0.45.2** el compilador aplica la mitad de R2 que toca a los argumentos struct (§3, R2); el resto de este documento (la otra mitad de R2, R1, R3–R6) sigue siendo solo documentación. 0.45.3 no cambia ninguna regla de este documento: cierra caminos que daban un valor falso o perdían una escritura sin aviso (`&P { ... }`, un campo de algo que no es struct; [DESIGN_SELFHOST_S1.md](DESIGN_SELFHOST_S1.md) §7, puntos 4, 16, 17 y 19). Corte de referencia del análisis: Copihue **0.44.8** (`compiler/bootstrap-c/copihue.c`, `LANG_VERSION`; `main` en `95d3f7a`). Cada regla está marcada **Implementado** (el compilador ya lo hace, con la prueba que lo muestra) o **Propuesta** (no existe; aquí solo se describe).
 
 Lo que este documento afirma del compilador se comprobó en el código y con programas de prueba compilados con `-S` a `-O0` y `-O2` (§2). La máquina donde se verificó es macOS y no ejecuta ELF de Linux: nada de lo de abajo se ejecutó, salvo el propio compilador. No se afirma ninguna velocidad.
 
@@ -150,7 +150,7 @@ Recuento usado abajo: una copia instrumentada del bootstrap, solo en `build/s19/
   - `argument 1 of 'sum': expected P, found *P; pass the P it points to with '*'`
   - `argument 1 of 'first': expected *P, found P; pass its address with '&'`
   - `argument 1 of 'first': expected *P, found Q; pass the address of a P`
-  - `argument 1 of 'first': expected *P, found P; declare it first (let t: P = ...) and pass &t` (un literal: `&P { ... }` no da hoy una dirección; es otro hallazgo).
+  - `argument 1 of 'first': expected *P, found P; declare it first (let t: P = ...) and pass &t` (un literal). Desde 0.45.3 `first(&P { ... })` también vale: `&P { ... }` es la dirección de un slot propio del frame, que vive hasta que la función retorna (antes no emitía dirección; en un loop y en `return` es error).
 
   Vive donde se tipan los argumentos, `check_struct_arg` en `check_user_args` (no en `check_types`, que también tipa `let`, asignaciones y `return`: ahí un struct usado como valor sigue siendo su dirección, `let x: i64 = p` compila). Prueba: `tests/errors/memfix_arg_type.lap`, rechazada en cada modo por `tests/memfix/run.sh`.
 - **Falta:** `h == k` entre structs compila y compara direcciones.

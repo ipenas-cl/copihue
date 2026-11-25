@@ -1,0 +1,135 @@
+// Flat kernel at 0x8000 for QEMU, loaded by tests/usermode/boot.lap, like tests/memfix/kernel.lap.
+// A field read or stored through a pointer that is not a local name (0.45.3): a pointer field
+// (`a.next.v`), a global pointer (`gq.y`) and an element of an array of pointers (`ps[i].x`).
+// Every store must land and every read must see it; then COM1 says MEMOK. Before 0.45.3 those
+// stores were dropped and those reads loaded nothing, with no message: COM1 said FAILnn.
+// Checks 6 and 7 store into an element of an array field: `h.ps[i].y` with ps: [P; 3] (refused
+// before 0.45.3) and `q.arr[i].x` with arr: [*P; 2] (before, written over q.guard).
+
+struct P { x: i64, y: i64 }
+struct N { v: i64, next: *N }
+struct H { n: i64, ps: [P; 3], tail: i64 }
+struct Q { arr: [*P; 2], guard: i64 }
+
+let bad: i64 = 0;
+let gq: *P = 0;
+
+data gdt {
+    dq 0;
+    dw 0;
+    dw 0;
+    db 0;
+    db 0x9A;
+    db 0x20;
+    db 0;
+    dw 0xFFFF;
+    dw 0;
+    db 0;
+    db 0x92;
+    db 0xCF;
+    db 0;
+}
+
+data gdtr {
+    dw 23;
+    dd gdt;
+}
+
+fn serial_putc(c: i64) -> i64 {
+    let tries = 0;
+    while ((inb(0x3FD) & 0x20) == 0 && tries < 1000) { tries = tries + 1; }
+    outb(0x3F8, c);
+    return 0;
+}
+
+fn check(n: i64, ok: i64) -> i64 {
+    if (ok == 0 && bad == 0) { bad = n; }
+    return 0;
+}
+
+fn kmain() -> i64 {
+    let a: N;
+    let b: N;
+    let p: P;
+    let r: P;
+    let ps: [*P; 2];
+    let i: i64 = 1;
+    a.v = 1;
+    b.v = 2;
+    a.next = &b;
+    b.next = 0;
+    check(1, a.next.v == 2);
+    a.next.v = 20;
+    check(2, b.v == 20 && a.v == 1);
+    p.x = 4;
+    p.y = 5;
+    gq = &p;
+    check(3, gq.y == 5);
+    gq.y = 50;
+    check(4, p.y == 50 && p.x == 4);
+    r.x = 6;
+    r.y = 7;
+    ps[0] = &p;
+    ps[i] = &r;
+    ps[i].x = 60;
+    check(5, r.x == 60 && r.y == 7 && ps[i].y == 7 && p.x == 4);
+    let h: H;
+    h.n = 1;
+    h.tail = 2;
+    h.ps[i].x = 0;
+    h.ps[i].y = 5;
+    check(6, h.ps[i].y == 5 && h.ps[i].x == 0 && h.n == 1 && h.tail == 2);
+    let q: Q;
+    q.guard = 77;
+    q.arr[i] = &r;
+    q.arr[i].x = 9;
+    check(7, r.x == 9 && q.guard == 77);
+
+    if (bad == 0) {
+        serial_putc(77);
+        serial_putc(69);
+        serial_putc(77);
+        serial_putc(79);
+        serial_putc(75);
+    } else {
+        serial_putc(70);
+        serial_putc(65);
+        serial_putc(73);
+        serial_putc(76);
+        serial_putc(48 + bad / 10);
+        serial_putc(48 + bad % 10);
+    }
+    while (1) { hlt(); }
+    return 0;
+}
+
+bits 32 naked fn _start() {
+    cli();
+    asm("lgdt [gdtr]");
+    asm("mov ax, 0x10");
+    asm("mov ds, ax");
+    asm("mov es, ax");
+    asm("mov ss, ax");
+    asm("mov esp, 0x6000");
+    asm("cld");
+    asm("xor eax, eax");
+    asm("mov edi, 0x1000");
+    asm("mov ecx, 3072");
+    asm("rep stosd");
+    asm("mov dword [0x1000], 0x2007");
+    asm("mov dword [0x2000], 0x3007");
+    asm("mov dword [0x3000], 0x87");
+    asm("mov eax, cr4");
+    asm("or eax, 0x20");
+    asm("mov cr4, eax");
+    asm("mov eax, 0x1000");
+    asm("mov cr3, eax");
+    asm("mov ecx, 0xC0000080");
+    asm("rdmsr");
+    asm("or eax, 0x100");
+    asm("wrmsr");
+    asm("mov eax, cr0");
+    asm("or eax, 0x80000000");
+    asm("mov cr0, eax");
+    asm("jmp 0x08:kmain");
+}

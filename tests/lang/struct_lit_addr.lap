@@ -1,0 +1,80 @@
+// `&P { ... }` (0.45.3) is the address of the literal, built in a slot of its
+// own in the frame of the function, which lives until that function returns.
+// Before, nothing was emitted and the pointer was whatever rax held: here the
+// address of `junk` (every field reads -1) or a value that is no address at all.
+// Several literals are alive at once, two in one call, one read again in a loop
+// after calls that dirty their own frames, one recursion keeps one per frame,
+// and a list is linked through literals nested in literals.
+struct P { x: i64, y: i64 }
+struct N { v: i64, next: *N }
+
+fn dirty() -> i64 {
+    let junk: [i64; 32];
+    let i: i64 = 0;
+    while (i < 32) {
+        junk[i] = -1;
+        i = i + 1;
+    }
+    return junk[31];
+}
+
+fn show(v: i64) -> i64 {
+    print_int(v);
+    println("");
+    return 0;
+}
+
+// Reads through p after its own frame is full of -1.
+fn read_after_dirty(p: *P) -> i64 {
+    dirty();
+    let junk: [i64; 8] = [-1, -1, -1, -1, -1, -1, -1, -1];
+    return p.x * 10 + p.y + junk[0] + 1;
+}
+
+fn pair(a: *P, b: *P) -> i64 {
+    return a.x + a.y * 10 + b.x * 100 + b.y * 1000;
+}
+
+fn depth(n: i64) -> i64 {
+    let p: *P = &P { x: n, y: 0 };
+    if (n > 0) {
+        let r: i64 = depth(n - 1);
+        return r + p.x * 10;
+    }
+    return p.x + 5;
+}
+
+fn sum_list(head: *N) -> i64 {
+    let s: i64 = 0;
+    let p: *N = head;
+    while (p != 0) {
+        s = s * 10 + p.v;
+        p = p.next;
+    }
+    return s;
+}
+
+fn main() -> i32 {
+    let junk: [i64; 4] = [-1, -1, -1, -1];
+    let a: *P = &P { x: 3, y: 4 };
+    let b: *P = &P { x: 7 };
+    show(a.x * 10 + a.y);
+    show(b.x * 10 + b.y);
+    show(read_after_dirty(&P { x: 5, y: 6 }));
+    show(pair(&P { x: 1, y: 2 }, &P { x: 3, y: 4 }));
+    let i: i64 = 0;
+    let s: i64 = 0;
+    while (i < 3) {
+        dirty();
+        a.x = a.x + 1;
+        s = s + a.x * 100 + b.x + junk[i] + 1;
+        i = i + 1;
+    }
+    show(s);
+    show(a.x * 10 + a.y);
+    show(depth(3));
+    let tail: *N = &N { v: 3, next: 0 };
+    let head: *N = &N { v: 1, next: &N { v: 2, next: tail } };
+    show(sum_list(head));
+    return 0;
+}

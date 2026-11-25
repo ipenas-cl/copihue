@@ -1,0 +1,22 @@
+// `&P { ... }` (0.45.3) builds the literal in the frame of the function. A naked
+// function has no frame of its own, so it cannot hold one; a global can.
+struct P { x: i64, y: i64 }
+
+let g: P;
+
+fn use(p: *P) -> i64 { return p.x; }
+
+naked fn f() {
+    use(&P { x: 1 });
+}
+
+naked fn h() {
+    g.x = 1;
+    use(&g);
+}
+
+fn main() -> i32 {
+    f();
+    h();
+    return 0;
+}
