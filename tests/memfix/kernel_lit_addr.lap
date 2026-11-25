@@ -1,0 +1,124 @@
+// Flat kernel at 0x8000 for QEMU, loaded by tests/usermode/boot.lap, like tests/memfix/kernel.lap.
+// `&P { ... }` (0.45.3): the address of the literal, built in a slot of its own in the frame of
+// kmain, alive until kmain returns. Three literals are alive at once (one nested in another), a
+// call fills its own frame with 0xFF between building them and reading them, and a store through
+// one of them must leave the others alone. Then COM1 says MEMOK. Before 0.45.3 nothing was
+// emitted and each pointer was whatever rax held: COM1 said FAILnn, or nothing when a read faulted.
+
+struct P { x: i64, y: i64 }
+struct N { v: i64, next: *N }
+
+let bad: i64 = 0;
+
+data gdt {
+    dq 0;
+    dw 0;
+    dw 0;
+    db 0;
+    db 0x9A;
+    db 0x20;
+    db 0;
+    dw 0xFFFF;
+    dw 0;
+    db 0;
+    db 0x92;
+    db 0xCF;
+    db 0;
+}
+
+data gdtr {
+    dw 23;
+    dd gdt;
+}
+
+fn serial_putc(c: i64) -> i64 {
+    let tries = 0;
+    while ((inb(0x3FD) & 0x20) == 0 && tries < 1000) { tries = tries + 1; }
+    outb(0x3F8, c);
+    return 0;
+}
+
+fn check(n: i64, ok: i64) -> i64 {
+    if (ok == 0 && bad == 0) { bad = n; }
+    return 0;
+}
+
+fn dirty() -> i64 {
+    let junk: [i64; 32];
+    let i: i64 = 0;
+    while (i < 32) {
+        junk[i] = -1;
+        i = i + 1;
+    }
+    return junk[31];
+}
+
+fn pair(a: *P, b: *P) -> i64 {
+    dirty();
+    return a.x + a.y * 10 + b.x * 100 + b.y * 1000;
+}
+
+fn kmain() -> i64 {
+    let junk: [i64; 2] = [-1, -1];
+    let a: *P = &P { x: 3, y: 4 };
+    let b: *P = &P { y: 8 };
+    let head: *N = &N { v: 1, next: &N { v: 2, next: 0 } };
+    dirty();
+    check(1, a.x == 3 && a.y == 4);
+    check(2, b.x == 0 && b.y == 8);
+    check(3, head.v == 1 && head.next != 0);
+    let second: *N = head.next;
+    check(4, second.v == 2 && second.next == 0);
+    a.y = 9;
+    check(5, a.x == 3 && a.y == 9 && b.x == 0 && b.y == 8);
+    check(6, pair(&P { x: 1, y: 2 }, &P { x: 3, y: 4 }) == 4321);
+    check(7, junk[0] == -1 && junk[1] == -1);
+
+    if (bad == 0) {
+        serial_putc(77);
+        serial_putc(69);
+        serial_putc(77);
+        serial_putc(79);
+        serial_putc(75);
+    } else {
+        serial_putc(70);
+        serial_putc(65);
+        serial_putc(73);
+        serial_putc(76);
+        serial_putc(48 + bad / 10);
+        serial_putc(48 + bad % 10);
+    }
+    while (1) { hlt(); }
+    return 0;
+}
+
+bits 32 naked fn _start() {
+    cli();
+    asm("lgdt [gdtr]");
+    asm("mov ax, 0x10");
+    asm("mov ds, ax");
+    asm("mov es, ax");
+    asm("mov ss, ax");
+    asm("mov esp, 0x6000");
+    asm("cld");
+    asm("xor eax, eax");
+    asm("mov edi, 0x1000");
+    asm("mov ecx, 3072");
+    asm("rep stosd");
+    asm("mov dword [0x1000], 0x2007");
+    asm("mov dword [0x2000], 0x3007");
+    asm("mov dword [0x3000], 0x87");
+    asm("mov eax, cr4");
+    asm("or eax, 0x20");
+    asm("mov cr4, eax");
+    asm("mov eax, 0x1000");
+    asm("mov cr3, eax");
+    asm("mov ecx, 0xC0000080");
+    asm("rdmsr");
+    asm("or eax, 0x100");
+    asm("wrmsr");
+    asm("mov eax, cr0");
+    asm("or eax, 0x80000000");
+    asm("mov cr0, eax");
+    asm("jmp 0x08:kmain");
+}

@@ -7024,6 +7024,7 @@ static int enum_passed_by_addr(Codegen* cg, AstNode* a) {
 
 static int gen_enum_arg(Codegen* cg, AstNode* a);
 static void gen_struct_literal_temp(Codegen* cg, AstNode* n, int size);
+static StructType* literal_temp_type(Codegen* cg, AstNode* lit);
 
 // A struct argument that is not a local name (0.45.1): a literal, `*q` with
 // q: *T, a global, or a field (`r.a`, `p->a`). Before, a literal was built over
@@ -7041,8 +7042,8 @@ static int struct_arg_by_addr(Codegen* cg, AstNode* a) {
 // temporary of this frame, the way `return T { ... }` is. The callee copies.
 static void gen_struct_arg_addr(Codegen* cg, AstNode* a) {
     if (a->type == AST_STRUCT_LITERAL) {
-        StructType* st = a->struct_type ? typetab_lookup(cg->types, a->struct_type) : NULL;
-        if (!st || !cg->symtab || legacy_bits() || (g_fn_flags & AF_NAKED)) {
+        StructType* st = literal_temp_type(cg, a);
+        if (!st) {
             diag_error(a->line, a->col,
                        "this struct literal cannot be passed as an argument; pass a local: let t: %s = ...; f(t)",
                        a->struct_type ? a->struct_type : "T");
@@ -11405,6 +11406,7 @@ typedef struct { int sz; int vol; int rec; char tn[160]; } PtrAcc;
 static int ptr_expr_access(Codegen* cg, AstNode* base, PtrAcc* a);
 static void gen_ptr_expr_addr(Codegen* cg, AstNode* base, AstNode* index, const PtrAcc* a);
 static void diag_not_pointer(Codegen* cg, AstNode* at, AstNode* base, const char* what);
+static void gen_struct_literal_addr(Codegen* cg, AstNode* addr);
 
 void gen_addr_of(Codegen* cg, AstNode* n) {
     if (!n->children || n->child_count == 0) return;
@@ -11584,6 +11586,8 @@ void gen_addr_of(Codegen* cg, AstNode* n) {
         // this, the atomic builtin stored through whatever was left in rax.
         if (!gen_field_addr(cg, var->children[0], var->name))
             diag_error(var->line, var->col, "cannot take the address of field '%s'", var->name ? var->name : "?");
+    } else if (var->type == AST_STRUCT_LITERAL) {
+        gen_struct_literal_addr(cg, n);
     }
 }
 
@@ -12228,6 +12232,36 @@ static void gen_struct_literal_temp(Codegen* cg, AstNode* n, int size) {
     int off = frame_temp(cg, size);
     gen_struct_literal_at(cg, n, off);
     emit(cg, "    lea rax, [rbp%+d]\n", off);
+}
+
+// The struct of a literal that this function can build in a temporary of its
+// frame. NULL when it cannot: an unknown struct, or a naked or bits 16/32
+// function, which has no frame of its own.
+static StructType* literal_temp_type(Codegen* cg, AstNode* lit) {
+    StructType* st = lit->struct_type ? typetab_lookup(cg->types, lit->struct_type) : NULL;
+    if (!st || !cg->symtab || legacy_bits() || (g_fn_flags & AF_NAKED)) return NULL;
+    return st;
+}
+
+// `&P { ... }` (0.45.3): the literal built in a temporary of its own, its
+// address in rax. Each `&P { ... }` in the source has one slot, which no other
+// expression uses and which lives until the function returns, as a local
+// declared there would. check_literal_addresses refuses it in a loop (one slot
+// for every iteration) and in `return` (the frame is gone). Before, nothing was
+// emitted and the pointer was whatever rax held.
+static void gen_struct_literal_addr(Codegen* cg, AstNode* addr) {
+    AstNode* lit = addr->children[0];
+    StructType* st = literal_temp_type(cg, lit);
+    const char* name = lit->struct_type ? lit->struct_type : "T";
+    if (!st) {
+        diag_error(addr->line, addr->col,
+                   "cannot take the address of a struct literal here (a naked or bits 16/32 function has no frame for it); "
+                   "use a global: let g: %s; set its fields, then &g", name);
+        emit(cg, "    xor rax, rax\n");
+        return;
+    }
+    emit(cg, "    ; &struct literal %s\n", name);
+    gen_struct_literal_temp(cg, lit, st->size);
 }
 
 // The fields a struct literal names, stored over bytes already zeroed. A
@@ -15437,8 +15471,8 @@ void gen_expr(Codegen* cg, AstNode* n) {
             // 0.45.1: only `let x: T = T { ... }` builds the literal in the local
             // it declares (the last one). Anywhere else the last local is some
             // other variable, and the literal wrote over it.
-            StructType* lst = n->struct_type ? typetab_lookup(cg->types, n->struct_type) : NULL;
-            if (!lst || !cg->symtab || legacy_bits() || (g_fn_flags & AF_NAKED)) {
+            StructType* lst = literal_temp_type(cg, n);
+            if (!lst) {
                 diag_error(n->line, n->col, "a struct literal is a value only in 'let', 'return', a field of another literal, or an argument; use a local: let t: %s = ...",
                            n->struct_type ? n->struct_type : "T");
                 emit(cg, "    xor rax, rax\n");
@@ -21343,6 +21377,47 @@ static void lower_str(AstNode* fn) {
     if (body && body->type == AST_BLOCK) lower_str_block(body, names, &nn);
 }
 
+// The literal of `&P { ... }`; NULL for anything else.
+static AstNode* addressed_struct_literal(AstNode* n) {
+    if (!n || n->type != AST_ADDR_OF || n->child_count < 1 || !n->children[0]) return NULL;
+    return n->children[0]->type == AST_STRUCT_LITERAL ? n->children[0] : NULL;
+}
+
+// Where `&P { ... }` may stand (0.45.3). Its slot is one per literal in the
+// source and lives until the function returns (gen_struct_literal_addr). In a
+// loop, condition and step included, every iteration would reuse that slot
+// while a pointer from an earlier one may still be held; after `return` the
+// frame is gone, also through an `as` cast. Both are refused before any code
+// is generated.
+static void check_literal_addresses(AstNode* n, int in_loop) {
+    AstNode* addr = NULL;
+    AstNode* lit;
+    const char* t;
+    int i;
+    if (!n || n->type == AST_FUNCTION) return;
+    if (n->type == AST_RETURN && n->child_count > 0) {
+        addr = n->children[0];
+        while (addr && addr->type == AST_CAST && addr->child_count > 0) addr = addr->children[0];
+    } else if (in_loop) {
+        addr = n;
+    }
+    lit = addressed_struct_literal(addr);
+    if (lit) {
+        t = lit->struct_type ? lit->struct_type : "T";
+        if (n->type == AST_RETURN)
+            diag_error(addr->line, addr->col,
+                       "cannot return &%s { ... }: the literal lives in this function's frame, which is gone after the return; "
+                       "declare the function '-> %s' and return %s { ... }", t, t, t);
+        else
+            diag_error(addr->line, addr->col,
+                       "&%s { ... } in a loop: every iteration would reuse its one slot while a pointer from an earlier one "
+                       "may still be held; declare it before the loop (let t: %s = %s { ... };) and take &t", t, t, t);
+        return;
+    }
+    for (i = 0; i < n->child_count; i++)
+        check_literal_addresses(n->children[i], in_loop || n->type == AST_WHILE);
+}
+
 void gen_func(Codegen* cg, AstNode* n) {
     g_tail_acc = 0;
     g_tail_nparam = 0;
@@ -21486,6 +21561,7 @@ void gen_func(Codegen* cg, AstNode* n) {
     /* `str` compare becomes the same if/for a []u8 program writes, before
      * the frame and the hosted -O2 while shapes look at the body. */
     lower_str(n);
+    check_literal_addresses(n->children[param_count], 0);
     if (!(n->is_pointer & 1) && n->value && enum_lookup(n->value) && !enum_ret_allowed(n))
         diag_error(n->line, n->col, "an enum cannot be returned");
     if (fn_ret_slice(n) && n->value && enum_lookup(n->value))

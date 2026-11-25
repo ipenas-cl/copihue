@@ -14,3 +14,5 @@ tests/lang/struct_arr_bound_store.lap
 tests/lang/struct_arr_bound_loop.lap
 tests/lang/struct_arr_bound_field.lap
 tests/lang/struct_lit_zero.lap
+# 0.45.3: the address of a struct literal (&P { ... }).
+tests/lang/struct_lit_addr.lap

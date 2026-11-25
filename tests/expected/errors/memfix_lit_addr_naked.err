@@ -1,0 +1,4 @@
+tests/errors/memfix_lit_addr_naked.lap:10:9: error: cannot take the address of a struct literal here (a naked or bits 16/32 function has no frame for it); use a global: let g: P; set its fields, then &g
+     10 |     use(&P { x: 1 });
+        |         ^
+1 error, compilation failed

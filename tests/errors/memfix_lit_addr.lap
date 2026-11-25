@@ -1,0 +1,35 @@
+// `&P { ... }` (0.45.3) is the address of a slot of the function's frame, one per
+// literal in the source, alive until the function returns. In a loop (body,
+// condition or step) every iteration would reuse the one slot while a pointer
+// from an earlier one may still be held; returning it would leave a pointer into
+// a frame that is gone. Before, the pointer was whatever rax held.
+struct P { x: i64, y: i64 }
+
+fn show(p: *P) -> i64 { return p.x + p.y; }
+
+fn main() -> i32 {
+    let i: i64 = 0;
+    let q: *P = 0;
+    while (i < 3) {
+        q = &P { x: i, y: 0 };
+        i = i + 1;
+    }
+    while (show(&P { x: i }) < 5) {
+        i = i + 1;
+    }
+    for j in 0..3 {
+        print_int(show(&P { x: j, y: 1 }));
+    }
+    for (let k = 0; k < 3; q = &P { x: k }) {
+        k = k + 1;
+    }
+    return 0;
+}
+
+fn mk() -> *P {
+    return &P { x: 1, y: 2 };
+}
+
+fn mk_bytes() -> *u8 {
+    return &P { x: 1 } as *u8;
+}
