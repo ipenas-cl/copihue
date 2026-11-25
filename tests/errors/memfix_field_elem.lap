@@ -1,0 +1,10 @@
+// The report of 0.45.3: a field store into an element of an array of integers.
+// Before, it compiled, the store was dropped, and the program printed 0.
+fn main() -> i32 {
+    let a: [i64; 4];
+    let i: i64 = 1;
+    a[i] = 0;
+    a[i].x = 7;
+    print_int(a[i]);
+    return 0;
+}

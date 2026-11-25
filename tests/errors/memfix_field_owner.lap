@@ -1,0 +1,43 @@
+// `x.f` needs x to be a struct, or a pointer to one, that has the field f (0.45.3).
+// Before, each of these compiled: a read gave whatever rax held and a store was
+// dropped, with no message (`a[i].x = 7; print_int(a[i])` printed 0).
+struct P { x: i64, y: i64 }
+struct H { n: i64, k: [i64; 2], q: *i64, ps: [P; 2] }
+
+let gn: i64 = 0;
+let ga: [i64; 4];
+let gp: *i64 = 0;
+let gh: H;
+
+fn main() -> i32 {
+    let a: [i64; 4];
+    let i: i64 = 1;
+    let n: i64 = 2;
+    let b: [u8; 4];
+    let h: H;
+    let ph: *H = &h;
+    let pi: *i64 = &n;
+    let p: P;
+    a[i] = 0;
+    a[i].x = 7;
+    b[i].x = 7;
+    ga[i].x = 7;
+    pi[i].x = 7;
+    h.n.x = 7;
+    ph.n.x = 7;
+    gh.n.x = 7;
+    h.k[i].x = 7;
+    h.q.x = 7;
+    a.x = 7;
+    h.ps.x = 7;
+    p.z = 7;
+    print_int(a[i].x);
+    print_int(n.x);
+    print_int(gn.x);
+    print_int(gp.x);
+    print_int(h.k.x);
+    print_int(p.z);
+    print_int(ph.z);
+    print_int(h.ps[i].z);
+    return 0;
+}

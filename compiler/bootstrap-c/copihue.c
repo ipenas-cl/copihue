@@ -12431,6 +12431,63 @@ static char* array_elem_type_name(Codegen* cg, AstNode* arr) {
 
 static char* obj_record_type(Codegen* cg, AstNode* obj);
 
+// The struct that the variable n is (*ptr = 0) or points to (*ptr = 1); NULL
+// when neither. A local hides a global of the same name (0.45.3; before, a
+// local that was not a struct let a global struct of its name answer). A slice
+// or a vec, whose type_name is its element, is neither.
+static char* var_record_type(Codegen* cg, AstNode* n, int* ptr) {
+    Symbol* s = symtab_lookup_symbol(cg->symtab, n->name);
+    GlobalVar* g;
+    char* t;
+    *ptr = 0;
+    if (s) {
+        if (s->is_array || s->is_slice || s->is_vec || !s->type_name) return NULL;
+        *ptr = s->is_pointer || s->type_name[0] == '*';
+        t = strip_star(s->type_name);
+        return is_record(cg, t) ? t : NULL;
+    }
+    g = global_symtab_lookup(cg->global_symtab, n->name);
+    if (!g || g->is_array || g->is_slice) return NULL;
+    *ptr = g->is_pointer;
+    t = g->is_pointer ? g->pointee_type : g->type_name;
+    return is_record(cg, t) ? t : NULL;
+}
+
+// The struct named by t, or by t without its one '*': the struct whose fields
+// an object of type t has. NULL for anything else.
+static char* record_or_pointee(Codegen* cg, char* t) {
+    if (t && t[0] == '*') t++;
+    return is_record(cg, t) ? t : NULL;
+}
+
+// The struct that an expression of pointer type points to (`p as *P`, a call
+// that returns *P). NULL when it is not one.
+static char* expr_pointee_record(Codegen* cg, AstNode* n) {
+    VTy t = expr_ty(cg, n);
+    StructType* st;
+    if (t.kind != VK_PTR) return NULL;
+    st = typetab_lookup(cg->types, (char*)after_star(t.disp));
+    return st ? st->name : NULL;
+}
+
+// The type of base[i], as a name: an array, a pointer or a slice that is a name,
+// the .ptr of a slice, a slice expression, an array field ([T; N], the element
+// type), a pointer field (*T, then T), or another expression that points to a
+// struct. NULL when it is not known.
+static char* index_elem_type(Codegen* cg, AstNode* base) {
+    char* et = array_elem_type_name(cg, base);
+    if (!et) et = ptr_field_elem(cg, base);
+    if (!et) et = (char*)slice_operand_elem(cg, base);
+    if (et) return et;
+    if (base && base->type == AST_FIELD_ACCESS) {
+        StructField* f = access_field(cg, base);
+        if (!f || !f->type_name) return NULL;
+        if (f->array_len > 0) return f->type_name;
+        return f->type_name[0] == '*' ? f->type_name + 1 : NULL;
+    }
+    return base ? expr_pointee_record(cg, base) : NULL;
+}
+
 static char* expr_struct_type(Codegen* cg, AstNode* n) {
     if (!n) return NULL;
     if (n->type == AST_CALL) {
@@ -12438,62 +12495,48 @@ static char* expr_struct_type(Codegen* cg, AstNode* n) {
         return rs ? rs->name : NULL;
     }
     if (n->type == AST_IDENT && n->name) {
-        Symbol* s = symtab_lookup_symbol(cg->symtab, n->name);
-        if (s && !s->is_pointer && !s->is_array && is_record(cg, s->type_name))
-            return s->type_name;
-        GlobalVar* g = global_symtab_lookup(cg->global_symtab, n->name);
-        if (g && !g->is_pointer && !g->is_array && is_record(cg, g->type_name))
-            return g->type_name;
-        return NULL;
+        int ptr;
+        char* t = var_record_type(cg, n, &ptr);
+        return ptr ? NULL : t;
     }
     if (n->type == AST_FIELD_ACCESS && n->child_count == 1 && n->name) {
-        char* rec = obj_record_type(cg, n->children[0]);
-        if (!rec) return NULL;
-        char* ft = typetab_field_type(cg->types, rec, n->name);
-        if (ft && ft[0] != '*' && is_record(cg, ft)) return ft;
+        // An array field ([P; N]) is not a P: its elements are (0.45.3).
+        StructField* f = access_field(cg, n);
+        if (f && f->array_len == 0 && f->type_name && f->type_name[0] != '*' && is_record(cg, f->type_name))
+            return f->type_name;
         return NULL;
     }
     if (n->type == AST_INDEX && n->child_count >= 1) {
-        char* et = array_elem_type_name(cg, n->children[0]);
-        if (!et) et = ptr_field_elem(cg, n->children[0]);
-        if (!et) et = (char*)slice_operand_elem(cg, n->children[0]);
+        char* et = index_elem_type(cg, n->children[0]);
         if (et && et[0] != '*' && is_record(cg, et)) return et;
         return NULL;
     }
     return NULL;
 }
 
+// The struct whose fields `obj.f` names: obj is that struct or a pointer to it
+// (a name, `*q`, an element, a field, a call, a cast). NULL when obj is neither,
+// so it has no fields (check_field_access).
 static char* obj_record_type(Codegen* cg, AstNode* obj) {
     if (!obj) return NULL;
-    if (obj->type == AST_CALL) return expr_struct_type(cg, obj);
+    if (obj->type == AST_CALL) {
+        char* t = expr_struct_type(cg, obj);
+        return t ? t : expr_pointee_record(cg, obj);
+    }
     if (obj->type == AST_IDENT && obj->name) {
-        Symbol* s = symtab_lookup_symbol(cg->symtab, obj->name);
-        if (s && s->type_name && !s->is_array) {
-            char* t = s->is_pointer ? strip_star(s->type_name) : s->type_name;
-            if (is_record(cg, t)) return t;
-        }
-        GlobalVar* g = global_symtab_lookup(cg->global_symtab, obj->name);
-        if (g && !g->is_array && !g->is_pointer && is_record(cg, g->type_name)) return g->type_name;
-        if (g && g->is_pointer && is_record(cg, g->pointee_type)) return g->pointee_type;
-        return NULL;
+        int ptr;
+        return var_record_type(cg, obj, &ptr);
     }
     if (obj->type == AST_DEREF && obj->child_count == 1)
         return obj_record_type(cg, obj->children[0]);
-    if (obj->type == AST_INDEX && obj->child_count >= 1) {
-        char* et = array_elem_type_name(cg, obj->children[0]);
-        if (!et) et = ptr_field_elem(cg, obj->children[0]);
-        if (!et) et = (char*)slice_operand_elem(cg, obj->children[0]);
-        if (et && is_record(cg, et)) return et;
-        return NULL;
-    }
+    if (obj->type == AST_INDEX && obj->child_count >= 1)
+        return record_or_pointee(cg, index_elem_type(cg, obj->children[0]));
     if (obj->type == AST_FIELD_ACCESS && obj->child_count == 1 && obj->name) {
-        char* rec = obj_record_type(cg, obj->children[0]);
-        if (!rec) return NULL;
-        char* ft = typetab_field_type(cg->types, rec, obj->name);
-        if (ft && ft[0] != '*' && is_record(cg, ft)) return ft;
-        return NULL;
+        // `a.next.v` with next: *N is N's field v; an array field has none.
+        StructField* f = access_field(cg, obj);
+        return (f && f->array_len == 0) ? record_or_pointee(cg, f->type_name) : NULL;
     }
-    return NULL;
+    return expr_pointee_record(cg, obj);
 }
 
 static int gen_struct_addr(Codegen* cg, AstNode* n);
@@ -12554,12 +12597,33 @@ static int gen_field_addr(Codegen* cg, AstNode* obj, const char* field) {
         if (off) emit(cg, "    add rax, %d\n", off);
         return 1;
     }
-    if (obj->type == AST_INDEX || obj->type == AST_FIELD_ACCESS || obj->type == AST_CALL) {
+    if (obj->type == AST_IDENT) return 0;
+    // A struct value (an element, an embedded field, a returned struct) is at
+    // its address. Anything else here points to the struct (`a.next` with
+    // next: *N, `ps[i]` with ps: [*P; N], `p as *P`): its value is the address.
+    if (expr_struct_type(cg, obj)) {
         if (!gen_struct_addr(cg, obj)) return 0;
-        if (off) emit(cg, "    add rax, %d\n", off);
-        return 1;
+    } else {
+        gen_expr(cg, obj);
     }
-    return 0;
+    if (off) emit(cg, "    add rax, %d\n", off);
+    return 1;
+}
+
+// obj.field as a value in rax, read at the field's width from the address
+// gen_field_addr gives. check_field_access has named the struct and the field.
+static void gen_field_load(Codegen* cg, AstNode* at, AstNode* obj, const char* field) {
+    char* rec = obj_record_type(cg, obj);
+    int psz = 8, psg = 0, poff = 0, pvol = 0;
+    if (!gen_field_addr(cg, obj, field)) {
+        diag_error(at->line, at->col, "cannot take the address of field '%s'", field);
+        emit(cg, "    xor rax, rax\n");
+        return;
+    }
+    if (field_mem_info(cg, rec, field, &poff, &psz, &psg, &pvol))
+        emit_sized_load_mark(cg, "rax", psz, psg, pvol);
+    else
+        emit(cg, "    mov rax, [rax]\n");
 }
 
 // Address of a struct value: a variable, an embedded field, or an array element.
@@ -12602,20 +12666,9 @@ static const char* struct_value_type(Codegen* cg, AstNode* n) {
         StructType* st = typetab_lookup(cg->types, (char*)after_star(p.disp));
         return st ? st->name : NULL;
     }
-    {
-        char* t = expr_struct_type(cg, n);
-        if (t) return t;
-    }
-    // An element of a field: `h.two[i]` with two: [P; N], `h->ps[i]` with ps: *P.
-    if (n && n->type == AST_INDEX && n->child_count >= 1 && n->children[0] &&
-        n->children[0]->type == AST_FIELD_ACCESS) {
-        StructField* f = access_field(cg, n->children[0]);
-        if (f && f->type_name && (f->array_len > 0 || f->is_pointer || f->type_name[0] == '*')) {
-            StructType* st = typetab_lookup(cg->types, (char*)after_star(f->type_name));
-            if (st) return st->name;
-        }
-    }
-    return NULL;
+    // An element of a field (`h.two[i]` with two: [P; N], `h->ps[i]` with ps: *P)
+    // is one too: index_elem_type.
+    return expr_struct_type(cg, n);
 }
 
 // Address of the bytes of a struct value in rax, counting `*q`. 0 if none.
@@ -12635,6 +12688,75 @@ static StructField* access_field(Codegen* cg, AstNode* fa) {
     rec = obj_record_type(cg, fa->children[0]);
     if (!rec) return NULL;
     return typetab_field(cg->types, rec, fa->name);
+}
+
+// The source text of an object, for a message: `a[i]`, `h.k`, `p->n`, `f(...)`.
+static void place_text(AstNode* n, char* buf, int len) {
+    char a[96], b[64];
+    if (!n) { snprintf(buf, len, "this expression"); return; }
+    if ((n->type == AST_IDENT && n->name) || (n->type == AST_NUMBER && n->value)) {
+        snprintf(buf, len, "%s", n->type == AST_IDENT ? n->name : n->value);
+    } else if (n->type == AST_INDEX && n->child_count >= 2) {
+        place_text(n->children[0], a, sizeof a);
+        place_text(n->children[1], b, sizeof b);
+        snprintf(buf, len, "%s[%s]", a, b);
+    } else if (n->type == AST_FIELD_ACCESS && n->child_count == 1) {
+        AstNode* o = n->children[0];
+        int arrow = o && o->type == AST_DEREF && o->child_count == 1;
+        place_text(arrow ? o->children[0] : o, a, sizeof a);
+        snprintf(buf, len, "%s%s%s", a, arrow ? "->" : ".", n->name);
+    } else if (n->type == AST_DEREF && n->child_count == 1) {
+        place_text(n->children[0], a, sizeof a);
+        snprintf(buf, len, "*%s", a);
+    } else if (n->type == AST_CALL && n->name) {
+        snprintf(buf, len, "%s(...)", n->name);
+    } else {
+        snprintf(buf, len, "this expression");
+    }
+}
+
+// The type of an object, for a message about its fields. An array field and an
+// element of one are spelled from the field: expr_ty reads `h.k` as its element.
+static void field_owner_spelling(Codegen* cg, AstNode* obj, char* buf, int len) {
+    StructField* f = obj->type == AST_FIELD_ACCESS ? access_field(cg, obj) : NULL;
+    char* et = (obj->type == AST_INDEX && obj->child_count > 0) ? index_elem_type(cg, obj->children[0]) : NULL;
+    if (f && f->array_len > 0 && f->type_name) snprintf(buf, len, "[%s; %d]", f->type_name, f->array_len);
+    else if (et) snprintf(buf, len, "%s", et);
+    else found_spelling(cg, obj, buf, len);
+}
+
+// `obj.field` names a field (0.45.3): obj is a struct or a pointer to one
+// (obj_record_type), and that struct has the field. Checked once, before the
+// read or the store. Before, a field of anything else (`a[i].x` with a: [i64; 4])
+// or a field the struct does not have read whatever rax held, and the store was
+// dropped, with no message. A slice's .ptr, .len and .cap come before this.
+static int check_field_access(Codegen* cg, AstNode* obj, const char* field, AstNode* at) {
+    char* rec = obj_record_type(cg, obj);
+    char what[128], ty[160];
+    if (rec) {
+        if (typetab_field(cg->types, rec, (char*)field)) return 1;
+        diag_error(STMT_POS(at), "struct '%s' has no field '%s'", rec, field);
+        return 0;
+    }
+    if (obj->type == AST_CALL) {
+        diag_error(STMT_POS(at), "'%s' does not return a struct; it has no field '%s'",
+                   obj->name ? obj->name : "(call)", field);
+        return 0;
+    }
+    if (obj->type == AST_IDENT && obj->name && !symtab_lookup_symbol(cg->symtab, obj->name) &&
+        !global_symtab_lookup(cg->global_symtab, obj->name)) {
+        diag_error(STMT_POS(at), "use of undeclared variable '%s'", obj->name);
+        return 0;
+    }
+    place_text(obj, what, sizeof what);
+    field_owner_spelling(cg, obj, ty, sizeof ty);
+    if (ty[0] == '[' && ty[1] != ']')
+        diag_error(STMT_POS(at), "%s has type %s, which has no field '%s'; index it first: %s[i].%s",
+                   what, ty, field, what, field);
+    else
+        diag_error(STMT_POS(at), "%s has type %s, which has no field '%s'; only a struct or a pointer to a struct has fields",
+                   what, ty, field);
+    return 0;
 }
 
 // Size of a type name, or -1 when this compiler cannot lay it out.
@@ -15499,6 +15621,10 @@ void gen_expr(Codegen* cg, AstNode* n) {
             return;
         }
         if (gen_slice_field(cg, n)) return;
+        if (!check_field_access(cg, n->children[0], n->name, n)) {
+            emit(cg, "    xor rax, rax\n");
+            return;
+        }
         {
             StructField* sf = access_field(cg, n);
             if (sf && sf->is_slice) {
@@ -15599,34 +15725,22 @@ void gen_expr(Codegen* cg, AstNode* n) {
                     ? typetab_lookup(cg->types, gvar->type_name) : NULL;
                 if (gst) {
                     int field_off = typetab_field_offset(cg->types, gvar->type_name, field_name);
-                    if (field_off >= 0) {
-                        int psz = 8, psg = 0, poff = field_off, pvol = 0;
-                        int packed = field_mem_info(cg, gvar->type_name, field_name, &poff, &psz, &psg, &pvol);
-                        char mem[96];
-                        mem_base_disp(mem, sizeof(mem), gvar->name, packed ? poff : field_off);
-                        if (packed) emit_sized_load_mark(cg, mem, psz, psg, pvol);
-                        else emit(cg, "    mov rax, [%s]\n", mem);
-                    }
+                    int psz = 8, psg = 0, poff = field_off, pvol = 0;
+                    int packed = field_mem_info(cg, gvar->type_name, field_name, &poff, &psz, &psg, &pvol);
+                    char mem[96];
+                    mem_base_disp(mem, sizeof(mem), gvar->name, packed ? poff : field_off);
+                    if (packed) emit_sized_load_mark(cg, mem, psz, psg, pvol);
+                    else emit(cg, "    mov rax, [%s]\n", mem);
+                } else {
+                    // g.x with g: *P (0.45.3; before, nothing was loaded).
+                    gen_field_load(cg, n, obj, field_name);
                 }
             }
-        } else if (obj->type == AST_CALL && !obj_record_type(cg, obj)) {
-            diag_error(n->line, n->col, "'%s' does not return a struct; it has no field '%s'",
-                       obj->name ? obj->name : "(call)", field_name);
-            emit(cg, "    xor rax, rax\n");
         } else if (obj->type == AST_FIELD_ACCESS || obj->type == AST_CALL) {
-            // Nested scalar: a.p.x. The parent field is itself a struct value.
-            // f().x: the call's temporary is that struct.
-            char* rec = obj_record_type(cg, obj);
-            int field_off = rec ? typetab_field_offset(cg->types, rec, field_name) : -1;
-            if (obj->type == AST_CALL && field_off < 0)
-                diag_error(n->line, n->col, "struct '%s' has no field '%s'", rec, field_name);
-            if (rec && field_off >= 0 && gen_field_addr(cg, obj, field_name)) {
-                int psz = 8, psg = 0, poff = 0, pvol = 0;
-                if (field_mem_info(cg, rec, field_name, &poff, &psz, &psg, &pvol))
-                    emit_sized_load_mark(cg, "rax", psz, psg, pvol);
-                else
-                    emit(cg, "    mov rax, [rax]\n");
-            }
+            // Nested scalar: a.p.x. The parent field is itself a struct value,
+            // or a pointer to one (a.next.v). f().x: the call's temporary is
+            // that struct, or the pointer it returns.
+            gen_field_load(cg, n, obj, field_name);
         } else {
             // Field access from expression (e.g., array[index].field)
             // Generate the expression first (should leave struct address in rax).
@@ -15653,84 +15767,22 @@ void gen_expr(Codegen* cg, AstNode* n) {
                 g_elem_capture = 0;
             }
 
-            // Now rax contains the address of the struct
-            // We need to know the struct type to get field offset
-            // For now, we'll try to infer it from the expression
-            // This is a simplified approach - full implementation needs type inference
-
-            // Try to get type from INDEX expression
-            if (obj->type == AST_INDEX && obj->children && obj->child_count > 0) {
-                AstNode* base = obj->children[0];
-                char* struct_type = NULL;
-                // x.f[i].y and f()[i].y with a slice of structs (0.45.0).
-                const char* slice_el = base->type != AST_IDENT ? slice_operand_elem(cg, base) : NULL;
-
-                if (slice_el) {
-                    struct_type = (char*)slice_el;
-                } else if (base->type == AST_IDENT) {
-                    // Simple case: array[index].field
-                    Symbol* base_sym = symtab_lookup_symbol(cg->symtab, base->name);
-                    if (base_sym && base_sym->type_name) {
-                        struct_type = base_sym->type_name;
-                        // Remove pointer prefix if present
-                        if (struct_type[0] == '*') struct_type++;
-                    }
-                    if (!struct_type) {
-                        GlobalVar* gv = global_symtab_lookup(cg->global_symtab, base->name);
-                        if (gv && gv->is_array && gv->elem_type) struct_type = gv->elem_type;
-                    }
-                } else if (base->type == AST_FIELD_ACCESS) {
-                    // Complex case: struct.field[index].field
-                    // E.g., container.tokens[0].value
-                    // base is AST_FIELD_ACCESS for "container.tokens"
-                    // Now we CAN determine the element type using type tracking!
-
-                    if (base->children && base->child_count > 0) {
-                        AstNode* struct_obj = base->children[0];
-                        char* field_name_inner = base->name;  // "tokens"
-
-                        // p->tokens[0].value: the name p, as in gen_array_index (0.45.1).
-                        if (struct_obj && struct_obj->type == AST_DEREF && struct_obj->child_count == 1 &&
-                            struct_obj->children[0] && struct_obj->children[0]->type == AST_IDENT)
-                            struct_obj = struct_obj->children[0];
-                        if (struct_obj->type == AST_IDENT) {
-                            // Look up the struct variable
-                            Symbol* struct_sym = symtab_lookup_symbol(cg->symtab, struct_obj->name);
-                            if (struct_sym && struct_sym->type_name) {
-                                // Get the struct type (e.g., "Container" or "*Container")
-                                char* container_type = struct_sym->type_name;
-                                if (container_type[0] == '*') container_type++;
-
-                                // Get the type of the field (e.g., "*Token" for tokens field)
-                                char* field_type = typetab_field_type(cg->types, container_type, field_name_inner);
-                                if (field_type) {
-                                    // If it's a pointer type, extract base type
-                                    if (field_type[0] == '*') {
-                                        struct_type = field_type + 1;  // Skip '*' to get "Token"
-                                    } else {
-                                        struct_type = field_type;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                if (struct_type) {
-                    int field_off = typetab_field_offset(cg->types, struct_type, field_name);
-                    if (field_off >= 0) {
-                        int psz = 8, psg = 0, poff = field_off, pvol = 0;
-                        int packed = field_mem_info(cg, struct_type, field_name, &poff, &psz, &psg, &pvol);
-                        if (packed) {
-                            char mem[64];
-                            mem_base_disp(mem, 64, "rax", poff);
-                            emit_sized_load_mark(cg, mem, psz, psg, pvol);
-                        } else if (field_off == 0) {
-                            emit(cg, "    mov rax, [rax]\n");
-                        } else {
-                            emit(cg, "    mov rax, [rax+%d]\n", field_off);
-                        }
-                    }
+            // rax is the address of the struct: an element that is one, or the
+            // pointer to one that an element or a cast is (check_field_access
+            // found which struct).
+            {
+                char* struct_type = obj_record_type(cg, obj);
+                int field_off = typetab_field_offset(cg->types, struct_type, field_name);
+                int psz = 8, psg = 0, poff = field_off, pvol = 0;
+                int packed = field_mem_info(cg, struct_type, field_name, &poff, &psz, &psg, &pvol);
+                if (packed) {
+                    char mem[64];
+                    mem_base_disp(mem, 64, "rax", poff);
+                    emit_sized_load_mark(cg, mem, psz, psg, pvol);
+                } else if (field_off == 0) {
+                    emit(cg, "    mov rax, [rax]\n");
+                } else {
+                    emit(cg, "    mov rax, [rax+%d]\n", field_off);
                 }
             }
         }
@@ -16183,6 +16235,7 @@ void gen_expr(Codegen* cg, AstNode* n) {
                 return;
             }
         }
+        if (!check_field_access(cg, obj, field_name, n)) return;
 
         // Copy an embedded struct field (nested records, packed or not).
         {
@@ -16306,9 +16359,10 @@ void gen_expr(Codegen* cg, AstNode* n) {
             // its width, so the rest of the parent stays put. An element's address
             // is the one a[i].x reads, bounds check included (0.45.2; before, the
             // store to a local array element computed its own, unchecked).
+            // a.next.v = value with next: *N stores through that pointer (0.45.3;
+            // before, the store was dropped).
             char* rec = obj_record_type(cg, obj);
-            int field_off = rec ? typetab_field_offset(cg->types, rec, field_name) : -1;
-            if (rec && field_off >= 0 && gen_field_addr(cg, obj, field_name)) {
+            if (gen_field_addr(cg, obj, field_name)) {
                 int psz = 8, psg = 0, poff = 0, pvol = 0;
                 int sized = field_mem_info(cg, rec, field_name, &poff, &psz, &psg, &pvol);
                 emit(cg, "    mov rcx, rax\n    pop rax\n");
@@ -16319,8 +16373,7 @@ void gen_expr(Codegen* cg, AstNode* n) {
                 }
             } else {
                 emit(cg, "    pop rax\n");
-                if (rec && field_off < 0)
-                    diag_error(n->line, n->col, "struct '%s' has no field '%s'", rec, field_name);
+                diag_error(STMT_POS(n), "cannot take the address of field '%s'", field_name);
             }
         } else if (obj->name) {
             // Simple struct field assignment: struct.field = value
@@ -16335,96 +16388,68 @@ void gen_expr(Codegen* cg, AstNode* n) {
                     is_pointer = 1;
                 }
 
-                // Get field offset
+                // Get field offset (check_field_access found the field)
                 int field_off = typetab_field_offset(cg->types, struct_type, field_name);
-                if (field_off >= 0) {
-                    emit(cg, "    pop rcx\n");  // Restore value into rcx
-                    emit(cg, "    ; Field assignment: %s.%s (offset %d)\n", obj->name, field_name, field_off);
-                    int psz = 8, psg = 0, poff = field_off, pvol = 0;
-                    int packed = field_mem_info(cg, struct_type, field_name, &poff, &psz, &psg, &pvol);
+                emit(cg, "    pop rcx\n");  // Restore value into rcx
+                emit(cg, "    ; Field assignment: %s.%s (offset %d)\n", obj->name, field_name, field_off);
+                int psz = 8, psg = 0, poff = field_off, pvol = 0;
+                int packed = field_mem_info(cg, struct_type, field_name, &poff, &psz, &psg, &pvol);
 
-                    if (is_pointer) {
-                        // For pointers: load pointer, add offset, store
-                        emit_mov_ptr(cg, sym, "rbx");  // Load pointer
-                        if (packed) {
-                            char mem[64];
-                            mem_base_disp(mem, 64, "rbx", poff);
-                            emit_sized_store_mark(cg, mem, psz, 1, pvol);
-                        } else if (field_off == 0) {
-                            trunc_rcx_named(cg, typetab_field_type(cg->types, struct_type, field_name));
-                            emit(cg, "    mov [rbx], rcx\n");  // Store through pointer (no offset)
-                        } else {
-                            trunc_rcx_named(cg, typetab_field_type(cg->types, struct_type, field_name));
-                            emit(cg, "    mov [rbx+%d], rcx\n", field_off);  // Store through pointer with offset
-                        }
-                    } else if (packed) {
+                if (is_pointer) {
+                    // For pointers: load pointer, add offset, store
+                    emit_mov_ptr(cg, sym, "rbx");  // Load pointer
+                    if (packed) {
                         char mem[64];
-                        snprintf(mem, sizeof(mem), "rbp%+d", sym->offset + poff);
+                        mem_base_disp(mem, 64, "rbx", poff);
                         emit_sized_store_mark(cg, mem, psz, 1, pvol);
-                    } else {
-                        // For direct structs: store directly. An 8-byte slot still
-                        // keeps only the field's declared width.
+                    } else if (field_off == 0) {
                         trunc_rcx_named(cg, typetab_field_type(cg->types, struct_type, field_name));
-                        emit(cg, "    mov [rbp%d], rcx\n", sym->offset + field_off);
+                        emit(cg, "    mov [rbx], rcx\n");  // Store through pointer (no offset)
+                    } else {
+                        trunc_rcx_named(cg, typetab_field_type(cg->types, struct_type, field_name));
+                        emit(cg, "    mov [rbx+%d], rcx\n", field_off);  // Store through pointer with offset
                     }
+                } else if (packed) {
+                    char mem[64];
+                    snprintf(mem, sizeof(mem), "rbp%+d", sym->offset + poff);
+                    emit_sized_store_mark(cg, mem, psz, 1, pvol);
                 } else {
-                    emit(cg, "    pop rax\n");
-                    if (typetab_lookup(cg->types, struct_type))
-                        diag_error(STMT_POS(n), "struct '%s' has no field '%s'", struct_type, field_name);
-                    else
-                        diag_error(STMT_POS(n),
-                                   "the assignment target is not assignable: '%s' is not a struct or a pointer to one",
-                                   obj->name);
+                    // For direct structs: store directly. An 8-byte slot still
+                    // keeps only the field's declared width.
+                    trunc_rcx_named(cg, typetab_field_type(cg->types, struct_type, field_name));
+                    emit(cg, "    mov [rbp%d], rcx\n", sym->offset + field_off);
                 }
             } else {
                 GlobalVar* gvar = global_symtab_lookup(cg->global_symtab, obj->name);
                 StructType* gst = (gvar && gvar->type_name && !gvar->is_array && !gvar->is_pointer)
                     ? typetab_lookup(cg->types, gvar->type_name) : NULL;
+                // check_field_access found the field: g is a struct or a *Struct.
                 if (gst) {
                     int field_off = typetab_field_offset(cg->types, gvar->type_name, field_name);
-                    if (field_off >= 0) {
-                        emit(cg, "    pop rcx\n");
-                        int psz = 8, psg = 0, poff = field_off, pvol = 0;
-                        int packed = field_mem_info(cg, gvar->type_name, field_name, &poff, &psz, &psg, &pvol);
-                        char mem[96];
-                        mem_base_disp(mem, sizeof(mem), gvar->name, packed ? poff : field_off);
-                        if (packed) emit_sized_store_mark(cg, mem, psz, 1, pvol);
-                        else {
-                            trunc_rcx_named(cg, typetab_field_type(cg->types, gvar->type_name, field_name));
-                            emit(cg, "    mov [%s], rcx\n", mem);
-                        }
-                    } else {
-                        emit(cg, "    pop rax\n");
-                        diag_error(STMT_POS(n), "struct '%s' has no field '%s'", gvar->type_name, field_name);
-                    }
-                } else if (gvar && gvar->is_pointer && gvar->pointee_type &&
-                           typetab_lookup(cg->types, gvar->pointee_type)) {
-                    // A global `*Struct`: load the pointer, store at the field.
-                    int field_off = typetab_field_offset(cg->types, gvar->pointee_type, field_name);
-                    if (field_off >= 0) {
-                        int psz = 8, psg = 0, poff = field_off, pvol = 0;
-                        int packed = field_mem_info(cg, gvar->pointee_type, field_name, &poff, &psz, &psg, &pvol);
-                        char mem[96];
-                        emit(cg, "    pop rcx\n");
-                        emit(cg, "    mov rbx, [%s]\n", gvar->name);
-                        mem_base_disp(mem, sizeof(mem), "rbx", packed ? poff : field_off);
-                        if (packed) emit_sized_store_mark(cg, mem, psz, 1, pvol);
-                        else {
-                            trunc_rcx_named(cg, typetab_field_type(cg->types, gvar->pointee_type, field_name));
-                            emit(cg, "    mov [%s], rcx\n", mem);
-                        }
-                    } else {
-                        emit(cg, "    pop rax\n");
-                        diag_error(STMT_POS(n), "struct '%s' has no field '%s'", gvar->pointee_type, field_name);
+                    emit(cg, "    pop rcx\n");
+                    int psz = 8, psg = 0, poff = field_off, pvol = 0;
+                    int packed = field_mem_info(cg, gvar->type_name, field_name, &poff, &psz, &psg, &pvol);
+                    char mem[96];
+                    mem_base_disp(mem, sizeof(mem), gvar->name, packed ? poff : field_off);
+                    if (packed) emit_sized_store_mark(cg, mem, psz, 1, pvol);
+                    else {
+                        trunc_rcx_named(cg, typetab_field_type(cg->types, gvar->type_name, field_name));
+                        emit(cg, "    mov [%s], rcx\n", mem);
                     }
                 } else {
-                    emit(cg, "    pop rax\n");
-                    if (gvar)
-                        diag_error(STMT_POS(n),
-                                   "the assignment target is not assignable: '%s' is not a struct or a pointer to one",
-                                   obj->name);
-                    else
-                        diag_error(STMT_POS(n), "assignment to undeclared variable '%s'", obj->name);
+                    // A global `*Struct`: load the pointer, store at the field.
+                    int field_off = typetab_field_offset(cg->types, gvar->pointee_type, field_name);
+                    int psz = 8, psg = 0, poff = field_off, pvol = 0;
+                    int packed = field_mem_info(cg, gvar->pointee_type, field_name, &poff, &psz, &psg, &pvol);
+                    char mem[96];
+                    emit(cg, "    pop rcx\n");
+                    emit(cg, "    mov rbx, [%s]\n", gvar->name);
+                    mem_base_disp(mem, sizeof(mem), "rbx", packed ? poff : field_off);
+                    if (packed) emit_sized_store_mark(cg, mem, psz, 1, pvol);
+                    else {
+                        trunc_rcx_named(cg, typetab_field_type(cg->types, gvar->pointee_type, field_name));
+                        emit(cg, "    mov [%s], rcx\n", mem);
+                    }
                 }
             }
         }
