@@ -12449,9 +12449,11 @@ static char* expr_struct_type(Codegen* cg, AstNode* n) {
         return ptr ? NULL : t;
     }
     if (n->type == AST_FIELD_ACCESS && n->child_count == 1 && n->name) {
-        // An array field ([P; N]) is not a P: its elements are (0.45.3).
+        // An array field [P; N] still answers P here, so a whole-struct copy
+        // (`h.ps = q`, `let t: P = h.ps`, `sum(h.ps)`) is its first element, as
+        // before 0.45.3; only its fields are refused (obj_record_type).
         StructField* f = access_field(cg, n);
-        if (f && f->array_len == 0 && f->type_name && f->type_name[0] != '*' && is_record(cg, f->type_name))
+        if (f && f->type_name && f->type_name[0] != '*' && is_record(cg, f->type_name))
             return f->type_name;
         return NULL;
     }
