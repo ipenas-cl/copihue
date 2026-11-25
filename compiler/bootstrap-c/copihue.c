@@ -12641,29 +12641,43 @@ static StructField* access_field(Codegen* cg, AstNode* fa) {
     return typetab_field(cg->types, rec, fa->name);
 }
 
-// The source text of an object, for a message: `a[i]`, `h.k`, `p->n`, `f(...)`.
-static void place_text(AstNode* n, char* buf, int len) {
-    char a[96], b[64];
-    if (!n) { snprintf(buf, len, "this expression"); return; }
+// Appends to buf (len bytes, NUL-terminated); stops quietly when full.
+static void append_text(char* buf, int len, const char* s) {
+    size_t used = strlen(buf);
+    if ((int)used + 1 < len) snprintf(buf + used, len - used, "%s", s);
+}
+
+static void append_place(AstNode* n, char* buf, int len) {
+    if (!n) { append_text(buf, len, "this expression"); return; }
     if ((n->type == AST_IDENT && n->name) || (n->type == AST_NUMBER && n->value)) {
-        snprintf(buf, len, "%s", n->type == AST_IDENT ? n->name : n->value);
+        append_text(buf, len, n->type == AST_IDENT ? n->name : n->value);
     } else if (n->type == AST_INDEX && n->child_count >= 2) {
-        place_text(n->children[0], a, sizeof a);
-        place_text(n->children[1], b, sizeof b);
-        snprintf(buf, len, "%s[%s]", a, b);
+        append_place(n->children[0], buf, len);
+        append_text(buf, len, "[");
+        append_place(n->children[1], buf, len);
+        append_text(buf, len, "]");
     } else if (n->type == AST_FIELD_ACCESS && n->child_count == 1) {
         AstNode* o = n->children[0];
         int arrow = o && o->type == AST_DEREF && o->child_count == 1;
-        place_text(arrow ? o->children[0] : o, a, sizeof a);
-        snprintf(buf, len, "%s%s%s", a, arrow ? "->" : ".", n->name);
+        append_place(arrow ? o->children[0] : o, buf, len);
+        append_text(buf, len, arrow ? "->" : ".");
+        append_text(buf, len, n->name);
     } else if (n->type == AST_DEREF && n->child_count == 1) {
-        place_text(n->children[0], a, sizeof a);
-        snprintf(buf, len, "*%s", a);
+        append_text(buf, len, "*");
+        append_place(n->children[0], buf, len);
     } else if (n->type == AST_CALL && n->name) {
-        snprintf(buf, len, "%s(...)", n->name);
+        append_text(buf, len, n->name);
+        append_text(buf, len, "(...)");
     } else {
-        snprintf(buf, len, "this expression");
+        append_text(buf, len, "this expression");
     }
+}
+
+// The source text of an object, for a message: `a[i]`, `h.k`, `p->n`, `f(...)`.
+static void place_text(AstNode* n, char* buf, int len) {
+    if (len <= 0) return;
+    buf[0] = '\0';
+    append_place(n, buf, len);
 }
 
 // The type of an object, for a message about its fields. An array field and an
