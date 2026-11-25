@@ -5521,25 +5521,52 @@ static void probe_frame(Codegen* cg, const char* fn, int frame) {
     cg->code_len += sl - ll;
 }
 
+// The bounds trap at .Lbounds_error_<lab>: "Array bounds error" on stderr,
+// then exit(1). One text for every check; the caller places it.
+static void bounds_trap_text(Codegen* cg, int lab, char* buf, int len) {
+    char* err_msg = strtab_add(cg->strtab, "Array bounds error\\n", 19);
+    char msg_addr[160];
+    snprintf(msg_addr, sizeof msg_addr, g_pic ? "lea rsi, [rel %s]" : "mov rsi, %s", err_msg);
+    snprintf(buf, len,
+             ".Lbounds_error_%d:\n"
+             "    %s\n"
+             "    mov rdx, 19\n"
+             "    mov rdi, 2\n"
+             "    mov rax, 1\n"
+             "    syscall\n"
+             "    mov rdi, 1\n"
+             "    mov rax, 60\n"
+             "    syscall\n",
+             lab, msg_addr);
+}
+
+// reg checked against [0, count), the trap in line: the in-range path jumps
+// over it. -O0 and the freestanding and flat builds; emit_bounds_hot is -O2.
+static void emit_bounds_check(Codegen* cg, const char* reg, int count) {
+    int lab = new_label(cg);
+    char trap[512];
+    emit(cg, "    test %s, %s\n", reg, reg);
+    emit(cg, "    js .Lbounds_error_%d\n", lab);
+    emit(cg, "    cmp %s, %d\n", reg, count);
+    emit(cg, "    jge .Lbounds_error_%d\n", lab);
+    emit(cg, "    jmp .Lbounds_ok_%d\n", lab);
+    bounds_trap_text(cg, lab, trap, (int)sizeof trap);
+    emit(cg, "%s", trap);
+    emit(cg, ".Lbounds_ok_%d:\n", lab);
+}
+
 // In-range path falls through. The trap is appended and emitted after ret.
 static void emit_bounds_hot(Codegen* cg, const char* reg, int count, int skip_neg) {
     int lab = new_label(cg);
+    char trap[512];
     if (!skip_neg) {
         emit(cg, "    test %s, %s\n", reg, reg);
         emit(cg, "    js .Lbounds_error_%d\n", lab);
     }
     emit(cg, "    cmp %s, %d\n", reg, count);
     emit(cg, "    jge .Lbounds_error_%d\n", lab);
-    cold_emit(".Lbounds_error_%d:\n", lab);
-    char* err_msg = strtab_add(cg->strtab, "Array bounds error\\n", 19);
-    cold_emit(g_pic ? "    lea rsi, [rel %s]\n" : "    mov rsi, %s\n", err_msg);
-    cold_emit("    mov rdx, 19\n");
-    cold_emit("    mov rdi, 2\n");
-    cold_emit("    mov rax, 1\n");
-    cold_emit("    syscall\n");
-    cold_emit("    mov rdi, 1\n");
-    cold_emit("    mov rax, 60\n");
-    cold_emit("    syscall\n");
+    bounds_trap_text(cg, lab, trap, (int)sizeof trap);
+    cold_emit("%s", trap);
 }
 
 void gen_expr(Codegen* cg, AstNode* n);
@@ -11550,28 +11577,8 @@ void gen_addr_of(Codegen* cg, AstNode* n) {
             // count / 8 (0 for fewer than 8 elements), so &a[1] always trapped.
             int array_count = local_array_len(sym);
             if (sym->size > 0 && array_checks() &&
-                !hosted_array_check_skipped(var->children[1], array_count)) {
-                int ok_label = new_label(cg);
-
-                emit(cg, "    test rax, rax\n");
-                emit(cg, "    js .Lbounds_error_%d\n", ok_label);
-                emit(cg, "    cmp rax, %d\n", array_count);
-                emit(cg, "    jge .Lbounds_error_%d\n", ok_label);
-                emit(cg, "    jmp .Lbounds_ok_%d\n", ok_label);
-
-                emit(cg, ".Lbounds_error_%d:\n", ok_label);
-                char* err_msg = strtab_add(cg->strtab, "Array bounds error\\n", 19);
-                emit_sym_addr(cg, "rsi", err_msg);
-                emit(cg, "    mov rdx, 19\n");
-                emit(cg, "    mov rdi, 2\n");
-                emit(cg, "    mov rax, 1\n");
-                emit(cg, "    syscall\n");
-                emit(cg, "    mov rdi, 1\n");
-                emit(cg, "    mov rax, 60\n");
-                emit(cg, "    syscall\n");
-
-                emit(cg, ".Lbounds_ok_%d:\n", ok_label);
-            }
+                !hosted_array_check_skipped(var->children[1], array_count))
+                emit_bounds_check(cg, "rax", array_count);
 
             // Address: rbp + offset + index * stride, the element size that
             // a[i] reads with. Before 0.45.1 an array of u8, i16 or i32 used 8.
@@ -11875,27 +11882,7 @@ void gen_array_index(Codegen* cg, AstNode* n) {
         char* label = strtab_add(cg->strtab, arr->value, str_len);
 
         gen_expr(cg, n->children[1]);  // Index in rax
-
-        // Bounds checking
-        int ok_label = new_label(cg);
-        emit(cg, "    test rax, rax\n");
-        emit(cg, "    js .Lbounds_error_%d\n", ok_label);
-        emit(cg, "    cmp rax, %d\n", str_len);
-        emit(cg, "    jge .Lbounds_error_%d\n", ok_label);
-        emit(cg, "    jmp .Lbounds_ok_%d\n", ok_label);
-
-        emit(cg, ".Lbounds_error_%d:\n", ok_label);
-        char* err_msg = strtab_add(cg->strtab, "Array bounds error\\n", 19);
-        emit_sym_addr(cg, "rsi", err_msg);
-        emit(cg, "    mov rdx, 19\n");
-        emit(cg, "    mov rdi, 2\n");
-        emit(cg, "    mov rax, 1\n");
-        emit(cg, "    syscall\n");
-        emit(cg, "    mov rdi, 1\n");
-        emit(cg, "    mov rax, 60\n");
-        emit(cg, "    syscall\n");
-
-        emit(cg, ".Lbounds_ok_%d:\n", ok_label);
+        emit_bounds_check(cg, "rax", str_len);
 
         // Load byte from string: string_label + index
         emit(cg, "    lea rbx, [%s]\n", label);
@@ -12034,27 +12021,7 @@ void gen_array_index(Codegen* cg, AstNode* n) {
                 int skip_neg = g_nonneg_reg && !strcmp(g_nonneg_reg, breg);
                 emit_bounds_hot(cg, breg, array_count, skip_neg);
             } else {
-            int ok_label = new_label(cg);
-
-            emit(cg, "    test %s, %s\n", breg, breg);
-            emit(cg, "    js .Lbounds_error_%d\n", ok_label);
-
-            emit(cg, "    cmp %s, %d\n", breg, array_count);
-            emit(cg, "    jge .Lbounds_error_%d\n", ok_label);
-            emit(cg, "    jmp .Lbounds_ok_%d\n", ok_label);
-
-            emit(cg, ".Lbounds_error_%d:\n", ok_label);
-            char* err_msg = strtab_add(cg->strtab, "Array bounds error\\n", 19);
-            emit_sym_addr(cg, "rsi", err_msg);
-            emit(cg, "    mov rdx, 19\n");
-            emit(cg, "    mov rdi, 2\n");
-            emit(cg, "    mov rax, 1\n");
-            emit(cg, "    syscall\n");
-            emit(cg, "    mov rdi, 1\n");
-            emit(cg, "    mov rax, 60\n");
-            emit(cg, "    syscall\n");
-
-            emit(cg, ".Lbounds_ok_%d:\n", ok_label);
+                emit_bounds_check(cg, breg, array_count);
             }
         }
 
