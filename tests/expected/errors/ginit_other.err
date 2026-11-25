@@ -4,7 +4,7 @@ tests/errors/ginit_other.lap:6:23: error: element 1 of the initializer of global
 tests/errors/ginit_other.lap:7:15: error: the initializer of global 'b' is not a constant expression: an address (&x)
       7 | let b: *i64 = &n;
         |               ^
-tests/errors/ginit_other.lap:8:14: error: the initializer of global 'c' is not a constant expression: a struct literal
+tests/errors/ginit_other.lap:8:14: error: the initializer of global 'c' is not a constant expression: a struct literal; declare the global without an initializer (every field starts at 0) and set its fields at run time, e.g. at the start of main
       8 | let c: P = P { x: 1, y: 2 };
         |              ^
 tests/errors/ginit_other.lap:9:14: error: the initializer of global 'd' is not a constant expression: the name 'true', which is not a const

@@ -1,0 +1,19 @@
+// A struct global takes no literal (`let origin: P = P { x: 1, y: 2 };` is
+// refused: not a constant expression). What the message says instead (0.45.3):
+// declare it without an initializer, where every field starts at 0, and set its
+// fields at run time, at the start of main.
+struct P { x: i64, y: i64 }
+
+let origin: P;
+
+fn dist(p: *P) -> i64 { return p.x * 10 + p.y; }
+
+fn main() -> i32 {
+    print_int(origin.x + origin.y);
+    println("");
+    origin.x = 1;
+    origin.y = 2;
+    print_int(dist(&origin));
+    println("");
+    return 0;
+}

@@ -22641,7 +22641,10 @@ static int gconst_eval(Codegen* cg, AstNode* n, long long* out, const char** why
     case AST_DEREF:         *why = "a pointer dereference"; return 0;
     case AST_INDEX:         *why = "an index expression"; return 0;
     case AST_FIELD_ACCESS:  *why = "a field access"; return 0;
-    case AST_STRUCT_LITERAL:*why = "a struct literal"; return 0;
+    case AST_STRUCT_LITERAL:
+        *why = "a struct literal; declare the global without an initializer (every field starts at 0) "
+               "and set its fields at run time, e.g. at the start of main";
+        return 0;
     case AST_ARRAY_LITERAL: *why = "an array literal"; return 0;
     case AST_ASSIGN:        *why = "an assignment"; return 0;
     default:                *why = "an expression that is not a constant"; return 0;
