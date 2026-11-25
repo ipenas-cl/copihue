@@ -1,4 +1,4 @@
-# Copihue Language Reference (v0.45.2)
+# Copihue Language Reference (v0.45.3)
 
 This document describes the language that `copihue` accepts today. Anything not listed here is not supported.
 Planned features are in the README roadmap.
@@ -363,7 +363,7 @@ A place is:
 
 - a variable, local or global (`x = v`). `x = v` assigns only where an expression begins, or between parentheses (`a + (x = v)`);
 - an element of an array, a slice or a pointer: `a[i]`, `s[i]`, `p[i]`, and `*p`;
-- a field: `s.f`, `p.f`, `p->f`, `a[i].f`, `r.b.x`, and an element of an array field (`e.blocks[i]`);
+- a field: `s.f`, `p.f`, `p->f`, `a[i].f`, `r.b.x`, `a.next.v` through a pointer field, `g.f` through a global pointer, a field of an element of an array field (`s.pts[i].y`), and an element of an array field (`e.blocks[i]`); see Field access;
 - **a pointer that is a value, indexed or dereferenced**: `f(x)[i]`, `*f(x)`, `f(x).field` (when `f` returns a pointer to a struct), `(p + 8)[0]`, `(addr as *u32)[i]`, `ps[i][j]` (when `ps[i]` is a pointer). The pointer designates the memory it points to exactly as a pointer variable does.
 
 For that last case the pointer's type decides everything. With `fn mem(off: i64) -> *volatile u32`, `mem(8)[0] = 5;` calls `mem(8)`, adds `0 * 4`, and writes four bytes (`mov dword [rbx], eax  ; volatile`); `mem(8)[2]` is the address 8 bytes further; `*mem(8) = 5` is the store at index 0. The store has the width of the pointee (a `*u16` result writes two bytes, a `*i64` result eight) and never touches its neighbours. `*volatile T` keeps its mark: the store (and a read through it) is emitted and is never folded. The value is evaluated first, then the index, then the pointer expression, as for a store through a name. Reads (`let v = mem(8)[2]`) use the same address and width; an element that is a struct is its address. A pointer is not bounds-checked. A call result that is not `volatile` is a plain pointer: `*cell(0) = 11` writes a `*u32` result with a 4-byte store.
@@ -382,19 +382,95 @@ A store is a compile error, with `file:line:col` and no output file, in any mode
 | `"abc"[0] = v` | `...: an element of a string literal (read-only text)` |
 | `f(x)[0] = v`, `3[0] = v` with an integer `f` | `...: the expression has type i64, not a pointer` |
 | `malloc(16)[0] = v` | `...: the pointee type of this expression is unknown (cast it, e.g. 'as *u8')` |
-| `f(x).field = v` with `f` returning an integer | `...: field 'field' of an expression that is not a struct or a pointer to one` |
-| `n.field = v` with a scalar `n` | `...: 'n' is not a struct or a pointer to one` |
+| `f(x).field = v` with `f` returning an integer | `'f' does not return a struct; it has no field 'field'` (0.45.3; see Field access) |
+| `n.field = v` with a scalar `n`, `a[i].field = v` with `a: [i64; N]` | `n has type i64, which has no field 'field'; only a struct or a pointer to a struct has fields` (0.45.3; see Field access) |
 | `s.nope = v` | `struct 'S' has no field 'nope'` |
 | `g[0] = v` with a scalar global, `zz[0] = v` undeclared | `cannot index 'g': it is not an array or a pointer`, `assignment to undeclared variable 'zz'` |
 | `N = v` with a constant | `cannot assign to a constant` |
 
 Reading through an expression that cannot be indexed is an error as well (`cannot index this expression: ...`, `cannot index 'g'...`, `use of undeclared variable 'zz'`); before 0.44.4 it read 0.
 
-Compound assignment (`+= -= *= /= %=`) and `++`, `--` apply to a variable. On an element, a field or a dereference they are `the assignment target is not assignable: compound assignment and ++/-- apply to a variable, not to an element, a field or a dereference; write it out (x[i] = x[i] + v)`: that is not implemented yet. `getp()->x = v` (a call result before `->`) is `'->x' needs a variable of pointer-to-struct type on the left`; `getp().x = v` stores.
+Compound assignment (`+= -= *= /= %=`) and `++`, `--` apply to a variable. On an element, a field or a dereference they are `the assignment target is not assignable: compound assignment and ++/-- apply to a variable, not to an element, a field or a dereference; write it out (x[i] = x[i] + v)`: that is not implemented yet. `getp()->x = v` (a call result before `->`) is `'->x' needs a variable of pointer-to-struct type on the left`; `getp().x = v` stores, and since 0.45.3 `getp().x` reads (before, it was `'getp' does not return a struct`).
 
 **Width of the arithmetic in a store.** `let w: i64 = a + b` and `w = a + b` with `u32` operands compute the sum at 64 bits (0.42.5). Since 0.44.4 a store into a field, an element (array, pointer, slice, array field), `*p`, or a pointer expression does the same: `w.x = a + b`, `arr[i] = a - b`, `p[3] = a * 3` and `f(x)[0] = a + b` take the arithmetic at the width of the destination when it is wider than the operands, signed or not. Before, the sum was cut to 32 bits first (`mov eax, eax`) and the high bits were lost. A destination as narrow as the operands still wraps (`w.u8field = c + d` with `u8` operands is `(c + d) & 255`). Call arguments and `return a + b` are not part of this: the operator keeps its operands' width there (pending).
 
 Tests: `tests/errors/assign_*.lap` (every message above, with its line), `tests/assign/run.sh` (each refusal in every mode with no output file; the stores in the assembly and in the native and nasm objects; and `tests/assign/kernel.lap`, which QEMU runs at `-O0` and `-O2`: stores through call results, neighbours intact, and sums past 32 bits through a field, an element, a pointer and an array field), `tests/lang/assign_ptr_expr.lap` and `tests/lang/assign_wide.lap` (output written by hand and **not run** on the Mac that wrote them: it does not execute Linux ELF; the CI runs them).
+
+### Field access
+
+`x.f`, read or stored, needs `x` to be a struct, or a pointer to one, whose struct has a field `f` (0.45.3). That is checked once, before the read or the store, in every mode (`&x.f` of anything else was already an error: `cannot take the address of field 'f'`). `x` may be:
+
+- a struct local, parameter or global, or a pointer to one (`p.f` with `p: *P` is `p->f`);
+- an element: `pts[i].f` of a local or global array, of a slice, through a pointer (`ps[i].f` with `ps: *P`), of an array field (`s.pts[i].f` with `pts: [P; N]`), and of an array of pointers (`ps[i].f` with `ps: [*P; N]`, through the pointer);
+- a field, embedded (`r.a.f`) or a pointer (`a.next.f` with `next: *N`, through it), at any depth;
+- a call that returns the struct (a temporary) or a pointer to it (`getp().f`), and a cast to a pointer (`(raw as *P).f`).
+
+A store into an element of an array field uses the address the read uses (the field, then `i * sizeof(P)`), and writes only the field. This compiles and prints 8 (`shape.lap`):
+
+```
+struct Point { x: i64, y: i64 }
+struct Shape { n: i64, pts: [Point; 3] }
+
+fn main() -> i32 {
+    let s: Shape;
+    let i: i64 = 2;
+    s.n = 3;
+    s.pts[i].y = 5;
+    print_int(s.pts[i].y + s.n);
+    println("");
+    return 0;
+}
+```
+
+The index of an array field is not checked against `N` (only a local array is; see Local arrays). Before 0.45.3 `s.pts[i].y = 5` was refused (`the assignment target is not assignable: the expression has type Point, not a pointer`), and `q.arr[i].x = v` with `arr: [*P; 2]` took the element as a `P` and wrote into the array itself, over the field after it.
+
+Anything else has no fields, and is a compile error that names the value and its type (`field_bad.lap`, `shape_bad.lap`):
+
+```
+struct Point { x: i64, y: i64 }
+
+fn main() -> i32 {
+    let a: [i64; 4];
+    let i: i64 = 1;
+    let p: Point;
+    a[i] = 0;
+    a[i].x = 7;
+    a.x = 7;
+    p.z = 7;
+    print_int(a[i]);
+    return 0;
+}
+```
+
+```
+field_bad.lap:8:5: error: a[i] has type i64, which has no field 'x'; only a struct or a pointer to a struct has fields
+      8 |     a[i].x = 7;
+        |     ^
+field_bad.lap:9:5: error: a has type [i64; 4], which has no field 'x'; only a struct or a pointer to a struct has fields
+      9 |     a.x = 7;
+        |     ^
+field_bad.lap:10:5: error: struct 'Point' has no field 'z'
+     10 |     p.z = 7;
+        |     ^
+3 errors, compilation failed
+```
+
+```
+shape_bad.lap:6:5: error: s.pts has type [Point; 3], which has no field 'y'; index it first: s.pts[i].y
+      6 |     s.pts.y = 5;
+        |     ^
+1 error, compilation failed
+```
+
+| Message | What to write |
+| --- | --- |
+| `X has type T, which has no field 'f'; only a struct or a pointer to a struct has fields` | give `X` a struct type (`let a: [Point; 4]`), or a pointer to one; to store into the value itself, write `a[i] = 7` |
+| `X has type [P; N], which has no field 'f'; index it first: X[i].f` | `X[i].f`: an array has no fields, its elements do |
+| `struct 'P' has no field 'f'` | a field `P` declares |
+| `'g' does not return a struct; it has no field 'f'` | a call that returns a struct or a pointer to one, or keep the value in a struct local |
+| `use of undeclared variable 'x'` | declare `x` |
+
+Before 0.45.3 a read of a field of something that is not a struct (`a[i].x`, `n.x`, `a.x`, `h.k[i].x`) or of a field the struct does not have (`p.z`) gave whatever a register held, and `a[i].x = 7`, `h.n.x = 7` (an integer field) and the same through a pointer dropped the store, all with no message. The reads and stores that are correct but went through a pointer that is not a local name (`a.next.v`, a field through a global pointer, `ps[i].x = v` with `ps: [*P; N]`, `(raw as *P).y`) also loaded nothing or dropped the store. Code that compiled because of that no longer does; the messages above say what to write. Two messages of 0.44.4 changed: `n.f = v` with a scalar `n` was `...: 'n' is not a struct or a pointer to one`, and `f(x).f = v` with `f` returning an integer was `...: field 'f' of an expression that is not a struct or a pointer to one`. A local hides a global of the same name here too: a local that is not a struct no longer lets a global struct of its name answer for its fields. Tests: `tests/errors/memfix_field_elem.lap`, `memfix_field_owner.lap`, `tests/lang/field_ptr_chain.lap`, `field_ptr_call.lap`, `struct_field_arr.lap`, `struct_field_arr_ptr.lap`, and `tests/memfix/kernel_field_ptr.lap` under QEMU.
 
 ### Struct assignment
 
@@ -503,13 +579,13 @@ How to fix each message:
 | `expected P, found *P; pass the P it points to with '*'` | `f(*pp)`. |
 | `expected *P, found P; pass its address with '&'` | `f(&p)`. |
 | `expected *P, found Q; pass the address of a P` | the address of a `P` (`&q` would be `expected *P, found *Q`). |
-| `expected *P, found P; declare it first (let t: P = ...) and pass &t` | a literal has no address of its own: `let t: P = P { ... }; f(&t)`. |
+| `expected *P, found P; declare it first (let t: P = ...) and pass &t` | a literal is a value, not an address: `let t: P = P { ... }; f(&t)`, or, outside a loop, `f(&P { ... })` (0.45.3, see The address of a struct literal). |
 
 The rule is for calls to functions of the program. `let x: i64 = p`, `p == q` and other uses of a struct as a value are not part of it (see Type checking). A struct literal cannot be an argument in a `naked` or `bits 16`/`bits 32` function, which has no frame: `this struct literal cannot be passed as an argument; pass a local: let t: P = ...; f(t)`. An `ms64` call takes no struct at all (see Microsoft x64 convention).
 
 A field of an outer literal takes a struct value the same way: `R { a: g, n: 1 }`, `R { a: r.a }`, `R { a: *q }`, `R { a: make(1, 2) }` copy exactly `sizeof(P)` bytes into the field (before 0.45.1 a global was not copied, a packed local of odd size was copied in whole qwords past the field, and the rest stored an address). Another struct is `field 'a' of R: expected P, found Q`. `let p: P = Q { ... }` is `expected P, found Q` (before, the bytes of `Q` were written over `p` and what followed it).
 
-A struct literal is a value in `let x: T = T { ... }` (built in `x`), `return`, a field of another literal, an element of an array literal, and an argument. Reading a field of a literal is an error, `a field of a struct literal cannot be read; use a local: let t: P = ...; t.x`; before 0.45.1 the value was the literal's address. Anywhere else a literal is built in a temporary of its own and its value is that address, like any struct used as a value (see Type checking).
+A struct literal is a value in `let x: T = T { ... }` (built in `x`), `return`, a field of another literal, an element of an array literal, and an argument; `&T { ... }` is its address (0.45.3, see The address of a struct literal). Reading a field of a literal is an error, `a field of a struct literal cannot be read; use a local: let t: P = ...; t.x`; before 0.45.1 the value was the literal's address. Anywhere else a literal is built in a temporary of its own and its value is that address, like any struct used as a value (see Type checking).
 
 **A field the literal does not name is 0 (0.45.2).** Every literal is built the same way, wherever it goes: all its bytes are set to zero (padding included), then the fields it names are written. `Point { y: 9 }` has `x == 0` in a `let`, an untyped `let`, an element of an array literal, a nested literal (`R { a: P { y: 5 } }`), an argument, a `return` and a temporary. Before 0.45.2 a `let` and an element of an array literal kept whatever the frame held in the other fields: a value left there by an earlier call. A `packed struct` of odd size is zeroed up to its last byte and not past it.
 
@@ -536,13 +612,92 @@ let origin: Point = Point { y: 0 };
 ```
 
 ```
-origin.lap:3:27: error: the initializer of global 'origin' is not a constant expression: a struct literal
+origin.lap:3:27: error: the initializer of global 'origin' is not a constant expression: a struct literal; declare the global without an initializer (every field starts at 0) and set its fields at run time, e.g. at the start of main
       3 | let origin: Point = Point { y: 0 };
         |                           ^
 1 error, compilation failed
 ```
 
-Fix: declare it without an initializer (`let origin: Point;`, all zero) and set the fields that are not zero at the start of `main`.
+Fix, as the message says (it says so since 0.45.3): declare it without an initializer (`let origin: Point;`, all zero, in `.bss`) and set the fields that are not zero at the start of `main` (in a kernel, at the start of its entry function). `tests/lang/global_struct_fields.lap` does that and prints `0`, then `12`.
+
+### The address of a struct literal
+
+`&P { ... }` is the address of the literal (0.45.3). The literal is built as every literal is (all its bytes 0, then the fields it names) in a slot of its own in the frame of the function, and the address of that slot is the value: a `*P`. The slot's life is the function's: it is reserved once in the frame, no other expression uses it, and it holds the struct until the function returns, as a local declared there would. Each `&P { ... }` in the source has its own slot, so two in one expression (`pair(&P { ... }, &P { ... })`) are two structs, and a recursive call has its own. A field of a literal may be another one: `&Node { v: 1, next: &Node { v: 2, next: 0 } }` builds both in the frame. This prints 20 (`lit_ok.lap`):
+
+```
+struct Point { x: i64, y: i64 }
+
+fn norm1(p: *Point) -> i64 { return p.x + p.y; }
+
+fn main() -> i32 {
+    let a: *Point = &Point { x: 3, y: 4 };
+    let b: *Point = &Point { x: 10 };
+    print_int(norm1(a) + norm1(b) + norm1(&Point { x: 1, y: 2 }));
+    println("");
+    return 0;
+}
+```
+
+Before 0.45.3 `&P { ... }` compiled and computed no address: the pointer was whatever `rax` held (the address of the last array, a 0, a count), so a read through it read another variable or crashed, and a store wrote over another variable.
+
+Where the slot would not be safe, it is a compile error, before any code is generated (`lit_bad.lap`):
+
+```
+struct Point { x: i64, y: i64 }
+
+fn origin() -> *Point {
+    return &Point { x: 0, y: 0 };
+}
+
+fn main() -> i32 {
+    let ps: [*Point; 3];
+    for i in 0..3 {
+        ps[i] = &Point { x: i, y: 0 };
+    }
+    return 0;
+}
+```
+
+```
+lit_bad.lap:4:12: error: cannot return &Point { ... }: the literal lives in this function's frame, which is gone after the return; declare the function '-> Point' and return Point { ... }
+      4 |     return &Point { x: 0, y: 0 };
+        |            ^
+lit_bad.lap:10:17: error: &Point { ... } in a loop: every iteration would reuse its one slot while a pointer from an earlier one may still be held; declare it before the loop (let t: Point = Point { ... };) and take &t, or, for one per iteration, an array before the loop (let a: [Point; N];) and take &a[i]
+     10 |         ps[i] = &Point { x: i, y: 0 };
+        |                 ^
+2 errors, compilation failed
+```
+
+- `return &P { ... }`, also under a cast (`return &P { ... } as *u8`): the frame is gone after the return. Fix: `-> P` and `return P { ... }` (see Returning a struct).
+- `&P { ... }` anywhere in a loop: its body, its condition, or the step of a `for (...; ...; step)`. The one slot would be built again by every iteration, while a pointer taken in an earlier one may still be held. Fix: one value for the whole loop, `let t: P = P { ... };` before it and `&t` inside; one per iteration, an array before it, as `lit_fixed.lap` does:
+
+```
+struct Point { x: i64, y: i64 }
+
+fn origin() -> Point {
+    return Point { x: 0, y: 0 };
+}
+
+fn main() -> i32 {
+    let o: Point = origin();
+    let pts: [Point; 3];
+    let ps: [*Point; 3];
+    for i in 0..3 {
+        pts[i].x = i;
+        pts[i].y = 0;
+        ps[i] = &pts[i];
+    }
+    print_int(o.x + ps[0].x + ps[1].x + ps[2].x);
+    println("");
+    return 0;
+}
+```
+
+prints 3.
+- In a `naked` or `bits 16`/`bits 32` function, which has no frame: `cannot take the address of a struct literal here (a naked or bits 16/32 function has no frame for it); use a global: let g: P; set its fields, then &g`.
+- In the initializer of a global: `the initializer of global 'gp' is not a constant expression: an address (&x)` (unchanged; an address is not folded into `.data`). Declare the struct as a global too (`let g: P;`, `let gp: *P;`) and set `gp = &g;` and the fields at the start of `main`.
+
+Not detected: the pointer kept in a variable and returned, or stored where it outlives the function (`let q = &P { ... }; return q;`, `out.next = &P { ... }` through a parameter). That is the same mistake as `return &t` of a local `t`, which the compiler does not detect either. Tests: `tests/lang/struct_lit_addr.lap` (several literals alive at once, two in one call, read again in a loop after calls that dirty their frames, one per frame in a recursion, a list of nested literals), `tests/errors/memfix_lit_addr.lap`, `memfix_lit_addr_naked.lap`, and `tests/memfix/kernel_lit_addr.lap` under QEMU (`--flat` at `-O0` and `-O2`).
 
 ### Local arrays and `&a[i]`
 
@@ -630,7 +785,7 @@ What folds: integer and character literals, `const` names, parentheses, `+ - * /
 
 An array initializer folds each element the same way, against the element type (`let t: [u8; 3] = [1, 2, 256]` is `expected u8, found integer literal 256` on the element's column). A string initializes a `[u8; N]` array (the bytes and a 0), a `*u8` pointer, or an untyped global (the address of the string).
 
-What does not fold is an error on the `let`, with the file, line and column of the expression, and no output file. The message is `the initializer of global 'x' is not a constant expression: <what>`, where `<what>` is `a call`, `the name 'g', which is not a const` (another global or any variable), `an address (&x)`, `a string literal` (in an integer slot or an array element), `a struct literal`, `a field access`, `an index expression`, `a pointer dereference`. An array element says `element 1 of the initializer of global 'a' is not a constant expression: a call`. Division or remainder by zero is `the initializer of global 'x' divides by zero`, and an array global initialized with something that is not an array literal or a string is `the initializer of global 'x' must be an array literal or a string`. A global that needs run-time code is set in a function (`fn init() { g = f(); }`). Before 0.44.5 these compiled, left the symbol undefined, and failed in nasm (``symbol `x' not defined``) or, in an array, put a 0 in its place without a word. It holds for every way of building: hosted (native and `--nasm`), `-c`, `--freestanding`, `--flat`, `--axe1`, `--axe2`, `--elf` and `--boot`.
+What does not fold is an error on the `let`, with the file, line and column of the expression, and no output file. The message is `the initializer of global 'x' is not a constant expression: <what>`, where `<what>` is `a call`, `the name 'g', which is not a const` (another global or any variable), `an address (&x)`, `a string literal` (in an integer slot or an array element), `a struct literal; declare the global without an initializer (every field starts at 0) and set its fields at run time, e.g. at the start of main` (the second half since 0.45.3; see Passing a struct, `origin.lap`), `a field access`, `an index expression`, `a pointer dereference`. An array element says `element 1 of the initializer of global 'a' is not a constant expression: a call`. Division or remainder by zero is `the initializer of global 'x' divides by zero`, and an array global initialized with something that is not an array literal or a string is `the initializer of global 'x' must be an array literal or a string`. A global that needs run-time code is set in a function (`fn init() { g = f(); }`). Before 0.44.5 these compiled, left the symbol undefined, and failed in nasm (``symbol `x' not defined``) or, in an array, put a 0 in its place without a word. It holds for every way of building: hosted (native and `--nasm`), `-c`, `--freestanding`, `--flat`, `--axe1`, `--axe2`, `--elf` and `--boot`.
 
 Not part of this: a global of an `enum` type cannot be initialized (it "starts at zero"; assign it in a function), a struct global takes no literal (`a struct literal` above; assign its fields in a function), and `[]T` slices keep their own rule (an array, a slice or a string). A global whose name is a NASM keyword (`word` is one) still fails in nasm.
 
@@ -930,7 +1085,7 @@ As in Rust, bitwise operators bind tighter than comparisons: `x & 2 == 2` means 
 
 ## Type checking
 
-A direct assignment (`let`, `x = e`, `a[i] = e`, `s.f = e`, `p->f = e`), a direct call, and `return` check integer and pointer types. A mismatch is `file:line:col: error: expected T, found U`, with the source line and a caret. A call says `argument N of 'f': expected T, found U` (N starts at 1). Since 0.45.2 a direct call also checks a struct against its parameter: a struct parameter takes that same struct, and a pointer parameter does not take a struct (see Passing a struct for the messages and their fixes). A return says `return value: expected T, found U`. The compiler keeps going and ends with `1 error, compilation failed` or `N errors, compilation failed`.
+A direct assignment (`let`, `x = e`, `a[i] = e`, `s.f = e`, `p->f = e`), a direct call, and `return` check integer and pointer types. A mismatch is `file:line:col: error: expected T, found U`, with the source line and a caret. A call says `argument N of 'f': expected T, found U` (N starts at 1). Since 0.45.2 a direct call also checks a struct against its parameter: a struct parameter takes that same struct, and a pointer parameter does not take a struct (see Passing a struct for the messages and their fixes). Since 0.45.3 a field access `x.f` checks that `x` is a struct or a pointer to one and that its struct has `f` (see Field access). A return says `return value: expected T, found U`. The compiler keeps going and ends with `1 error, compilation failed` or `N errors, compilation failed`.
 
 `as` converts on purpose. It is allowed between any two types. A cast to a pointer or to `i64` / `u64` emits no instruction. A cast to `i8` / `u8` / `i16` / `u16` / `i32` / `u32` keeps the low bits: unsigned zero-extends (`300 as u8` is 44), signed sign-extends (`200 as i8` is -56). That explicit cast is not a range error.
 
@@ -1299,6 +1454,7 @@ The regression suite compares the hexdump at `-O0` and `-O2`. When `qemu-system-
 - An `enum` is a tag `i64` and a payload of integers and pointers. It can be returned (hidden pointer in `rdi`), passed by value, stored in a global or a struct field, and matched with `_` or a block arm. It is not an element of a slice, an array, or a `vec`. `match` of a call, a constructor, or `*p` of the enum still needs a local. There is no `|` pattern, no guard, and no named field. `bits 16`, `bits 32`, `naked`, and a `module` reject the value. A literal arm is `i64`. Without `_`, the corrupt-tag path is `ud2`. Hosted `-O2` compares the tag once from `rbx`. A generic enum whose substituted field stays an integer or a pointer is `enum Option<T>` (see Traits). A field that becomes a struct is rejected. `enum Result<T, E> { Ok(T), Err(E) }` is that enum, written by the program. `expr?` is the match that returns `Err` early (see Errors). An arm block may `return` instead of yielding a value. See Enums.
 - A generic function or struct is one monomorphized copy per used combination of integer, pointer, or struct arguments. The copy is an ordinary function or struct. A trait bound (`T: Ord`) is checked on that copy and the call is the impl symbol. There is no vtable (see Traits). An operation with no trait is still `cannot apply '+' to 'Point' in 'add<Point>'`. A type argument cannot be an enum, a slice, an array, a `vec`, or `own *T`. Two `-c` objects that emit the same copy still collide at `ld`. `vec` is not a generic type. `enum Option<T>` is one test, not a rewrite of every `Option`. `Result<T, E>` is a user enum on the same copy, and `?` does not convert `E`. See Generics, Traits, and Errors.
 - Direct calls check the function name, the argument count, and argument types. Assignments and integer or pointer returns are checked. Indirect calls are not. `*i8` and `*u8` match. An integer literal converts to any pointer; a variable does not, without `as`.
+- `&P { ... }` lives until its function returns (0.45.3): returning it directly and taking it in a loop are errors, but a pointer to it kept in a variable and returned, or stored where it outlives the function, is not detected, the same as `return &t` of a local. The index of a `[T; N]` field and of a global array is not checked against `N`, also for a field store into an element (`s.pts[i].y = v`).
 - Struct fields use their real width. Ordinary structs add natural alignment; `packed struct` does not, unless `align(N)` says so. `align(N)` is a power of two from 1 to 4096 on a struct, a field, or a global. Locals are not aligned that way. An array field is `N * sizeof(T)` or a compile error. `sizeof` and `offsetof` are compile-time integers. A narrow integer operator truncates to that type; `i64` and `u64` stay 64-bit. Scalar locals and globals still occupy 8-byte slots. Struct assignment copies the whole value; it does not assign field by field in the source. Nested fields (`r.b.x`) use the real offset.
 - `str` is `[]u8`: a pointer and a length, 16 bytes. A literal is that slice only in a `str` or `[]u8` destination. `a == b` compares the bytes. `s[i..j]` is a local slice. `print(s)` is `write` of the pointer and the length, with no libc. There is no UTF-8, no heap string, and no returning a `str`. An enum field cannot be a `str`. See Strings.
 - Indexing a local array in hosted mode inserts a bounds check that exits the process; `&a[i]` of a local array is checked the same way, against the declared length (0.45.1). Since 0.45.2 that length is also the bound of an array of structs (it was the count of 8-byte slots), and a store to a field of an element (`a[i].x = v`) is checked like the read. `--freestanding`, `--flat`, and `--boot` omit that check unless `--checked`. `unsafe { a[i] }` omits it. `for i in 0..N` omits it when the array has at least `N` elements, including under `--checked`. `bits 16` and `bits 32` do not insert it. Pointer indexing is never checked. A slice `s[i]` is checked in hosted code and writes `index out of range` before exiting with code 1. `--freestanding`, `--flat`, and `--boot` omit that check unless `--checked`. `unsafe { s[i] }` and `s.ptr[i]` omit it in every mode. `for x in s` and `for i in 0..s.len` omit it when the bound is the loop itself.

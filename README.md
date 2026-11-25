@@ -10,7 +10,7 @@
 
 A systems programming language with its own compiler, written in C with an x86-64 NASM back end. It produces Linux x86-64 ELF executables **with no libc and no runtime**, and it can also produce freestanding code for kernels and boot sectors. *Formerly Chronos.*
 
-Current version: **0.45.2** (`compiler/bootstrap-c/copihue.c`, `LANG_VERSION`). Release notes are in [CHANGELOG.md](CHANGELOG.md).
+Current version: **0.45.3** (`compiler/bootstrap-c/copihue.c`, `LANG_VERSION`). Release notes are in [CHANGELOG.md](CHANGELOG.md).
 
 > **Status: not production-ready.** It is a tested compiler for a small but real language. Memory safety is partial (checked slices and indexes, `own *T` moves) and there is no borrow checker: a `vec` slice can dangle after a push. Linux x86-64 only. The goal is a language that beats C++, Rust and OCaml; today it does not, and the numbers below say where it stands.
 
@@ -74,9 +74,9 @@ Two levels of syntax. The **easy level** lets the compiler decide: an omitted pa
 - Enums with data and exhaustive `match`, `Option<T>`, `Result<T, E>` and `?` ([DESIGN_ENUMS](docs/DESIGN_ENUMS.md), [DESIGN_ERRORS](docs/DESIGN_ERRORS.md)).
 - Generics by monomorphization and traits without vtables ([DESIGN_GENERICS](docs/DESIGN_GENERICS.md), [DESIGN_TRAITS](docs/DESIGN_TRAITS.md)).
 - Atomics, `fence`, and hosted threads (`thread_spawn`, `thread_join`, `sched_setaffinity`) without libc.
-- Three struct rules of 0.45.2, below: the bound of an array of structs, the fields a literal does not name, and the type of a struct argument.
+- Struct rules, below: the bound of an array of structs, the fields a literal does not name, and the type of a struct argument (0.45.2); the address of a literal, `&Point { ... }`, and which values have fields (0.45.3).
 
-### Structs: three rules (0.45.2)
+### Structs: the rules (0.45.2, 0.45.3)
 
 **1. An index past the end of a local array stops the program, also for an array of structs.** In hosted code (and with `--checked` in kernel modes) every read and every store of `a[i]`, `a[i].x`, `a[i] = q` and `&a[i]` compares `i` with the length `N` of `[T; N]`. Before 0.45.2 an array of structs larger than 8 bytes was compared with its count of 8-byte slots, and a store to a field of an element was not compared at all, so `pts[2].x = 7` on `[Point; 2]` wrote past the array and the program went on.
 
@@ -97,13 +97,16 @@ fn main() -> i32 {
 
 The output is `7`, then `Array bounds error\` on standard error (the text ends in a backslash, without a newline), and the exit code is 1. Fix: keep the index below the length (with `for i in 0..2` the compiler knows it and omits the check), or declare a longer array. Global arrays and `[T; N]` fields are not checked.
 
-**2. A field a struct literal does not name is 0.** `let p: Point = Point { y: 9 }` gives `p.x == 0`, in a `let`, an element of an array literal, a nested literal, an argument and a `return`. Before 0.45.2 a `let` and an array element kept whatever the stack held there. A global cannot take a literal: `let origin: Point = Point { y: 0 };` is
+**2. A field a struct literal does not name is 0.** `let p: Point = Point { y: 9 }` gives `p.x == 0`, in a `let`, an element of an array literal, a nested literal, an argument, a `return` and `&Point { ... }`. Before 0.45.2 a `let` and an array element kept whatever the stack held there. A global cannot take a literal: `let origin: Point = Point { y: 0 };` is
 
 ```
-origin.lap:3:27: error: the initializer of global 'origin' is not a constant expression: a struct literal
+origin.lap:3:27: error: the initializer of global 'origin' is not a constant expression: a struct literal; declare the global without an initializer (every field starts at 0) and set its fields at run time, e.g. at the start of main
+      3 | let origin: Point = Point { y: 0 };
+        |                           ^
+1 error, compilation failed
 ```
 
-Fix: `let origin: Point;` (a global starts at zero) and set the other fields in `main`.
+Fix, as the message says (since 0.45.3; before, it did not say): `let origin: Point;`, then `origin.x = 1;` and the other fields at the start of `main` (`tests/lang/global_struct_fields.lap`).
 
 **3. A struct argument must be the parameter's struct, and a pointer parameter takes `&x`, not `x`.** With `fn norm1(p: Point)` and `fn move_right(p: *Point)`, `norm1(p)` and `move_right(&p)` compile. These do not:
 
@@ -118,6 +121,83 @@ points.lap:11:16: error: argument 1 of 'move_right': expected *Point, found Poin
 ```
 
 Before 0.45.2 both compiled: `norm1(s)` read 16 bytes from an 8-byte `Size`, `norm1(5)` read at address 5 and crashed, and a struct given to `*Point` was taken as a `Point`. Fix: pass a value of the parameter's struct (`norm1(p)`), its address for a pointer (`move_right(&p)`), or `*pp` when you hold a `*Point`. Each message says which. This rule (R2 of [DESIGN_SECURITY](docs/DESIGN_SECURITY.md)) can break code that compiled before; see [CHANGELOG.md](CHANGELOG.md) 0.45.2. Details and every message: [reference, Passing a struct](docs/REFERENCE.md#passing-a-struct).
+
+**4. `&Point { ... }` is the address of the literal (0.45.3).** The literal is built in a slot of its own in the function's frame (the fields it does not name are 0), and that slot lives until the function returns, like a local declared there. Each `&Point { ... }` in the source has its own slot, so two in one call are two structs. This prints 20:
+
+```
+struct Point { x: i64, y: i64 }
+
+fn norm1(p: *Point) -> i64 { return p.x + p.y; }
+
+fn main() -> i32 {
+    let a: *Point = &Point { x: 3, y: 4 };
+    let b: *Point = &Point { x: 10 };
+    print_int(norm1(a) + norm1(b) + norm1(&Point { x: 1, y: 2 }));
+    println("");
+    return 0;
+}
+```
+
+Before 0.45.3 it compiled without computing the address: the pointer was whatever a register held, and the program read another variable or crashed (`segfault` on Linux). Where the slot would not be safe, it is a compile error (`lit_bad.lap`): after `return` the frame is gone, and in a loop every iteration would reuse the one slot while a pointer from an earlier one may still be held.
+
+```
+lit_bad.lap:4:12: error: cannot return &Point { ... }: the literal lives in this function's frame, which is gone after the return; declare the function '-> Point' and return Point { ... }
+      4 |     return &Point { x: 0, y: 0 };
+        |            ^
+lit_bad.lap:10:17: error: &Point { ... } in a loop: every iteration would reuse its one slot while a pointer from an earlier one may still be held; declare it before the loop (let t: Point = Point { ... };) and take &t, or, for one per iteration, an array before the loop (let a: [Point; N];) and take &a[i]
+     10 |         ps[i] = &Point { x: i, y: 0 };
+        |                 ^
+2 errors, compilation failed
+```
+
+Fix: `fn origin() -> Point { return Point { x: 0, y: 0 }; }`, and for the loop `let pts: [Point; 3];` before it, then `pts[i].x = i; ps[i] = &pts[i];` inside. A pointer kept in a variable and returned later (`let q = &Point { ... }; return q;`) is not detected, the same as `return &t` of a local: do not return the address of anything in the frame. Details: [reference, The address of a struct literal](docs/REFERENCE.md#the-address-of-a-struct-literal).
+
+**5. Only a struct, or a pointer to one, has fields (0.45.3).** `x.f` reads or stores the field `f` when `x` is a struct or a pointer to a struct that has `f`: a local, a global, a parameter, an element (`pts[i].x`), a field (`r.a.x`), and through a pointer at any step (`head.next.v` with `next: *Node`, a global `*Node`, `ps[i].x` with `ps: [*Point; N]`, `getp().x`). An element of an array field takes a field store like any element: `s.pts[i].y = 5` with `pts: [Point; 3]`. This prints 28:
+
+```
+struct Point { x: i64, y: i64 }
+struct Node { v: i64, next: *Node }
+
+let head: *Node = 0;
+
+fn main() -> i32 {
+    let pts: [Point; 4];
+    let i: i64 = 1;
+    pts[i].x = 7;
+    let a: Node;
+    let b: Node;
+    a.v = 1;
+    b.v = 2;
+    a.next = &b;
+    b.next = 0;
+    a.next.v = 20;
+    head = &a;
+    print_int(pts[i].x + head.v + head.next.v);
+    println("");
+    return 0;
+}
+```
+
+Anything else is a compile error that names the value and its type (`field_bad.lap`, `shape_bad.lap`):
+
+```
+field_bad.lap:8:5: error: a[i] has type i64, which has no field 'x'; only a struct or a pointer to a struct has fields
+      8 |     a[i].x = 7;
+        |     ^
+field_bad.lap:9:5: error: a has type [i64; 4], which has no field 'x'; only a struct or a pointer to a struct has fields
+      9 |     a.x = 7;
+        |     ^
+field_bad.lap:10:5: error: struct 'Point' has no field 'z'
+     10 |     p.z = 7;
+        |     ^
+3 errors, compilation failed
+shape_bad.lap:6:5: error: s.pts has type [Point; 3], which has no field 'y'; index it first: s.pts[i].y
+      6 |     s.pts.y = 5;
+        |     ^
+1 error, compilation failed
+```
+
+Before 0.45.3 `a[i].x = 7` compiled and the store was dropped (`a[i] = 0; a[i].x = 7; print_int(a[i])` printed 0), and a read of `a[i].x`, `a.x` or `p.z` gave whatever a register held, with no message (their stores were already errors, with other messages). `head.next.v`, a field through a global pointer and `ps[i].x = v` loaded nothing or dropped the store too, though they are correct; `s.pts[i].y = 5` was refused (`the assignment target is not assignable: the expression has type Point, not a pointer`), and `q.arr[i].x = v` with `arr: [*Point; 2]` wrote into the array itself, over the next field. Fix: give the value a struct type (`let a: [Point; 4]`), store the element itself (`a[i] = 7`), index an array before its field, or use a field the struct has. This can break code that compiled before; see [CHANGELOG.md](CHANGELOG.md) 0.45.3. Details: [reference, Field access](docs/REFERENCE.md#field-access).
 
 A trait and a generic function (from `tests/lang/trait.lap`):
 

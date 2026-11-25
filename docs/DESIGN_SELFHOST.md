@@ -156,6 +156,8 @@ Cuando S0 esté firmado, el siguiente ticket es **S1**: devolver `str`/`[]T` y `
 
 **0.45.2 (2026-11-10), rama `fix/struct-bounds`:** los hallazgos 10, 11 y 12 de [DESIGN_SELFHOST_S1.md](DESIGN_SELFHOST_S1.md) §7 (el límite de un arreglo local de structs es su largo, `a[i].x = v` se comprueba como la lectura, un literal de struct pone en cero los campos que no nombra) y la mitad de R2 de SEC-1 que toca al argumento struct. De SEC-1 quedan, antes de S2, `==` entre structs y R3.
 
+**0.45.3 (2026-11-25), rama `fix/struct-addr`:** el hallazgo 4 de [DESIGN_SELFHOST_S1.md](DESIGN_SELFHOST_S1.md) §7 (`x.y` sobre algo que no es struct es error de compilación; un campo por un puntero que no es un nombre local se lee y se escribe) y los 16, 17, 19, 20 y 22 (`&P { ... }` da la dirección de un slot propio del frame; `h.ps[i].y = v` sobre un campo arreglo; el mensaje del literal en un global; el trap de límites en un solo lugar). Antes de S2 siguen SEC-1 (`==` entre structs, el struct como valor, R3) y el hallazgo 18 (límites de arreglos globales y campos `[T; N]`).
+
 ## 7. Referencias
 
 - [SELFHOST_S0.md](SELFHOST_S0.md) — fase S0: inventario de módulos, corpus de igualdad y huecos de S1.

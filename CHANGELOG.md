@@ -2,6 +2,56 @@
 
 Todos los cambios importantes del proyecto.
 
+## [0.45.3] - 2026-11-25
+
+Parche: `&P { ... }` sin dirección, campos de algo que no es struct, la escritura en un elemento de un campo arreglo y dos mensajes; los hallazgos 4, 16, 17, 19, 20 y 22 de [DESIGN_SELFHOST_S1.md](docs/DESIGN_SELFHOST_S1.md) §7. Regla de siempre: nada corrompe memoria en silencio; lo que no queda seguro es error de compilación.
+
+### Fixed
+- **`&P { ... }` da la dirección del literal** (hallazgo 16). Compilaba sin emitir la dirección: el puntero era lo que hubiera en `rax` (en Linux, con 0.45.2, `show(&P { x: 10, y: 20 })` caía con segfault a `-O0` y `-O2`). Ahora `gen_addr_of` arma el literal con la forma única de 0.45.2 (`gen_struct_literal_temp`: en cero, después los campos) en un slot propio del frame y deja su dirección. **Vida del temporal:** un slot por cada `&P { ... }` del código fuente, que ninguna otra expresión usa y que vive hasta que la función retorna, como un local declarado ahí; dos en la misma expresión son dos structs; una recursión tiene uno por frame. Freestanding y `--flat` usan el mismo código (QEMU).
+- **Un campo de algo que no es struct, o que el struct no tiene, es error de compilación** (hallazgos 4 y 17). `a[i].x = 7` con `a: [i64; 4]` compilaba y la escritura se perdía (con 0.45.2, en Linux, imprimía 0 y salía 0); la lectura de `a[i].x`, `n.x`, `a.x`, `h.k[i].x`, `pi.x` (`*i64`), `p.z` (campo inexistente) daba lo que hubiera en un registro, y varias escrituras (`h.n.x = 7`, `ph.n.x = 7`, `pi[i].x = 7`, `b[i].x = 7`) se perdían, todo sin aviso. Un único chequeo, `check_field_access`, antes de leer y antes de escribir (donde se tipa el dueño del campo, `obj_record_type`):
+  - `a[i] has type i64, which has no field 'x'; only a struct or a pointer to a struct has fields`
+  - `s.pts has type [Point; 3], which has no field 'y'; index it first: s.pts[i].y`
+  - `struct 'Point' has no field 'z'`, `'f' does not return a struct; it has no field 'x'`, `use of undeclared variable 'zz'`
+- **Un campo por un puntero que no es un nombre local se lee y se escribe.** `a.next.v` con `next: *N`, `gq.y` con `gq: *P` global, `ps[i].x = v` con `ps: [*P; N]` y `(raw as *P).y` no cargaban nada o perdían la escritura, sin aviso; `getp().y` con `getp() -> *P` era un error falso (la escritura sí compilaba). Ahora un campo `*S`, un elemento `*S`, una llamada que devuelve `*S` y un cast a `*S` son dueños de los campos de `S`, y `gen_field_addr` toma su valor como la dirección.
+- **`h.ps[i].y = v` con `ps: [P; N]` campo compila y escribe** (hallazgo 19). Era error falso (`the assignment target is not assignable: the expression has type P, not a pointer`), y `q.arr[i].x = v` con `arr: [*P; 2]` tomaba el elemento como un `P` (paso 16) y escribía dentro del arreglo, sobre el campo siguiente (con 0.45.2, `q.guard` pasaba de 77 a 9). Todo elemento toma el camino común: `gen_field_addr` → `gen_struct_addr` → `gen_array_index` (un campo arreglo por `gen_embedded_array`), la dirección de la lectura. Un campo `[T; N]` sigue sin comprobación de índice (regla documentada; el camino común no la tiene).
+- **El literal struct en un global dice cómo arreglarlo** (hallazgo 20): `...: a struct literal; declare the global without an initializer (every field starts at 0) and set its fields at run time, e.g. at the start of main`.
+- **El trap de límites se escribe en un solo lugar** (hallazgo 22): `bounds_trap_text` (el texto) y `emit_bounds_check` (el chequeo en línea) reemplazan cuatro copias; `emit_bounds_hot` (-O2) usa el mismo texto. Sin cambio de salida.
+
+### Changed
+- **Qué puede romper:**
+  - Un acceso de campo sobre algo que no es un struct ni un puntero a uno (`a[i].x` con un arreglo de enteros, `n.x`, `a.x` sobre un arreglo, `h.k.x` con `k: [i64; 2]`, `h.ps.y` con `ps: [P; N]`), o a un campo que el struct no tiene, ya no compila. Antes la lectura daba basura y la escritura se perdía; el arreglo es el que dice el mensaje (dar un tipo struct, indexar primero, escribir el elemento `a[i] = v`, usar un campo que existe).
+  - `return &P { ... }` (también con `as`) es error: `cannot return &P { ... }: the literal lives in this function's frame, which is gone after the return; declare the function '-> P' and return P { ... }`.
+  - `&P { ... }` dentro de un loop (cuerpo, condición o paso de un `for`) es error: `&P { ... } in a loop: every iteration would reuse its one slot while a pointer from an earlier one may still be held; declare it before the loop (let t: P = P { ... };) and take &t, or, for one per iteration, an array before the loop (let a: [P; N];) and take &a[i]`.
+  - En una función `naked` o `bits 16/32`, `&P { ... }` es `cannot take the address of a struct literal here (a naked or bits 16/32 function has no frame for it); use a global: let g: P; set its fields, then &g`.
+  - Antes ninguno de los tres casos de `&P { }` daba una dirección, así que no rompen un programa que funcionara.
+- Un local tapa a un global del mismo nombre al buscar el struct de un campo (`var_record_type`); antes un local que no era struct dejaba contestar a un global struct de su nombre. Un slice o un vec no son structs para un acceso de campo (su `type_name` es el elemento).
+- Mensajes cambiados: `n.f = v` con `n` escalar era `...: 'n' is not a struct or a pointer to one` y es `n has type i64, which has no field 'f'; only a struct or a pointer to a struct has fields`; `f(x).f = v` con `f` entera era `...: field 'f' of an expression that is not a struct or a pointer to one` y es `'f' does not return a struct; it has no field 'f'`.
+- Un campo `[P; N]` usado como struct entero (`h.ps = q`, `let t: P = h.ps`, `sum(h.ps)`) sigue siendo su primer elemento, como antes; solo sus campos (`h.ps.y`) son error.
+
+### Archivos existentes que cambiaron
+- `compiler/bootstrap-c/copihue.c`: los arreglos de arriba (`gen_addr_of`, `gen_struct_literal_addr`, `check_literal_addresses`, `literal_temp_type`; `check_field_access`, `obj_record_type`, `expr_struct_type`, `var_record_type`, `index_elem_type`, `gen_field_addr`, `gen_field_load`; la escritura de campo de `gen_expr`; `gconst_eval`; `bounds_trap_text`, `emit_bounds_check`); `LANG_VERSION` 0.45.3.
+- `tests/expected/errors/assign_scalar_field.err` y `assign_field_of_call.err`: los dos mensajes de arriba. `tests/expected/errors/ginit_other.err`: el mensaje del literal struct en un global.
+- `tests/memfix/run.sh` y `tests/memfix/progs.txt`: los programas y kernels nuevos.
+- `tools/selfhost/corpus.txt`: regenerado con `tools/selfhost/corpus-list.sh`, de 252 a 258 programas (los seis `tests/lang/` nuevos).
+- Ningún golden de bytes (hex) cambia: el código de los programas existentes es el mismo.
+
+### Tests
+- Programas nuevos con golden **escrito a mano** (no se ejecutaron en esta máquina, macOS; los corre `tests/run_tests.sh` en Linux). "Con 0.45.2" sale del asm, no de ejecutarlo:
+  - `tests/lang/struct_lit_addr.lap`: varios `&P { }` vivos a la vez, dos en una llamada, uno leído de nuevo en un loop después de llamadas que ensucian su frame, uno por frame en una recursión, y una lista de literales anidados. Espera `34 70 56 4321 1521 64 65 123`. Con 0.45.2 los dos primeros apuntan a `junk` (imprime `-11` dos veces) y el tercero recibe 0 como puntero: segfault.
+  - `tests/lang/field_ptr_chain.lap`: `a.next.v` (lectura y escritura), un global `*P`, `ps[i].x` con `ps: [*P; 2]`, un cast y un campo `[*P; 2]`. Espera `2 3 20 30 5 50 7 60 7 7`; con 0.45.2: `0 0 2 3`, una dirección, `5 7 6`, otra dirección, `7`.
+  - `tests/lang/field_ptr_call.lap`: `getp().y` y `getp().x = 9`. Espera `4 18`; con 0.45.2 no compila (error falso).
+  - `tests/lang/struct_field_arr.lap`: `h.ps[i].y = v` en un loop, por un `*H` y anidado en otro struct. Espera `5 62 78 67 9216`; con 0.45.2 no compila (6 errores falsos).
+  - `tests/lang/struct_field_arr_ptr.lap`: `q.arr[i].x = 9` con `arr: [*P; 2]`. Espera `9 77 94`; con 0.45.2 escribe sobre `q.guard`: `6 9 64`.
+  - `tests/lang/global_struct_fields.lap`: la sugerencia del mensaje del global (sin inicializador, campos en `main`). Espera `0 12`; con 0.45.2 da lo mismo (prueba que la sugerencia compila y funciona).
+- Errores, con `.err` generado y revisado, rechazados por `tests/memfix/run.sh` en nativo `-O0`/`-O2`, `--nasm`, `-c`, `--freestanding` y `--flat` con el mismo primer mensaje y línea: `tests/errors/memfix_lit_addr.lap` (4 en loops, 2 en `return`; con 0.45.2 compila), `memfix_lit_addr_naked.lap` (con 0.45.2 compila), `memfix_field_elem.lap` (el reporte; con 0.45.2 compila), `memfix_field_owner.lap` (20 errores; con 0.45.2, 3).
+- **Ejecutado en esta Mac, en QEMU** (`tests/memfix/run.sh`, `--flat 0x8000`, `-O0` y `-O2`): `tests/memfix/kernel_lit_addr.lap` (tres `&P { }` vivos, uno anidado, una llamada que ensucia su frame, una escritura por uno de ellos) y `tests/memfix/kernel_field_ptr.lap` (puntero campo, global puntero, arreglo de punteros, `h.ps[i].y` y `q.arr[i].x`). Con esta versión COM1 dice `MEMOK`; con 0.45.2, `kernel_lit_addr` no dice nada (cae) y `kernel_field_ptr` sin los checks 6 y 7 dice `FAIL01` (con ellos no compila). `tests/memfix`: 256 comprobaciones, 0 fallas.
+- `-S` de todos los `.lap` de `tests/` y `examples/` contra el compilador de 0.45.2 (con la versión de la rama puesta en 0.45.2, para que la primera línea del asm no cuente), en `-S -O0`/`-O2`, `--freestanding -O0`/`-O2`, `--flat 0x10000 -O0`/`-O2`, `--flat --checked -O0`/`-O2` y `--flat --pic -O0`: **ningún programa existente cambia**; cambian solo los nuevos. Ningún `.err` existente cambia salvo los tres de arriba. El trap unificado da el mismo texto, también el `lea rsi, [rel ...]` de `--pic`.
+- `gcc -O2 -Wall -Werror` y `clang -O2 -Wall -Werror` sin advertencias en cada commit (en esta Mac `gcc` es el clang de Apple). La suite en esta Mac: los dos fallos de siempre (`tests/flat/generic.lap`, `tests/boot/edx_keep.lap`: codificación del nasm 3.02 instalado; con 0.45.2 fallan igual).
+
+### Pendiente
+- Un arreglo global y un campo `[T; N]` no comprueban el índice (hallazgo 18), R3, SEC-2, `==` entre structs y el struct como valor.
+- Hallazgos nuevos (S1 §7, 24 a 27): un puntero a algo del frame que sale por una variable (`let q = &P { ... }; return q;`, y `return &t` de un local) no se detecta; `let t: P = 5`, `= pp` y `= *pp` compilan y dejan `t` sin iniciar; `expr_ty` lee un campo `[T; N]` como su elemento; cada comprobación de límites agrega su copia de la cadena del trap.
+
 ## [0.45.2] - 2026-11-10
 
 Parche: los hallazgos 10, 11 y 12 de [DESIGN_SELFHOST_S1.md](docs/DESIGN_SELFHOST_S1.md) §7 (límites de un arreglo local de structs y campos de un literal sin nombrar) y la mitad de R2 de [DESIGN_SECURITY.md](docs/DESIGN_SECURITY.md) que toca al argumento struct. Regla de siempre: nada corrompe memoria en silencio; lo que no se soporta es error de compilación o trap.
