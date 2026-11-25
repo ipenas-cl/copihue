@@ -12699,7 +12699,7 @@ static int check_field_access(Codegen* cg, AstNode* obj, const char* field, AstN
     }
     place_text(obj, what, sizeof what);
     field_owner_spelling(cg, obj, ty, sizeof ty);
-    if (ty[0] == '[' && ty[1] != ']')
+    if (ty[0] == '[' && ty[1] != ']' && record_or_pointee(cg, index_elem_type(cg, obj)))
         diag_error(STMT_POS(at), "%s has type %s, which has no field '%s'; index it first: %s[i].%s",
                    what, ty, field, what, field);
     else
